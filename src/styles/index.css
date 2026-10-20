@@ -1,0 +1,101 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root,
+[data-theme="tora-midnight"] {
+  --bg-primary: 12 14 20;
+  --bg-secondary: 18 21 30;
+  --bg-tertiary: 26 30 43;
+  --bg-elevated: 33 38 54;
+  --text-primary: 243 244 246;
+  --text-secondary: 156 163 175;
+  --text-muted: 107 114 128;
+  --border-subtle: 39 45 64;
+  --accent-primary: 245 158 11;
+  --accent-hover: 217 119 6;
+}
+
+[data-theme="taiga-classic"] {
+  --bg-primary: 248 250 252;
+  --bg-secondary: 255 255 255;
+  --bg-tertiary: 241 245 249;
+  --bg-elevated: 226 232 240;
+  --text-primary: 15 23 42;
+  --text-secondary: 71 85 105;
+  --text-muted: 100 116 139;
+  --border-subtle: 203 213 225;
+  --accent-primary: 37 99 235;
+  --accent-hover: 29 78 216;
+}
+
+[data-theme="catppuccin-mocha"] {
+  --bg-primary: 24 24 37;
+  --bg-secondary: 30 30 46;
+  --bg-tertiary: 49 50 68;
+  --bg-elevated: 69 71 90;
+  --text-primary: 205 214 244;
+  --text-secondary: 166 173 200;
+  --text-muted: 127 132 156;
+  --border-subtle: 69 71 90;
+  --accent-primary: 203 166 247;
+  --accent-hover: 180 190 254;
+}
+
+[data-theme="tokyo-night"] {
+  --bg-primary: 22 22 30;
+  --bg-secondary: 26 27 38;
+  --bg-tertiary: 36 40 59;
+  --bg-elevated: 47 53 77;
+  --text-primary: 192 202 245;
+  --text-secondary: 154 165 206;
+  --text-muted: 86 95 137;
+  --border-subtle: 47 53 77;
+  --accent-primary: 122 162 247;
+  --accent-hover: 187 154 247;
+}
+
+[data-theme="cyber-sakura"] {
+  --bg-primary: 8 7 12;
+  --bg-secondary: 15 12 22;
+  --bg-tertiary: 26 20 38;
+  --bg-elevated: 38 29 56;
+  --text-primary: 253 242 248;
+  --text-secondary: 216 180 226;
+  --text-muted: 148 112 164;
+  --border-subtle: 54 38 78;
+  --accent-primary: 236 72 153;
+  --accent-hover: 219 39 119;
+}
+
+[data-theme="nordic-frost"] {
+  --bg-primary: 36 41 51;
+  --bg-secondary: 46 52 64;
+  --bg-tertiary: 59 66 82;
+  --bg-elevated: 67 76 94;
+  --text-primary: 236 239 244;
+  --text-secondary: 216 222 233;
+  --text-muted: 143 155 179;
+  --border-subtle: 76 86 106;
+  --accent-primary: 136 192 208;
+  --accent-hover: 129 161 193;
+}
+
+/* Custom sleek scrollbars */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgb(var(--border-subtle) / 0.8);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--accent-primary) / 0.7);
+}
