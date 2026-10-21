@@ -1,5 +1,5 @@
 use crate::db::{Database, LibraryFolder, LocalEpisodeFile};
-use crate::detection::anitomy::{normalize_anime_title, parse_filename};
+use crate::detection::anitomy::{normalize_anime_title, parse_filename, AnitomyElements};
 use rayon::prelude::*;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
@@ -280,7 +280,7 @@ impl Database {
                         .map(|(old_m, old_s)| *old_m == *mtime && *old_s == *size)
                         .unwrap_or(false);
 
-                    let mut elements = parse_filename(&file_name);
+                    let mut elements = parse_filename(&full_str);
 
                     // Fallback to parent directory name if filename only has episode number (e.g., "D:\Anime\Sousou no Frieren\01.mkv")
                     let norm_is_weak = elements.normalized_title.is_empty()
@@ -406,11 +406,20 @@ impl Database {
     pub fn rematch_all_local_episodes(&self) -> Result<usize, String> {
         let matcher = self.build_matcher_index()?;
 
-        let episodes: Vec<(i64, String, String, Option<u32>, Option<i64>, i32)> = {
+        let episodes: Vec<(
+            i64,
+            String,
+            String,
+            String,
+            Option<u32>,
+            Option<u32>,
+            Option<i64>,
+            i32,
+        )> = {
             let conn = self.conn.lock().map_err(|e| e.to_string())?;
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, normalized_title, file_path, episode_number, matched_anime_id, watched
+                    "SELECT id, parsed_title, normalized_title, file_path, episode_number, anime_season, matched_anime_id, watched
                      FROM local_episodes",
                 )
                 .map_err(|e| e.to_string())?;
@@ -423,44 +432,78 @@ impl Database {
                         r.get(3)?,
                         r.get(4)?,
                         r.get(5)?,
+                        r.get(6)?,
+                        r.get(7)?,
                     ))
                 })
                 .map_err(|e| e.to_string())?;
             rows.flatten().collect()
         };
 
-        let mut updates: Vec<(i64, Option<i64>, i32)> = Vec::new();
+        let mut updates: Vec<(
+            i64,
+            Option<i64>,
+            i32,
+            Option<u32>,
+            Option<u32>,
+            String,
+            String,
+        )> = Vec::new();
         let mut matched_count = 0usize;
-        let mut title_cache: HashMap<String, Option<(i64, u32)>> = HashMap::new();
 
-        for (ep_id, norm_title, file_path, ep_num, old_matched_id, old_watched) in &episodes {
-            let resolved = if matcher.custom_folders.is_empty() {
-                if let Some(cached) = title_cache.get(norm_title) {
-                    *cached
-                } else {
-                    let res = matcher
-                        .match_title(norm_title, None)
-                        .map(|(aid, _t, _c, prog, _eps)| (aid, prog));
-                    title_cache.insert(norm_title.clone(), res);
-                    res
-                }
-            } else {
-                matcher
-                    .match_title(norm_title, Some(file_path))
-                    .map(|(aid, _t, _c, prog, _eps)| (aid, prog))
+        for (
+            ep_id,
+            parsed_title,
+            norm_title,
+            file_path,
+            ep_num,
+            season_num,
+            old_matched_id,
+            old_watched,
+        ) in &episodes
+        {
+            let mut ep_elements = AnitomyElements {
+                anime_title: parsed_title.clone(),
+                normalized_title: normalize_anime_title(parsed_title),
+                episode_number: *ep_num,
+                anime_season: *season_num,
+                ..Default::default()
             };
+            if ep_elements.normalized_title.is_empty() {
+                ep_elements.normalized_title = norm_title.clone();
+            }
+
+            let resolved = matcher
+                .match_episode(&mut ep_elements, Some(file_path))
+                .map(|(aid, _t, _c, prog, _eps)| (aid, prog));
 
             let (new_matched_id, new_watched) = match resolved {
                 Some((anime_id, user_progress)) => {
                     matched_count += 1;
-                    let w = ep_num.map(|n| n <= user_progress).unwrap_or(false) as i32;
+                    let w = ep_elements
+                        .episode_number
+                        .map(|n| n <= user_progress)
+                        .unwrap_or(false) as i32;
                     (Some(anime_id), w)
                 }
                 None => (None, 0),
             };
 
-            if *old_matched_id != new_matched_id || *old_watched != new_watched {
-                updates.push((*ep_id, new_matched_id, new_watched));
+            if *old_matched_id != new_matched_id
+                || *old_watched != new_watched
+                || ep_elements.episode_number != *ep_num
+                || ep_elements.anime_season != *season_num
+                || &ep_elements.normalized_title != norm_title
+            {
+                updates.push((
+                    *ep_id,
+                    new_matched_id,
+                    new_watched,
+                    ep_elements.episode_number,
+                    ep_elements.anime_season,
+                    ep_elements.anime_title,
+                    ep_elements.normalized_title,
+                ));
             }
         }
 
@@ -470,12 +513,28 @@ impl Database {
             {
                 let mut stmt = tx
                     .prepare(
-                        "UPDATE local_episodes SET matched_anime_id = ?1, watched = ?2 WHERE id = ?3",
+                        "UPDATE local_episodes
+                         SET matched_anime_id = ?1,
+                             watched = ?2,
+                             episode_number = ?3,
+                             anime_season = ?4,
+                             parsed_title = ?5,
+                             normalized_title = ?6
+                         WHERE id = ?7",
                     )
                     .map_err(|e| e.to_string())?;
-                for (ep_id, matched_id, watched) in updates {
-                    stmt.execute(params![matched_id, watched, ep_id])
-                        .map_err(|e| e.to_string())?;
+                for (ep_id, matched_id, watched, new_ep, new_season, new_title, new_norm) in updates
+                {
+                    stmt.execute(params![
+                        matched_id,
+                        watched,
+                        new_ep,
+                        new_season,
+                        new_title,
+                        new_norm,
+                        ep_id
+                    ])
+                    .map_err(|e| e.to_string())?;
                 }
             }
             tx.commit().map_err(|e| e.to_string())?;

@@ -142,7 +142,7 @@ pub fn parse_rss_xml(
                 if tag_name == "item" && in_item {
                     in_item = false;
                     if !title.is_empty() {
-                        let parsed = parse_filename(&title);
+                        let mut parsed = parse_filename(&title);
                         let magnet_url = if let Some(ref hash) = info_hash {
                             format!(
                                 "magnet:?xt=urn:btih:{}&dn={}&tr=http%3A%2F%2Fnyaa.tracker.wf%3A7777%2Fannounce&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce",
@@ -157,7 +157,7 @@ pub fn parse_rss_xml(
 
                         let matched_anime = matcher
                             .as_ref()
-                            .and_then(|m| m.match_title(&parsed.normalized_title, None));
+                            .and_then(|m| m.match_episode(&mut parsed, None));
                         let (matched_anime_id, matched_anime_title, user_progress) =
                             match matched_anime {
                                 Some((id, t, _cov, prog, _eps)) => (Some(id), Some(t), prog),

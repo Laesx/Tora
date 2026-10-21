@@ -223,6 +223,12 @@ export const toraApi = {
   pollMediaRecognition: () =>
     invoke<DetectedMediaSession | null>("poll_media_recognition"),
 
+  linkDetectedEpisodeToAnime: (animeId: number, aliasTitle: string) =>
+    invoke<DetectedMediaSession | null>("link_detected_episode_to_anime", {
+      animeId,
+      aliasTitle,
+    }),
+
   getWatchHistory: () => invoke<WatchHistoryEntry[]>("get_watch_history"),
 
   searchTorrents: (query: string, provider?: string) =>

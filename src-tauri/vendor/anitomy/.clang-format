@@ -1,0 +1,17 @@
+# Clang-Format Style Options:
+# https://clang.llvm.org/docs/ClangFormatStyleOptions.html
+---
+Language: Cpp
+BasedOnStyle: Google
+
+AccessModifierOffset: -2
+AllowShortFunctionsOnASingleLine: false
+ColumnLimit: 100
+DerivePointerAlignment: false
+IncludeCategories:
+  - Regex: '^<anitomy.*'
+    Priority: 2
+  - Regex: '^<.*'
+    Priority: 1
+  - Regex: '.*'
+    Priority: 3

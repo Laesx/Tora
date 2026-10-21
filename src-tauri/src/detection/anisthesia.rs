@@ -1,8 +1,10 @@
 use crate::detection::anitomy::{parse_filename, AnitomyElements};
-use once_cell::sync::Lazy;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::ffi::{c_char, c_int, c_void};
+
+/// Official upstream Anisthesia player database (`vendor/anisthesia/data/players.anisthesia`).
+pub const UPSTREAM_PLAYERS_DATA: &str =
+    include_str!("../../vendor/anisthesia/data/players.anisthesia");
 
 /// Represents a media player definition from Anisthesia's player registry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,215 +38,7 @@ pub struct DetectedMediaSession {
     pub auto_synced: bool,
 }
 
-static RE_TIMECODE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"\[?\d{1,2}:\d{2}(?::\d{2})?\s*/\s*\d{1,2}:\d{2}(?::\d{2})?\]?").unwrap()
-});
-
-/// Default built-in Anisthesia player database.
-pub fn default_players() -> Vec<PlayerDefinition> {
-    vec![
-        PlayerDefinition {
-            id: "mpv".into(),
-            name: "mpv".into(),
-            executables: vec!["mpv.exe".into(), "mpv".into()],
-            window_classes: vec!["mpv".into()],
-            title_prefixes: vec![],
-            title_suffixes: vec![" - mpv".into(), " — mpv".into()],
-            enabled: true,
-        },
-        PlayerDefinition {
-            id: "mpvnet".into(),
-            name: "mpv.net".into(),
-            executables: vec!["mpvnet.exe".into()],
-            window_classes: vec![],
-            title_prefixes: vec![],
-            title_suffixes: vec![" - mpv.net".into(), " - mpv".into()],
-            enabled: true,
-        },
-        PlayerDefinition {
-            id: "mpc-hc".into(),
-            name: "MPC-HC (Media Player Classic Home Cinema)".into(),
-            executables: vec![
-                "mpc-hc.exe".into(),
-                "mpc-hc64.exe".into(),
-                "mpc-hc_nvo.exe".into(),
-            ],
-            window_classes: vec!["MediaPlayerClassicW".into()],
-            title_prefixes: vec![],
-            title_suffixes: vec![
-                " - MPC-HC".into(),
-                " - Media Player Classic Home Cinema".into(),
-            ],
-            enabled: true,
-        },
-        PlayerDefinition {
-            id: "mpc-be".into(),
-            name: "MPC-BE (Media Player Classic Black Edition)".into(),
-            executables: vec!["mpc-be.exe".into(), "mpc-be64.exe".into()],
-            window_classes: vec!["MPC-BE".into(), "MediaPlayerClassicW".into()],
-            title_prefixes: vec![],
-            title_suffixes: vec![" - MPC-BE".into()],
-            enabled: true,
-        },
-        PlayerDefinition {
-            id: "vlc".into(),
-            name: "VLC media player".into(),
-            executables: vec!["vlc.exe".into()],
-            window_classes: vec!["Qt5QWindowIcon".into(), "QWidget".into()],
-            title_prefixes: vec![],
-            title_suffixes: vec![
-                " - VLC media player".into(),
-                " — VLC media player".into(),
-            ],
-            enabled: true,
-        },
-        PlayerDefinition {
-            id: "potplayer".into(),
-            name: "Daum PotPlayer".into(),
-            executables: vec![
-                "PotPlayerMini64.exe".into(),
-                "PotPlayerMini.exe".into(),
-                "PotPlayer64.exe".into(),
-                "PotPlayer.exe".into(),
-            ],
-            window_classes: vec!["PotPlayer".into(), "PotPlayer64".into()],
-            title_prefixes: vec![],
-            title_suffixes: vec![
-                " - PotPlayer".into(),
-                " - Daum PotPlayer".into(),
-            ],
-            enabled: true,
-        },
-        PlayerDefinition {
-            id: "kmplayer".into(),
-            name: "KMPlayer".into(),
-            executables: vec!["KMPlayer.exe".into(), "KMPlayer64.exe".into()],
-            window_classes: vec!["Winamp v1.x".into()],
-            title_prefixes: vec![],
-            title_suffixes: vec![" - KMPlayer".into(), " - The KMPlayer".into()],
-            enabled: true,
-        },
-        PlayerDefinition {
-            id: "smplayer".into(),
-            name: "SMPlayer".into(),
-            executables: vec!["smplayer.exe".into()],
-            window_classes: vec![],
-            title_prefixes: vec![],
-            title_suffixes: vec![" - SMPlayer".into()],
-            enabled: true,
-        },
-        PlayerDefinition {
-            id: "gom".into(),
-            name: "GOM Player".into(),
-            executables: vec!["GOM.exe".into(), "GOM64.exe".into()],
-            window_classes: vec!["GomPlayer1.x".into()],
-            title_prefixes: vec![],
-            title_suffixes: vec![" - GOM Player".into()],
-            enabled: true,
-        },
-        PlayerDefinition {
-            id: "zoomplayer".into(),
-            name: "Zoom Player".into(),
-            executables: vec!["zplayer.exe".into()],
-            window_classes: vec!["TApplication".into()],
-            title_prefixes: vec![],
-            title_suffixes: vec![" - Zoom Player".into()],
-            enabled: true,
-        },
-        PlayerDefinition {
-            id: "bsplayer".into(),
-            name: "BS.Player".into(),
-            executables: vec!["bsplayer.exe".into()],
-            window_classes: vec!["BSPlayer".into()],
-            title_prefixes: vec![],
-            title_suffixes: vec![" - BS.Player".into()],
-            enabled: true,
-        },
-        PlayerDefinition {
-            id: "kodi".into(),
-            name: "Kodi".into(),
-            executables: vec!["kodi.exe".into()],
-            window_classes: vec!["Kodi".into()],
-            title_prefixes: vec![],
-            title_suffixes: vec![],
-            enabled: true,
-        },
-        PlayerDefinition {
-            id: "wmp".into(),
-            name: "Windows Media Player / Media Player".into(),
-            executables: vec![
-                "wmplayer.exe".into(),
-                "Microsoft.Media.Player.exe".into(),
-                "Video.UI.exe".into(),
-            ],
-            window_classes: vec!["WMPlayerApp".into(), "ApplicationFrameWindow".into()],
-            title_prefixes: vec![],
-            title_suffixes: vec![
-                " - Windows Media Player".into(),
-                " - Media Player".into(),
-                " - Movies & TV".into(),
-                " - Films & TV".into(),
-            ],
-            enabled: true,
-        },
-        PlayerDefinition {
-            id: "haruna".into(),
-            name: "Haruna Media Player".into(),
-            executables: vec!["haruna.exe".into()],
-            window_classes: vec![],
-            title_prefixes: vec![],
-            title_suffixes: vec![" — Haruna".into(), " - Haruna".into()],
-            enabled: true,
-        },
-        PlayerDefinition {
-            id: "bakamplayer".into(),
-            name: "Baka MPlayer".into(),
-            executables: vec!["Baka MPlayer.exe".into()],
-            window_classes: vec![],
-            title_prefixes: vec![],
-            title_suffixes: vec![" - Baka MPlayer".into()],
-            enabled: true,
-        },
-    ]
-}
-
-/// Strip player-specific prefixes, suffixes, timecodes, and playback status symbols from a window title.
-pub fn clean_window_title(raw_title: &str, player: &PlayerDefinition) -> String {
-    let mut title = raw_title.trim().to_string();
-
-    for suffix in &player.title_suffixes {
-        if title.len() > suffix.len()
-            && title
-                .to_lowercase()
-                .ends_with(&suffix.to_lowercase())
-        {
-            let new_len = title.len() - suffix.len();
-            title.truncate(new_len);
-        }
-    }
-
-    for prefix in &player.title_prefixes {
-        if title.len() > prefix.len()
-            && title
-                .to_lowercase()
-                .starts_with(&prefix.to_lowercase())
-        {
-            title = title[prefix.len()..].to_string();
-        }
-    }
-
-    // Remove playback timecodes like [04:12 / 24:10]
-    title = RE_TIMECODE.replace_all(&title, "").to_string();
-
-    // Strip leading play/pause glyphs
-    let title = title
-        .trim_start_matches(['▶', '⏸', '⏹', '•', ' '])
-        .trim();
-
-    title.to_string()
-}
-
-/// Raw window info captured from Win32 EnumWindows.
+/// Raw window & media candidate captured from `anisthesia::win::GetResults`.
 #[derive(Debug, Clone)]
 pub struct RawWindowCandidate {
     pub process_id: u32,
@@ -254,155 +48,352 @@ pub struct RawWindowCandidate {
     pub window_class: String,
 }
 
-#[cfg(windows)]
-pub fn scan_active_player_windows_win32(allowed_exes: &HashSet<String>) -> Vec<RawWindowCandidate> {
-    use windows_sys::Win32::Foundation::{CloseHandle, BOOL, HWND, LPARAM, MAX_PATH};
-    use windows_sys::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
-    };
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
-        IsWindowVisible,
-    };
+extern "C" {
+    fn tora_anisthesia_parse_players(
+        data_ptr: *const c_char,
+        data_len: usize,
+        user_data: *mut c_void,
+        callback: extern "C" fn(
+            *mut c_void,
+            c_int,
+            *const c_char,
+            usize,
+            *const c_char,
+            usize,
+            *const *const c_char,
+            *const usize,
+            usize,
+            *const *const c_char,
+            *const usize,
+            usize,
+        ),
+    ) -> bool;
 
-    struct EnumContext<'a> {
-        self_pid: u32,
-        allowed_exes: &'a HashSet<String>,
-        results: Vec<RawWindowCandidate>,
+    fn tora_anisthesia_detect_media(
+        players_data_ptr: *const c_char,
+        players_data_len: usize,
+        enabled_names_ptrs: *const *const c_char,
+        enabled_names_lens: *const usize,
+        enabled_names_count: usize,
+        user_data: *mut c_void,
+        callback: extern "C" fn(
+            *mut c_void,
+            *const c_char,
+            usize,
+            u32,
+            *const c_char,
+            usize,
+            *const c_char,
+            usize,
+            *const c_char,
+            usize,
+            c_int,
+            *const c_char,
+            usize,
+        ),
+    ) -> bool;
+}
+
+fn slugify_player_id(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut last_dash = true;
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            last_dash = false;
+        } else if !last_dash {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+unsafe fn slice_to_string(ptr: *const c_char, len: usize) -> String {
+    if ptr.is_null() || len == 0 {
+        return String::new();
+    }
+    let bytes = std::slice::from_raw_parts(ptr as *const u8, len);
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+extern "C" fn on_parsed_player(
+    user_data: *mut c_void,
+    player_type: c_int,
+    name_ptr: *const c_char,
+    name_len: usize,
+    window_title_format_ptr: *const c_char,
+    window_title_format_len: usize,
+    windows_ptrs: *const *const c_char,
+    windows_lens: *const usize,
+    windows_count: usize,
+    executables_ptrs: *const *const c_char,
+    executables_lens: *const usize,
+    executables_count: usize,
+) {
+    if user_data.is_null() {
+        return;
     }
 
-    unsafe extern "system" fn enum_window_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
-        if IsWindowVisible(hwnd) == 0 {
-            return 1;
-        }
-
-        let ctx = &mut *(lparam as *mut EnumContext<'_>);
-
-        let mut pid: u32 = 0;
-        GetWindowThreadProcessId(hwnd, &mut pid);
-        if pid == 0 || pid == ctx.self_pid {
-            return 1;
-        }
-
-        // Fast kernel query for executable path BEFORE sending any WM_GETTEXT messages
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if handle.is_null() {
-            return 1;
-        }
-
-        let mut path_buf = [0u16; (MAX_PATH as usize) * 2];
-        let mut size = path_buf.len() as u32;
-        let ok = QueryFullProcessImageNameW(handle, 0, path_buf.as_mut_ptr(), &mut size);
-        CloseHandle(handle);
-
-        if ok == 0 || size == 0 {
-            return 1;
-        }
-
-        let exe_path = String::from_utf16_lossy(&path_buf[..size as usize]);
-        let exe_name = exe_path
-            .rsplit(['\\', '/'])
-            .next()
-            .unwrap_or(&exe_path)
-            .to_string();
-
-        if !ctx.allowed_exes.contains(&exe_name.to_ascii_lowercase()) {
-            return 1;
-        }
-
-        // Only now read window title for confirmed media player processes
-        let text_len = GetWindowTextLengthW(hwnd);
-        if text_len <= 0 || text_len > 2048 {
-            return 1;
-        }
-
-        let mut title_buf = vec![0u16; (text_len + 2) as usize];
-        let copied = GetWindowTextW(hwnd, title_buf.as_mut_ptr(), (text_len + 1) as i32);
-        if copied <= 0 {
-            return 1;
-        }
-        let window_title = String::from_utf16_lossy(&title_buf[..copied as usize]);
-        if window_title.trim().is_empty() {
-            return 1;
-        }
-
-        ctx.results.push(RawWindowCandidate {
-            process_id: pid,
-            exe_name,
-            exe_path,
-            window_title,
-            window_class: String::new(),
-        });
-
-        1
+    let list = unsafe { &mut *(user_data as *mut Vec<PlayerDefinition>) };
+    let name = unsafe { slice_to_string(name_ptr, name_len) };
+    if name.is_empty() {
+        return;
     }
 
-    if allowed_exes.is_empty() {
-        return Vec::new();
+    let window_title_format =
+        unsafe { slice_to_string(window_title_format_ptr, window_title_format_len) };
+
+    let mut window_classes = Vec::with_capacity(windows_count);
+    if !windows_ptrs.is_null() && !windows_lens.is_null() {
+        for i in 0..windows_count {
+            let s = unsafe { slice_to_string(*windows_ptrs.add(i), *windows_lens.add(i)) };
+            if !s.is_empty() {
+                window_classes.push(s);
+            }
+        }
     }
 
-    let mut ctx = EnumContext {
-        self_pid: std::process::id(),
-        allowed_exes,
-        results: Vec::new(),
+    let mut executables = Vec::with_capacity(executables_count);
+    if !executables_ptrs.is_null() && !executables_lens.is_null() {
+        for i in 0..executables_count {
+            let s = unsafe { slice_to_string(*executables_ptrs.add(i), *executables_lens.add(i)) };
+            if !s.is_empty() {
+                executables.push(s);
+            }
+        }
+    }
+
+    let title_suffixes = if window_title_format.is_empty() {
+        Vec::new()
+    } else {
+        vec![window_title_format]
     };
 
+    list.push(PlayerDefinition {
+        id: slugify_player_id(&name),
+        name,
+        executables,
+        window_classes,
+        title_prefixes: Vec::new(),
+        title_suffixes,
+        // Enable desktop video players (PlayerType::Default == 0) by default;
+        // keep web browsers (PlayerType::WebBrowser == 1) opt-in.
+        enabled: player_type == 0,
+    });
+}
+
+/// Load the official Anisthesia player definitions directly via `anisthesia::ParsePlayersData`.
+pub fn default_players() -> Vec<PlayerDefinition> {
+    let mut players = Vec::new();
     unsafe {
-        EnumWindows(
-            Some(enum_window_proc),
-            (&mut ctx as *mut EnumContext<'_>) as LPARAM,
+        tora_anisthesia_parse_players(
+            UPSTREAM_PLAYERS_DATA.as_ptr() as *const c_char,
+            UPSTREAM_PLAYERS_DATA.len(),
+            &mut players as *mut Vec<PlayerDefinition> as *mut c_void,
+            on_parsed_player,
         );
     }
-    ctx.results
+    players
 }
 
-#[cfg(not(windows))]
-pub fn scan_active_player_windows_win32(_allowed_exes: &HashSet<String>) -> Vec<RawWindowCandidate> {
-    Vec::new()
+#[derive(Debug, Clone)]
+struct FfiDetectedItem {
+    player_name: String,
+    process_id: u32,
+    process_name: String,
+    window_class: String,
+    raw_window_title: String,
+    media_type: i32,
+    media_value: String,
 }
 
-/// Detect any currently playing anime episode from active Windows media player windows.
+extern "C" fn on_detected_media(
+    user_data: *mut c_void,
+    player_name_ptr: *const c_char,
+    player_name_len: usize,
+    process_id: u32,
+    process_name_ptr: *const c_char,
+    process_name_len: usize,
+    window_class_ptr: *const c_char,
+    window_class_len: usize,
+    raw_window_title_ptr: *const c_char,
+    raw_window_title_len: usize,
+    media_type: c_int,
+    media_value_ptr: *const c_char,
+    media_value_len: usize,
+) {
+    if user_data.is_null() {
+        return;
+    }
+
+    let items = unsafe { &mut *(user_data as *mut Vec<FfiDetectedItem>) };
+    let player_name = unsafe { slice_to_string(player_name_ptr, player_name_len) };
+    let process_name = unsafe { slice_to_string(process_name_ptr, process_name_len) };
+    let window_class = unsafe { slice_to_string(window_class_ptr, window_class_len) };
+    let raw_window_title = unsafe { slice_to_string(raw_window_title_ptr, raw_window_title_len) };
+    let media_value = unsafe { slice_to_string(media_value_ptr, media_value_len) };
+
+    if !media_value.trim().is_empty() {
+        items.push(FfiDetectedItem {
+            player_name,
+            process_id,
+            process_name,
+            window_class,
+            raw_window_title,
+            media_type,
+            media_value,
+        });
+    }
+}
+
+/// Normalize a Win32 extended-length path (`\\?\D:\...`) if returned by `GetFinalPathNameByHandle`.
+fn normalize_win32_path(raw: &str) -> String {
+    if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{}", rest)
+    } else if let Some(rest) = raw.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        raw.to_string()
+    }
+}
+
+/// Detect any currently playing anime episode using upstream `anisthesia::win::GetResults` + `anitomy::parse`.
 pub fn detect_active_media_player(
     players: &[PlayerDefinition],
 ) -> Option<(PlayerDefinition, RawWindowCandidate, String, AnitomyElements)> {
-    let allowed_exes: HashSet<String> = players
-        .iter()
-        .filter(|p| p.enabled)
-        .flat_map(|p| p.executables.iter().map(|e| e.to_ascii_lowercase()))
-        .collect();
-
-    let windows = scan_active_player_windows_win32(&allowed_exes);
-    for win in windows {
-        let exe_lower = win.exe_name.to_ascii_lowercase();
-        for player in players.iter().filter(|p| p.enabled) {
-            let matched_exe = player
-                .executables
-                .iter()
-                .any(|e| e.to_ascii_lowercase() == exe_lower);
-            if !matched_exe {
-                continue;
-            }
-
-            let cleaned = clean_window_title(&win.window_title, player);
-            // Ignore idle player windows whose title is just the player name
-            if cleaned.is_empty()
-                || cleaned.eq_ignore_ascii_case(&player.name)
-                || cleaned.eq_ignore_ascii_case(&player.id)
-                || cleaned.eq_ignore_ascii_case("VLC media player")
-                || cleaned.eq_ignore_ascii_case("PotPlayer")
-                || cleaned.eq_ignore_ascii_case("MPC-HC")
-                || cleaned.eq_ignore_ascii_case("MPC-BE")
-                || cleaned.eq_ignore_ascii_case("mpv")
-                || cleaned.eq_ignore_ascii_case("Media Player")
-            {
-                continue;
-            }
-
-            let parsed = parse_filename(&cleaned);
-            if !parsed.anime_title.is_empty() {
-                return Some((player.clone(), win, cleaned, parsed));
-            }
+    let mut enabled_tokens: Vec<String> = Vec::new();
+    for player in players.iter().filter(|p| p.enabled) {
+        enabled_tokens.push(player.name.clone());
+        for exe in &player.executables {
+            let stem = exe.strip_suffix(".exe").unwrap_or(exe);
+            enabled_tokens.push(stem.to_string());
         }
     }
+
+    if enabled_tokens.is_empty() {
+        return None;
+    }
+
+    let token_ptrs: Vec<*const c_char> = enabled_tokens
+        .iter()
+        .map(|s| s.as_ptr() as *const c_char)
+        .collect();
+    let token_lens: Vec<usize> = enabled_tokens.iter().map(|s| s.len()).collect();
+
+    let mut detected_items: Vec<FfiDetectedItem> = Vec::new();
+    unsafe {
+        tora_anisthesia_detect_media(
+            UPSTREAM_PLAYERS_DATA.as_ptr() as *const c_char,
+            UPSTREAM_PLAYERS_DATA.len(),
+            token_ptrs.as_ptr(),
+            token_lens.as_ptr(),
+            token_ptrs.len(),
+            &mut detected_items as *mut Vec<FfiDetectedItem> as *mut c_void,
+            on_detected_media,
+        );
+    }
+
+    if detected_items.is_empty() {
+        return None;
+    }
+
+    // Prioritize MediaInfoType::File (1) from Anisthesia's OpenFiles strategy first,
+    // then fall back to WindowTitle / Title / Tab strategies.
+    detected_items.sort_by_key(|item| if item.media_type == 1 { 0 } else { 1 });
+
+    for item in detected_items {
+        let cleaned_media = if item.media_type == 1 {
+            let normalized_path = normalize_win32_path(&item.media_value);
+            normalized_path
+                .rsplit(['\\', '/'])
+                .next()
+                .unwrap_or(&normalized_path)
+                .to_string()
+        } else {
+            item.media_value.trim().to_string()
+        };
+
+        if cleaned_media.is_empty()
+            || cleaned_media.eq_ignore_ascii_case(&item.player_name)
+            || cleaned_media.eq_ignore_ascii_case(&item.process_name)
+        {
+            continue;
+        }
+
+        let parsed = parse_filename(&cleaned_media);
+        if parsed.anime_title.is_empty() {
+            continue;
+        }
+
+        let player_def = players
+            .iter()
+            .find(|p| {
+                p.enabled
+                    && (p.name.eq_ignore_ascii_case(&item.player_name)
+                        || p.executables.iter().any(|e| {
+                            e.strip_suffix(".exe")
+                                .unwrap_or(e)
+                                .eq_ignore_ascii_case(&item.process_name)
+                        }))
+            })
+            .cloned()
+            .unwrap_or_else(|| PlayerDefinition {
+                id: slugify_player_id(&item.player_name),
+                name: item.player_name.clone(),
+                executables: vec![item.process_name.clone()],
+                window_classes: vec![item.window_class.clone()],
+                title_prefixes: Vec::new(),
+                title_suffixes: Vec::new(),
+                enabled: true,
+            });
+
+        let candidate = RawWindowCandidate {
+            process_id: item.process_id,
+            exe_name: item.process_name.clone(),
+            exe_path: if item.media_type == 1 {
+                normalize_win32_path(&item.media_value)
+            } else {
+                item.process_name
+            },
+            window_title: item.raw_window_title,
+            window_class: item.window_class,
+        };
+
+        return Some((player_def, candidate, cleaned_media, parsed));
+    }
+
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_upstream_players_parsed_via_cpp_anisthesia() {
+        let players = default_players();
+        assert!(
+            players.len() >= 35,
+            "Expected at least 35 upstream players from players.anisthesia, got {}",
+            players.len()
+        );
+        assert!(players.iter().any(|p| p.name == "mpv" && p.enabled));
+        assert!(players.iter().any(|p| p.name == "MPC-HC" && p.enabled));
+        assert!(players
+            .iter()
+            .any(|p| p.name == "VLC media player" && p.enabled));
+        assert!(players.iter().any(|p| p.name == "PotPlayer" && p.enabled));
+        // Web browsers should be parsed and disabled by default
+        assert!(players
+            .iter()
+            .any(|p| p.name == "Mozilla Firefox" && !p.enabled));
+    }
+
+    #[test]
+    fn test_live_anisthesia_detection_call() {
+        let players = default_players();
+        // Verify calling `anisthesia::win::GetResults` via C++ FFI executes cleanly
+        let _ = detect_active_media_player(&players);
+    }
 }

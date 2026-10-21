@@ -1,5 +1,6 @@
 use crate::detection::anisthesia::{default_players, PlayerDefinition};
-use crate::detection::anitomy::normalize_anime_title;
+use crate::detection::anitomy::{extract_effective_season, normalize_anime_title, AnitomyElements};
+use crate::detection::relations::relations_db;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -160,12 +161,122 @@ impl Default for AppSettings {
     }
 }
 
+/// Strip a trailing season number token (e.g. `" 2"`, `" 3"`) from a normalized title to extract the core series title.
+fn strip_trailing_season(norm: &str, season: u32) -> &str {
+    if season > 1 {
+        let suffix = format!(" {}", season);
+        if let Some(stripped) = norm.strip_suffix(&suffix) {
+            let trimmed = stripped.trim();
+            if !trimmed.is_empty() {
+                return trimmed;
+            }
+        }
+    }
+    norm.trim()
+}
+
+/// Compute character 2-gram Sorensen-Dice similarity in `[0.0, 1.0]`.
+fn bigram_dice_similarity(a: &str, b: &str) -> f64 {
+    if a == b {
+        return 1.0;
+    }
+    let a_bytes = a.as_bytes();
+    let b_bytes = b.as_bytes();
+    if a_bytes.len() < 2 || b_bytes.len() < 2 {
+        return 0.0;
+    }
+    let mut a_grams: Vec<[u8; 2]> = Vec::with_capacity(a_bytes.len() - 1);
+    for w in a_bytes.windows(2) {
+        a_grams.push([w[0], w[1]]);
+    }
+    let mut b_grams: Vec<[u8; 2]> = Vec::with_capacity(b_bytes.len() - 1);
+    for w in b_bytes.windows(2) {
+        b_grams.push([w[0], w[1]]);
+    }
+    let total = a_grams.len() + b_grams.len();
+    let mut matches = 0usize;
+    let mut b_used = vec![false; b_grams.len()];
+    for ag in &a_grams {
+        if let Some(pos) = b_grams
+            .iter()
+            .enumerate()
+            .position(|(i, bg)| !b_used[i] && bg == ag)
+        {
+            b_used[pos] = true;
+            matches += 1;
+        }
+    }
+    (2.0 * matches as f64) / (total as f64)
+}
+
+/// Score similarity between a query core title and a candidate entry's core title (after season isolation).
+/// Handles exact matches, abbreviated titles (e.g. `"kusuriya"` vs `"kusuriya no hitorigoto"`),
+/// word-subset matches (e.g. `"frieren"` vs `"sousou no frieren"`), and fuzzy Romanization variants.
+fn compute_core_title_similarity(query_core: &str, cand_core: &str) -> f64 {
+    if query_core.is_empty() || cand_core.is_empty() {
+        return 0.0;
+    }
+    if query_core == cand_core {
+        return 1.0;
+    }
+
+    let (shorter, longer) = if query_core.len() <= cand_core.len() {
+        (query_core, cand_core)
+    } else {
+        (cand_core, query_core)
+    };
+
+    if shorter.len() < 4 {
+        return 0.0;
+    }
+
+    let len_ratio = shorter.len() as f64 / longer.len() as f64;
+
+    // 1. Word-boundary prefix match (e.g. "kusuriya" -> "kusuriya no hitorigoto")
+    if longer.starts_with(shorter) && longer.as_bytes().get(shorter.len()) == Some(&b' ') {
+        return 0.92 + 0.07 * len_ratio;
+    }
+
+    // 2. All words of the shorter title appear as complete words (or strong fuzzy word matches) in the longer title
+    let short_words: Vec<&str> = shorter.split_whitespace().collect();
+    let long_words: Vec<&str> = longer.split_whitespace().collect();
+    if !short_words.is_empty() {
+        let all_words_match = short_words.iter().all(|sw| {
+            long_words.iter().any(|lw| {
+                *lw == *sw
+                    || (sw.len() >= 5 && lw.starts_with(*sw))
+                    || (sw.len() >= 5 && lw.len() >= 5 && bigram_dice_similarity(sw, lw) >= 0.84)
+            })
+        });
+        if all_words_match {
+            return 0.86 + 0.10 * len_ratio;
+        }
+    }
+
+    // 3. Contiguous substring match for titles >= 5 chars with reasonable length ratio
+    if shorter.len() >= 5 && len_ratio >= 0.55 && longer.contains(shorter) {
+        return 0.78 + 0.10 * len_ratio;
+    }
+
+    // 4. Overall character bigram Sorensen-Dice fuzzy similarity
+    let dice = bigram_dice_similarity(query_core, cand_core);
+    if dice >= 0.74 {
+        return dice;
+    }
+
+    0.0
+}
+
 /// Fast in-memory matcher index built from a single SQL pass so batch episode/torrent matching is O(1) with zero DB queries per item.
 pub struct AnimeMatcherIndex {
     pub by_id: HashMap<i64, (String, String, u32, Option<u32>)>,
+    pub external_ids: HashMap<i64, (Option<i64>, Option<i64>, u32)>,
+    pub by_anilist_id: HashMap<i64, i64>,
+    pub by_mal_id: HashMap<i64, i64>,
+    pub user_aliases: HashMap<String, i64>,
     pub exact_norm: HashMap<String, i64>,
     pub custom_folders: Vec<(String, i64)>,
-    pub norm_list: Vec<(String, i64)>,
+    pub norm_list: Vec<(String, u32, i64)>,
 }
 
 impl AnimeMatcherIndex {
@@ -192,21 +303,138 @@ impl AnimeMatcherIndex {
             return None;
         }
 
-        // 2. O(1) exact normalized title or alias lookup
+        // 2. O(1) explicit user-linked alias lookup
+        if let Some(aid) = self.user_aliases.get(normalized_title) {
+            if let Some((t, cov, prog, eps)) = self.by_id.get(aid) {
+                return Some((*aid, t.clone(), cov.clone(), *prog, *eps));
+            }
+        }
+
+        // 3. O(1) exact normalized title lookup
         if let Some(aid) = self.exact_norm.get(normalized_title) {
             if let Some((t, cov, prog, eps)) = self.by_id.get(aid) {
                 return Some((*aid, t.clone(), cov.clone(), *prog, *eps));
             }
         }
 
-        // 3. Substring fallback for longer titles
-        if normalized_title.len() >= 4 {
-            for (norm, aid) in &self.norm_list {
-                if norm.contains(normalized_title) || normalized_title.contains(norm.as_str()) {
-                    if let Some((t, cov, prog, eps)) = self.by_id.get(aid) {
-                        return Some((*aid, t.clone(), cov.clone(), *prog, *eps));
+        // 4. Season-isolated fuzzy matching across anime names and alternative titles
+        // Never allow a Season 2/3 query (e.g. "kusuriya 3" or "bocchi rock 2") to match a Season 1 entry.
+        let query_season = extract_effective_season(normalized_title);
+        let query_core = strip_trailing_season(normalized_title, query_season);
+
+        if query_core.len() >= 4 {
+            let mut best_match: Option<(f64, i64)> = None;
+            for (norm, entry_season, aid) in &self.norm_list {
+                if *entry_season != query_season {
+                    continue;
+                }
+                let cand_core = strip_trailing_season(norm, *entry_season);
+                let score = compute_core_title_similarity(query_core, cand_core);
+                if score >= 0.74 {
+                    if best_match.map_or(true, |(best_score, _)| score > best_score) {
+                        best_match = Some((score, *aid));
                     }
                 }
+            }
+
+            if let Some((_, aid)) = best_match {
+                if let Some((t, cov, prog, eps)) = self.by_id.get(&aid) {
+                    return Some((aid, t.clone(), cov.clone(), *prog, *eps));
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Match a parsed `AnitomyElements` against the index, validating episode bounds and applying
+    /// `erengy/anime-relations` ID redirections or multi-season sequential episode offsets (ported from Taiga's `identify`).
+    pub fn match_episode(
+        &self,
+        parsed: &mut AnitomyElements,
+        file_path: Option<&str>,
+    ) -> Option<(i64, String, String, u32, Option<u32>)> {
+        let matched = self.match_title(&parsed.normalized_title, file_path)?;
+        let (aid, title, cover, prog, eps) = matched;
+
+        let Some(ep) = parsed.episode_number else {
+            return Some((aid, title, cover, prog, eps));
+        };
+
+        // Port of Taiga's `isValidEpisodeNumber`:
+        // Episode 0 or an episode exceeding the entry's total episode count triggers redirection.
+        let is_valid_ep = if ep == 0 {
+            false
+        } else if let Some(max_ep) = eps {
+            max_ep == 0 || ep <= max_ep
+        } else {
+            true
+        };
+
+        if is_valid_ep {
+            return Some((aid, title, cover, prog, eps));
+        }
+
+        // 1. Check `erengy/anime-relations` by AniList ID / MyAnimeList ID
+        let (anilist_id, mal_id, entry_season) = self
+            .external_ids
+            .get(&aid)
+            .copied()
+            .unwrap_or((None, None, 1));
+
+        if let Some(red) =
+            relations_db().find_by_id(anilist_id, mal_id, ep, parsed.episode_number_alt)
+        {
+            parsed.episode_number = Some(red.dst_episode);
+            if let Some(alt) = red.dst_episode_alt {
+                parsed.episode_number_alt = Some(alt);
+            }
+            if let Some(s) = red.dst_season {
+                parsed.anime_season = Some(s);
+            }
+            if !red.dst_title.is_empty() {
+                parsed.anime_title = red.dst_title.clone();
+                parsed.normalized_title = red.dst_norm_title.clone();
+            }
+
+            let dst_aid = red
+                .dst_anilist_id
+                .and_then(|id| self.by_anilist_id.get(&id).copied())
+                .or_else(|| {
+                    red.dst_mal_id
+                        .and_then(|id| self.by_mal_id.get(&id).copied())
+                })
+                .or_else(|| self.exact_norm.get(&red.dst_norm_title).copied());
+
+            if let Some(target_id) = dst_aid {
+                if let Some((t, cov, p, e)) = self.by_id.get(&target_id) {
+                    return Some((target_id, t.clone(), cov.clone(), *p, *e));
+                }
+            }
+            return None;
+        }
+
+        // 2. Dynamic multi-season sequential episode fallback across entries in the user's database
+        if let Some(first_max) = eps.filter(|&m| m > 0 && ep > m) {
+            let mut rem_ep = ep - first_max;
+            let base_norm = parsed.normalized_title.clone();
+            for next_s in (entry_season + 1)..=10 {
+                let candidate_norm = format!("{} {}", base_norm, next_s);
+                let Some(&next_aid) = self.exact_norm.get(&candidate_norm) else {
+                    break;
+                };
+                let Some((t, cov, p, next_eps)) = self.by_id.get(&next_aid) else {
+                    break;
+                };
+                let max_for_season = next_eps.unwrap_or(u32::MAX);
+                if max_for_season == 0 || rem_ep <= max_for_season {
+                    parsed.episode_number = Some(rem_ep);
+                    parsed.anime_season = Some(next_s);
+                    parsed.anime_title = t.clone();
+                    parsed.normalized_title = candidate_norm;
+                    return Some((next_aid, t.clone(), cov.clone(), *p, *next_eps));
+                }
+                rem_ep -= max_for_season;
             }
         }
 
@@ -379,16 +607,90 @@ impl Database {
     }
 
     fn seed_initial_data_if_empty(&self) -> Result<(), String> {
-        let count: i64 = {
+        let now = chrono::Utc::now().timestamp();
+        let kusuriya_s3 = AnimeEntry {
+            id: 195516,
+            anilist_id: Some(195516),
+            mal_id: Some(61987),
+            title_romaji: "Kusuriya no Hitorigoto 3rd Season".into(),
+            title_english: Some("The Apothecary Diaries Season 3".into()),
+            title_native: Some("薬屋のひとりごと 第3期".into()),
+            synonyms: vec!["Apothecary Diaries S3".into(), "Kusuriya S3".into()],
+            format: "TV".into(),
+            airing_status: "RELEASING".into(),
+            episodes: Some(12),
+            duration: Some(24),
+            season: Some("FALL".into()),
+            season_year: Some(2026),
+            average_score: Some(90),
+            cover_image: "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx161645-7I8C2721A1sV.jpg".into(),
+            banner_image: Some("https://s4.anilist.co/file/anilistcdn/media/anime/banner/161645-5A2V3gA8G4zZ.jpg".into()),
+            cover_color: Some("#059669".into()),
+            synopsis: "Third season of Kusuriya no Hitorigoto.".into(),
+            genres: vec!["Drama".into(), "Mystery".into()],
+            studios: vec!["OLM".into(), "TOHO animation STUDIO".into()],
+            next_airing_episode: Some(4),
+            next_airing_at: Some(now + 86400 * 3),
+            trailer_url: None,
+            site_url: Some("https://anilist.co/anime/195516".into()),
+            source_material: Some("LIGHT_NOVEL".into()),
+            user_status: "CURRENT".into(),
+            user_progress: 2,
+            user_score: 0.0,
+            user_repeats: 0,
+            user_notes: "".into(),
+            custom_folder: None,
+            updated_at: now - 100000,
+            local_episode_count: 0,
+            available_episodes: vec![],
+        };
+
+        let (count, has_s1, has_s3_seeded): (i64, bool, bool) = {
             let conn = self.conn.lock().map_err(|e| e.to_string())?;
-            conn.query_row("SELECT COUNT(*) FROM anime_entries", [], |r| r.get(0))
-                .unwrap_or(0)
+            let c: i64 = conn
+                .query_row("SELECT COUNT(*) FROM anime_entries", [], |r| r.get(0))
+                .unwrap_or(0);
+            let s1: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM anime_entries WHERE id = 161645",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            let s3_flag: Option<String> = conn
+                .query_row(
+                    "SELECT value_json FROM app_settings WHERE key = 'seeded_kusuriya_s3'",
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()
+                .unwrap_or(None);
+            (c, s1 > 0, s3_flag.is_some())
         };
         if count > 0 {
+            if has_s1 && !has_s3_seeded {
+                let exists: i64 = {
+                    let conn = self.conn.lock().map_err(|e| e.to_string())?;
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM anime_entries WHERE id = 195516 OR anilist_id = 195516",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0)
+                };
+                if exists == 0 {
+                    let _ = self.upsert_anime_entry(&kusuriya_s3);
+                }
+                if let Ok(conn) = self.conn.lock() {
+                    let _ = conn.execute(
+                        "INSERT OR REPLACE INTO app_settings (key, value_json) VALUES ('seeded_kusuriya_s3', 'true')",
+                        [],
+                    );
+                }
+            }
             return Ok(());
         }
 
-        let now = chrono::Utc::now().timestamp();
         let starter_entries = vec![
             AnimeEntry {
                 id: 154587,
@@ -642,12 +944,18 @@ impl Database {
                 local_episode_count: 0,
                 available_episodes: vec![],
             },
+            kusuriya_s3,
         ];
 
         self.upsert_anime_entries_batch(&starter_entries)?;
 
         // Seed default Taiga-style RSS Torrent filter rules
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT OR REPLACE INTO app_settings (key, value_json) VALUES ('seeded_kusuriya_s3', 'true')",
+            [],
+        )
+        .ok();
         conn.execute(
             "INSERT INTO torrent_rules (name, enabled, anime_title_filter, release_group, resolution, exclude_keywords, action, only_unwatched)
              VALUES (?1, 1, '', 'SubsPlease', '1080p', 'Batch, 480p, Dub', 'highlight', 1)",
@@ -1078,6 +1386,10 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
 
         let mut by_id = HashMap::new();
+        let mut external_ids = HashMap::new();
+        let mut by_anilist_id = HashMap::new();
+        let mut by_mal_id = HashMap::new();
+        let mut user_aliases = HashMap::new();
         let mut exact_norm = HashMap::new();
         let mut custom_folders = Vec::new();
         let mut norm_list = Vec::new();
@@ -1085,7 +1397,8 @@ impl Database {
         {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, title_romaji, cover_image, user_progress, episodes, normalized_titles_json, custom_folder
+                    "SELECT id, anilist_id, mal_id, title_romaji, title_english, title_native,
+                            synonyms_json, cover_image, user_progress, episodes, custom_folder
                      FROM anime_entries",
                 )
                 .map_err(|e| e.to_string())?;
@@ -1093,28 +1406,65 @@ impl Database {
                 .query_map([], |r| {
                     Ok((
                         r.get::<_, i64>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                        r.get::<_, u32>(3)?,
-                        r.get::<_, Option<u32>>(4)?,
-                        r.get::<_, String>(5)?,
-                        r.get::<_, Option<String>>(6)?,
+                        r.get::<_, Option<i64>>(1)?,
+                        r.get::<_, Option<i64>>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, Option<String>>(4)?,
+                        r.get::<_, Option<String>>(5)?,
+                        r.get::<_, String>(6)?,
+                        r.get::<_, String>(7)?,
+                        r.get::<_, u32>(8)?,
+                        r.get::<_, Option<u32>>(9)?,
+                        r.get::<_, Option<String>>(10)?,
                     ))
                 })
                 .map_err(|e| e.to_string())?;
 
             for row in rows.flatten() {
-                let (id, title, cover, prog, eps, norm_str, cfolder) = row;
-                by_id.insert(id, (title, cover, prog, eps));
+                let (
+                    id,
+                    anilist_id,
+                    mal_id,
+                    romaji,
+                    english,
+                    native,
+                    syns_json,
+                    cover,
+                    prog,
+                    eps,
+                    cfolder,
+                ) = row;
+                let syns: Vec<String> = serde_json::from_str(&syns_json).unwrap_or_default();
+                let norms = Self::build_normalized_titles(
+                    &romaji,
+                    english.as_deref(),
+                    native.as_deref(),
+                    &syns,
+                );
+                let mut effective_season = extract_effective_season(&romaji);
+                if effective_season == 1 {
+                    if let Some(eng) = english.as_deref() {
+                        effective_season = extract_effective_season(eng);
+                    }
+                }
+
+                by_id.insert(id, (romaji, cover, prog, eps));
+                external_ids.insert(id, (anilist_id, mal_id, effective_season));
+                if let Some(aid) = anilist_id {
+                    by_anilist_id.insert(aid, id);
+                }
+                if let Some(mid) = mal_id {
+                    by_mal_id.insert(mid, id);
+                }
                 if let Some(cf) = cfolder.filter(|s| !s.trim().is_empty()) {
                     custom_folders.push((cf.to_ascii_lowercase(), id));
                 }
-                let norms: Vec<String> = serde_json::from_str(&norm_str).unwrap_or_default();
                 for n in norms {
                     if !n.is_empty() {
+                        let s = extract_effective_season(&n).max(effective_season);
                         exact_norm.entry(n.clone()).or_insert(id);
                         if n.len() >= 4 {
-                            norm_list.push((n, id));
+                            norm_list.push((n, s, id));
                         }
                     }
                 }
@@ -1131,6 +1481,7 @@ impl Database {
                 .map_err(|e| e.to_string())?;
             for (alias, aid) in rows.flatten() {
                 if by_id.contains_key(&aid) {
+                    user_aliases.insert(alias.clone(), aid);
                     exact_norm.insert(alias, aid);
                 }
             }
@@ -1138,10 +1489,82 @@ impl Database {
 
         Ok(AnimeMatcherIndex {
             by_id,
+            external_ids,
+            by_anilist_id,
+            by_mal_id,
+            user_aliases,
             exact_norm,
             custom_folders,
             norm_list,
         })
+    }
+
+    /// Save a title relation / alias for an anime entry so that subsequent episodes with this title
+    /// automatically match this entry. Updates both `title_aliases` and the anime's `synonyms`.
+    pub fn link_alias_to_anime(
+        &self,
+        anime_id: i64,
+        alias_title: &str,
+    ) -> Result<AnimeEntry, String> {
+        let trimmed = alias_title.trim();
+        if trimmed.is_empty() {
+            return Err("Alias title cannot be empty".into());
+        }
+        let norm_alias = normalize_anime_title(trimmed);
+
+        {
+            let conn = self.conn.lock().map_err(|e| e.to_string())?;
+            if !norm_alias.is_empty() {
+                conn.execute(
+                    "INSERT OR REPLACE INTO title_aliases (normalized_alias, anime_id) VALUES (?1, ?2)",
+                    params![norm_alias, anime_id],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+
+            let (romaji, english, native, syns_json): (
+                String,
+                Option<String>,
+                Option<String>,
+                String,
+            ) = conn
+                .query_row(
+                    "SELECT title_romaji, title_english, title_native, synonyms_json
+                     FROM anime_entries WHERE id = ?1",
+                    params![anime_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .map_err(|e| format!("Anime entry not found: {}", e))?;
+
+            let mut syns: Vec<String> = serde_json::from_str(&syns_json).unwrap_or_default();
+            let already_exists = romaji.eq_ignore_ascii_case(trimmed)
+                || english
+                    .as_deref()
+                    .map_or(false, |e| e.eq_ignore_ascii_case(trimmed))
+                || syns.iter().any(|s| s.eq_ignore_ascii_case(trimmed));
+
+            if !already_exists {
+                syns.push(trimmed.to_string());
+                let new_syns_json =
+                    serde_json::to_string(&syns).unwrap_or_else(|_| "[]".into());
+                let norms = Self::build_normalized_titles(
+                    &romaji,
+                    english.as_deref(),
+                    native.as_deref(),
+                    &syns,
+                );
+                let new_norms_json =
+                    serde_json::to_string(&norms).unwrap_or_else(|_| "[]".into());
+                conn.execute(
+                    "UPDATE anime_entries SET synonyms_json = ?1, normalized_titles_json = ?2 WHERE id = ?3",
+                    params![new_syns_json, new_norms_json, anime_id],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
+
+        let _ = self.rematch_all_local_episodes();
+        self.get_anime_entry_by_id(anime_id)
     }
 
     /// Match a single normalized title or file path to an AnimeEntry in the database.
@@ -1152,6 +1575,17 @@ impl Database {
     ) -> Option<(i64, String, String, u32, Option<u32>)> {
         let index = self.build_matcher_index().ok()?;
         index.match_title(normalized_title, file_path)
+    }
+
+    /// Match a parsed `AnitomyElements` to an AnimeEntry in the database, applying episode bounds validation
+    /// and `erengy/anime-relations` redirections when needed.
+    pub fn match_episode_to_anime(
+        &self,
+        parsed: &mut AnitomyElements,
+        file_path: Option<&str>,
+    ) -> Option<(i64, String, String, u32, Option<u32>)> {
+        let index = self.build_matcher_index().ok()?;
+        index.match_episode(parsed, file_path)
     }
 
     pub fn get_settings(&self) -> Result<AppSettings, String> {
@@ -1324,5 +1758,62 @@ impl Database {
                 .map_err(|e| e.to_string())?;
         }
         self.list_torrent_rules()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::detection::anitomy::parse_filename;
+
+    #[test]
+    fn test_fuzzy_matching_and_alias_linking() {
+        let tmp_dir = std::env::temp_dir().join("tora_test_db_fuzzy");
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        let db_path = tmp_dir.join("test.db");
+        let db = Database::open(&db_path).expect("open test db");
+
+        // 1. "[Judas] Kusuriya - S03E03.mkv" matches "Kusuriya no Hitorigoto 3rd Season"
+        let mut parsed_s3 = parse_filename("[Judas] Kusuriya - S03E03.mkv");
+        let m_s3 = db
+            .match_episode_to_anime(&mut parsed_s3, None)
+            .expect("should match Kusuriya S3");
+        assert_eq!(m_s3.0, 195516);
+        assert_eq!(m_s3.1, "Kusuriya no Hitorigoto 3rd Season");
+        assert_eq!(parsed_s3.episode_number, Some(3));
+
+        // 2. Direct fuzzy match on abbreviated title with season ("kusuriya 2" -> "Kusuriya no Hitorigoto 2nd Season")
+        let m_s2 = db
+            .match_title_to_anime("kusuriya 2", None)
+            .expect("fuzzy match kusuriya 2");
+        assert_eq!(m_s2.0, 176301);
+        assert_eq!(m_s2.1, "Kusuriya no Hitorigoto 2nd Season");
+
+        // 3. Season 2 of Bocchi the Rock! does not falsely match Season 1
+        let mut bocchi_s2 = parse_filename(
+            "[EMBER] Bocchi the Rock! - S02E12 [1080p] [HEVC WEBRip 10bit] [Dual-Audio].mkv",
+        );
+        assert!(db.match_episode_to_anime(&mut bocchi_s2, None).is_none());
+
+        // 4. Linking an unmatched alias saves the relation for subsequent episodes
+        let mut custom_ep1 = parse_filename("[SomeGroup] MyCustomFrierenAlias - 05 [1080p].mkv");
+        assert!(db.match_episode_to_anime(&mut custom_ep1, None).is_none());
+
+        let updated_entry = db
+            .link_alias_to_anime(154587, &custom_ep1.anime_title)
+            .expect("link alias");
+        assert!(updated_entry
+            .synonyms
+            .iter()
+            .any(|s| s == "MyCustomFrierenAlias"));
+
+        let mut custom_ep2 = parse_filename("[SomeGroup] MyCustomFrierenAlias - 06 [1080p].mkv");
+        let matched_ep2 = db
+            .match_episode_to_anime(&mut custom_ep2, None)
+            .expect("subsequent episode should match after linking");
+        assert_eq!(matched_ep2.0, 154587);
+        assert_eq!(matched_ep2.1, "Sousou no Frieren");
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 }

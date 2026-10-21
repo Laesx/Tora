@@ -22,6 +22,8 @@ import {
   RefreshCw,
   Shuffle,
   Palette,
+  FlaskConical,
+  AlertTriangle,
 } from "lucide-react";
 import {
   AnimeEntry,
@@ -39,6 +41,7 @@ import { AnimeQuickMenu } from "./components/AnimeQuickMenu";
 import { LibraryManagerView } from "./components/LibraryManagerView";
 import { TorrentsView } from "./components/TorrentsView";
 import { RecognitionView } from "./components/RecognitionView";
+import { TestingView } from "./components/TestingView";
 import { DiscoverAndScheduleView } from "./components/DiscoverAndScheduleView";
 import { SettingsAndPluginsView } from "./components/SettingsAndPluginsView";
 import { CommandPalette } from "./components/CommandPalette";
@@ -49,6 +52,7 @@ type NavTab =
   | "torrents"
   | "discover"
   | "recognition"
+  | "testing"
   | "settings";
 
 const STATUS_TABS = [
@@ -139,8 +143,22 @@ export const App: React.FC = () => {
         const session = await toraApi.pollMediaRecognition();
         setActiveSession((prev) => {
           if (!prev && !session) return prev;
+          // Auto-focus the Episode Detection tab when a new media playback session is detected
+          if (
+            session &&
+            (!prev ||
+              prev.cleaned_media_title !== session.cleaned_media_title ||
+              prev.player_name !== session.player_name)
+          ) {
+            setActiveTab("recognition");
+          }
           // If auto_synced just flipped to true, refresh anime list and notify user
-          if (session && session.auto_synced && (!prev || !prev.auto_synced)) {
+          if (
+            session &&
+            session.matched_anime_id &&
+            session.auto_synced &&
+            (!prev || !prev.auto_synced)
+          ) {
             refreshAnimeList();
             showToast(
               `Scrobbled: ${
@@ -236,6 +254,23 @@ export const App: React.FC = () => {
       windowTitle
     );
     setActiveSession(session);
+    if (session) {
+      setActiveTab("recognition");
+    }
+  };
+
+  const handleLinkDetectedEpisode = async (
+    animeId: number,
+    aliasTitle: string
+  ) => {
+    const updatedSession = await toraApi.linkDetectedEpisodeToAnime(
+      animeId,
+      aliasTitle
+    );
+    if (updatedSession) {
+      setActiveSession(updatedSession);
+    }
+    await refreshAnimeList();
   };
 
   const handleCycleTheme = async () => {
@@ -432,6 +467,20 @@ export const App: React.FC = () => {
             </button>
 
             <button
+              onClick={() => setActiveTab("testing")}
+              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${
+                activeTab === "testing"
+                  ? "bg-accent text-white shadow-sm"
+                  : "text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
+              }`}
+            >
+              <span className="flex items-center gap-2.5">
+                <FlaskConical className="w-4 h-4" />
+                Testing
+              </span>
+            </button>
+
+            <button
               onClick={() => setActiveTab("settings")}
               className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${
                 activeTab === "settings"
@@ -508,21 +557,31 @@ export const App: React.FC = () => {
             </div>
 
             <div className="flex items-center gap-3 shrink-0 text-xs">
-              {activeSession.auto_synced ? (
-                <span className="text-emerald-400 font-semibold flex items-center gap-1">
-                  <CheckCircle2 className="w-4 h-4" />
-                  Progress Scrobbled!
-                </span>
+              {activeSession.matched_anime_id ? (
+                activeSession.auto_synced ? (
+                  <span className="text-emerald-400 font-semibold flex items-center gap-1">
+                    <CheckCircle2 className="w-4 h-4" />
+                    Progress Scrobbled!
+                  </span>
+                ) : (
+                  <span className="text-amber-300 font-mono text-[11px]">
+                    Auto-updating in{" "}
+                    {Math.max(
+                      0,
+                      (settings?.recognition_delay_seconds || 10) -
+                        activeSession.elapsed_seconds
+                    )}
+                    s...
+                  </span>
+                )
               ) : (
-                <span className="text-amber-300 font-mono text-[11px]">
-                  Auto-updating in{" "}
-                  {Math.max(
-                    0,
-                    (settings?.recognition_delay_seconds || 10) -
-                      activeSession.elapsed_seconds
-                  )}
-                  s...
-                </span>
+                <button
+                  onClick={() => setActiveTab("recognition")}
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-500/20 border border-amber-500/40 text-amber-300 font-semibold hover:bg-amber-500/30 transition text-[11px]"
+                >
+                  <AlertTriangle className="w-3.5 h-3.5" />
+                  Unmatched — Select Anime
+                </button>
               )}
               <button
                 onClick={() => handleSimulatePlayback(null, null)}
@@ -1005,6 +1064,18 @@ export const App: React.FC = () => {
 
           {activeTab === "recognition" && settings && (
             <RecognitionView
+              activeSession={activeSession}
+              animeList={animeList}
+              settings={settings}
+              onUpdateSettings={handleUpdateSettings}
+              onSimulate={handleSimulatePlayback}
+              onLinkDetectedEpisode={handleLinkDetectedEpisode}
+              showToast={showToast}
+            />
+          )}
+
+          {activeTab === "testing" && settings && (
+            <TestingView
               activeSession={activeSession}
               settings={settings}
               onUpdateSettings={handleUpdateSettings}

@@ -414,8 +414,8 @@ async fn test_parse_filename(
 ) -> Result<FilenameTestResult, String> {
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
-        let parsed = parse_filename(&input);
-        let matched = db.match_title_to_anime(&parsed.normalized_title, None);
+        let mut parsed = parse_filename(&input);
+        let matched = db.match_episode_to_anime(&mut parsed, None);
         let (matched_anime_id, matched_anime_title, matched_cover_image) = match matched {
             Some((id, title, cover, _, _)) => (Some(id), Some(title), Some(cover)),
             None => (None, None, None),
@@ -508,7 +508,7 @@ async fn poll_media_recognition(
 
     let mut active_guard = state.active_session.lock().map_err(|e| e.to_string())?;
 
-    let Some((player_id, player_name, pid, exe_path, raw_title, cleaned_title, parsed)) =
+    let Some((player_id, player_name, pid, exe_path, raw_title, cleaned_title, mut parsed)) =
         detected_candidate
     else {
         *active_guard = None;
@@ -518,66 +518,62 @@ async fn poll_media_recognition(
     // Check if it's the same session continuing
     if let Some(existing) = active_guard.as_mut() {
         if existing.cleaned_media_title == cleaned_title && existing.player_name == player_name {
-            existing.elapsed_seconds = (now - existing.detected_at_unix).max(0) as u64;
+            if existing.matched_anime_id.is_some() {
+                existing.elapsed_seconds = (now - existing.detected_at_unix).max(0) as u64;
 
-            // Check if recognition delay threshold is met for auto-updating progress
-            if !existing.auto_synced
-                && existing.elapsed_seconds >= settings.recognition_delay_seconds
-            {
-                existing.auto_synced = true;
-                if let (Some(aid), Some(ep)) =
-                    (existing.matched_anime_id, existing.parsed.episode_number)
+                // Only auto-update when matched to an anime entry and delay threshold is met
+                if !existing.auto_synced
+                    && existing.elapsed_seconds >= settings.recognition_delay_seconds
                 {
-                    if let Ok(entry) = state.db.get_anime_entry_by_id(aid) {
-                        let new_prog = ep.max(entry.user_progress);
-                        let new_status = if let Some(total) = entry.episodes {
-                            if new_prog >= total && total > 0 {
-                                "COMPLETED".to_string()
+                    existing.auto_synced = true;
+                    if let (Some(aid), Some(ep)) =
+                        (existing.matched_anime_id, existing.parsed.episode_number)
+                    {
+                        if let Ok(entry) = state.db.get_anime_entry_by_id(aid) {
+                            let new_prog = ep.max(entry.user_progress);
+                            let new_status = if let Some(total) = entry.episodes {
+                                if new_prog >= total && total > 0 {
+                                    "COMPLETED".to_string()
+                                } else if entry.user_status == "PLANNING" {
+                                    "CURRENT".to_string()
+                                } else {
+                                    entry.user_status.clone()
+                                }
                             } else if entry.user_status == "PLANNING" {
                                 "CURRENT".to_string()
                             } else {
                                 entry.user_status.clone()
-                            }
-                        } else if entry.user_status == "PLANNING" {
-                            "CURRENT".to_string()
-                        } else {
-                            entry.user_status.clone()
-                        };
+                            };
 
-                        if let Ok((updated, _)) = state.db.update_anime_user_state(
-                            aid,
-                            &new_status,
-                            new_prog,
-                            entry.user_score,
-                            entry.user_repeats,
-                            &entry.user_notes,
-                            entry.custom_folder,
-                            None,
-                        ) {
-                            existing.matched_current_progress = Some(updated.user_progress);
+                            if let Ok((updated, _)) = state.db.update_anime_user_state(
+                                aid,
+                                &new_status,
+                                new_prog,
+                                entry.user_score,
+                                entry.user_repeats,
+                                &entry.user_notes,
+                                entry.custom_folder,
+                                None,
+                            ) {
+                                existing.matched_current_progress = Some(updated.user_progress);
+                            }
                         }
+                        let _ = state.db.record_watch_history(
+                            Some(aid),
+                            existing
+                                .matched_anime_title
+                                .as_deref()
+                                .unwrap_or(&existing.parsed.anime_title),
+                            ep,
+                            &existing.player_name,
+                            &existing.cleaned_media_title,
+                            true,
+                        );
                     }
-                    let _ = state.db.record_watch_history(
-                        Some(aid),
-                        existing
-                            .matched_anime_title
-                            .as_deref()
-                            .unwrap_or(&existing.parsed.anime_title),
-                        ep,
-                        &existing.player_name,
-                        &existing.cleaned_media_title,
-                        true,
-                    );
-                } else if let Some(ep) = existing.parsed.episode_number {
-                    let _ = state.db.record_watch_history(
-                        None,
-                        &existing.parsed.anime_title,
-                        ep,
-                        &existing.player_name,
-                        &existing.cleaned_media_title,
-                        false,
-                    );
                 }
+            } else {
+                existing.elapsed_seconds = 0;
+                existing.auto_synced = false;
             }
 
             return Ok(Some(existing.clone()));
@@ -587,7 +583,7 @@ async fn poll_media_recognition(
     // New playback session detected
     let matched = state
         .db
-        .match_title_to_anime(&parsed.normalized_title, None);
+        .match_episode_to_anime(&mut parsed, None);
     let (
         matched_anime_id,
         matched_anime_title,
@@ -621,6 +617,33 @@ async fn poll_media_recognition(
 
     *active_guard = Some(new_session.clone());
     Ok(Some(new_session))
+}
+
+#[tauri::command]
+async fn link_detected_episode_to_anime(
+    state: State<'_, AppState>,
+    anime_id: i64,
+    alias_title: String,
+) -> Result<Option<DetectedMediaSession>, String> {
+    let db = state.db.clone();
+    let entry = tokio::task::spawn_blocking(move || db.link_alias_to_anime(anime_id, &alias_title))
+        .await
+        .map_err(|e| e.to_string())??;
+
+    let now = chrono::Utc::now().timestamp();
+    let mut active_guard = state.active_session.lock().map_err(|e| e.to_string())?;
+    if let Some(existing) = active_guard.as_mut() {
+        existing.matched_anime_id = Some(entry.id);
+        existing.matched_anime_title = Some(entry.title_romaji.clone());
+        existing.matched_cover_image = Some(entry.cover_image.clone());
+        existing.matched_current_progress = Some(entry.user_progress);
+        existing.matched_total_episodes = entry.episodes;
+        existing.detected_at_unix = now;
+        existing.elapsed_seconds = 0;
+        existing.auto_synced = false;
+        return Ok(Some(existing.clone()));
+    }
+    Ok(None)
 }
 
 #[tauri::command]
@@ -794,6 +817,7 @@ pub fn run() {
             test_parse_filename,
             simulate_playback_session,
             poll_media_recognition,
+            link_detected_episode_to_anime,
             get_watch_history,
             search_torrents_cmd,
             get_torrent_rules,

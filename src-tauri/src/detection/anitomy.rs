@@ -1,8 +1,9 @@
-use once_cell::sync::Lazy;
-use regex::Regex;
+use crate::detection::relations::{infer_season_from_title_suffix, relations_db};
 use serde::{Deserialize, Serialize};
+use std::ffi::{c_char, c_int, c_void};
 
-/// Parsed anime filename metadata (modeled after Anitomy's Elements structure).
+/// Parsed anime filename metadata populated directly from the C++ `anitomy` library (`erengy/anitomy`)
+/// and enriched with Taiga's `ExtendAnimeTitle` and `erengy/anime-relations` redirections.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct AnitomyElements {
     pub file_name: String,
@@ -26,399 +27,551 @@ pub struct AnitomyElements {
     pub subtitles: Option<String>,
 }
 
-static RE_CHECKSUM: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)^[0-9A-F]{8}$").unwrap());
-static RE_RESOLUTION: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)\b(2160p|1080p|720p|576p|480p|4K|UHD|3840x2160|1920x1080|1280x720)\b")
-        .unwrap()
-});
-static RE_BRACKETS: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"\[([^\[\]]+)\]|\(([^\(\)]+)\)|\{([^\{\}]+)\}").unwrap());
-static RE_LEADING_GROUP: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^\s*\[([^\[\]]+)\]\s*").unwrap());
-static RE_SXXEXX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)\bS(\d{1,2})E(\d{1,4})(?:v(\d))?(?:-E?(\d{1,4}))?\b").unwrap()
-});
-static RE_EP_EXPLICIT: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)\b(?:EP|Ep\.?|Episode)\s*(\d{1,4})(?:v(\d))?\b").unwrap()
-});
-static RE_DASH_EP: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(
-        r"(?i)\s+[-–—]\s+(\d{1,4})(?:v(\d))?(?:\s*[-~]\s*(\d{1,4}))?(?:\s+|\.|\[|\(|$)",
-    )
-    .unwrap()
-});
-static RE_SEASON_SUFFIX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)\b(?:Season\s*(\d{1,2})|S(\d{1,2})|(\d{1,2})(?:nd|rd|th)\s+Season)\b")
-        .unwrap()
-});
-static RE_TRAILING_EP: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)^(.+?)\s+(\d{1,3})(?:v(\d))?\s*$").unwrap()
-});
-static RE_BATCH_RANGE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)\b(\d{1,3})\s*[-~]\s*(\d{1,3})\b|\b(?:Batch|Complete\s*Series|Complete)\b")
-        .unwrap()
-});
-static RE_VOLUME: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)\b(?:Vol\.?|Volume)\s*(\d{1,2})\b").unwrap());
-
-const VIDEO_TERMS: &[(&str, &str)] = &[
-    ("hevc", "HEVC"),
-    ("x265", "x265"),
-    ("h265", "H.265"),
-    ("h.265", "H.265"),
-    ("av1", "AV1"),
-    ("x264", "x264"),
-    ("h264", "H.264"),
-    ("h.264", "H.264"),
-    ("10bit", "10-bit"),
-    ("10-bit", "10-bit"),
-    ("hi10p", "10-bit"),
-    ("hi10", "10-bit"),
-    ("hdr", "HDR"),
-    ("dv", "Dolby Vision"),
-];
-
-const AUDIO_TERMS: &[(&str, &str)] = &[
-    ("flac", "FLAC"),
-    ("aac", "AAC"),
-    ("opus", "Opus"),
-    ("eac3", "E-AC-3"),
-    ("e-ac-3", "E-AC-3"),
-    ("ac3", "AC3"),
-    ("dts", "DTS"),
-    ("truehd", "TrueHD"),
-    ("dual audio", "Dual Audio"),
-    ("dual-audio", "Dual Audio"),
-    ("multi-audio", "Multi Audio"),
-];
-
-const SOURCE_TERMS: &[(&str, &str)] = &[
-    ("blu-ray", "BluRay"),
-    ("bluray", "BluRay"),
-    ("bdrip", "BDRip"),
-    ("bd", "BluRay"),
-    ("web-dl", "WEB-DL"),
-    ("webdl", "WEB-DL"),
-    ("webrip", "WEBRip"),
-    ("web", "WEB"),
-    ("hdtv", "HDTV"),
-    ("dvdrip", "DVDRip"),
-];
-
-const ANIME_TYPES: &[(&str, &str)] = &[
-    ("ova", "OVA"),
-    ("oad", "OAD"),
-    ("ona", "ONA"),
-    ("ncop", "NCOP"),
-    ("nced", "NCED"),
-    ("special", "Special"),
-    ("sp", "Special"),
-    ("movie", "Movie"),
-];
-
-/// Normalize an anime title for fast O(1) dictionary/index lookups and fuzzy comparisons.
-pub fn normalize_anime_title(title: &str) -> String {
-    let mut out = String::with_capacity(title.len());
-    let mut last_space = true;
-    for ch in title.chars() {
-        if ch.is_alphanumeric() {
-            for lower in ch.to_lowercase() {
-                out.push(lower);
-            }
-            last_space = false;
-        } else if !last_space {
-            out.push(' ');
-            last_space = true;
-        }
-    }
-    out.trim().to_string()
+/// Matches `anitomy::ElementKind` from `vendor/anitomy/include/anitomy/element.hpp`.
+#[repr(i32)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum RawElementKind {
+    AudioTerm = 0,
+    Device = 1,
+    Episode = 2,
+    EpisodeTitle = 3,
+    FileChecksum = 4,
+    FileExtension = 5,
+    Language = 6,
+    Other = 7,
+    Part = 8,
+    ReleaseGroup = 9,
+    ReleaseInformation = 10,
+    ReleaseVersion = 11,
+    Season = 12,
+    Source = 13,
+    Subtitles = 14,
+    Title = 15,
+    Type = 16,
+    VideoResolution = 17,
+    VideoTerm = 18,
+    Volume = 19,
+    Year = 20,
 }
 
-/// Parse an anime filename or window title into structured Anitomy elements.
-pub fn parse_filename(input: &str) -> AnitomyElements {
-    let mut elements = AnitomyElements {
-        file_name: input.to_string(),
-        ..Default::default()
-    };
-
-    // Strip path if present
-    let base_name = input
-        .rsplit(['\\', '/'])
-        .next()
-        .unwrap_or(input)
-        .trim();
-
-    // Extract known video extension if present
-    let working = if let Some((stem, ext)) = base_name.rsplit_once('.') {
-        let ext_lower = ext.to_lowercase();
-        if matches!(
-            ext_lower.as_str(),
-            "mkv" | "mp4" | "avi" | "webm" | "m4v" | "mov" | "ts" | "m2ts" | "flv" | "ogm"
-        ) {
-            elements.file_extension = Some(ext_lower);
-            stem.to_string()
-        } else {
-            base_name.to_string()
+impl RawElementKind {
+    fn from_c_int(value: c_int) -> Option<Self> {
+        match value {
+            0 => Some(Self::AudioTerm),
+            1 => Some(Self::Device),
+            2 => Some(Self::Episode),
+            3 => Some(Self::EpisodeTitle),
+            4 => Some(Self::FileChecksum),
+            5 => Some(Self::FileExtension),
+            6 => Some(Self::Language),
+            7 => Some(Self::Other),
+            8 => Some(Self::Part),
+            9 => Some(Self::ReleaseGroup),
+            10 => Some(Self::ReleaseInformation),
+            11 => Some(Self::ReleaseVersion),
+            12 => Some(Self::Season),
+            13 => Some(Self::Source),
+            14 => Some(Self::Subtitles),
+            15 => Some(Self::Title),
+            16 => Some(Self::Type),
+            17 => Some(Self::VideoResolution),
+            18 => Some(Self::VideoTerm),
+            19 => Some(Self::Volume),
+            20 => Some(Self::Year),
+            _ => None,
         }
+    }
+}
+
+extern "C" {
+    fn tora_anitomy_parse(
+        input_ptr: *const c_char,
+        input_len: usize,
+        user_data: *mut c_void,
+        callback: extern "C" fn(*mut c_void, c_int, *const c_char, usize, usize),
+    );
+}
+
+#[derive(Default)]
+struct RawAnitomyParseState {
+    elements: AnitomyElements,
+    anime_part: Option<u32>,
+    anime_year: Option<u32>,
+}
+
+fn parse_u32_prefix(s: &str) -> Option<u32> {
+    let trimmed = s.trim();
+    if let Ok(n) = trimmed.parse::<u32>() {
+        return Some(n);
+    }
+    let digits: String = trimmed.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if !digits.is_empty() {
+        digits.parse::<u32>().ok()
     } else {
-        base_name.to_string()
+        None
+    }
+}
+
+extern "C" fn on_anitomy_element(
+    user_data: *mut c_void,
+    kind: c_int,
+    value_ptr: *const c_char,
+    value_len: usize,
+    _position: usize,
+) {
+    if user_data.is_null() || value_ptr.is_null() || value_len == 0 {
+        return;
+    }
+
+    let state = unsafe { &mut *(user_data as *mut RawAnitomyParseState) };
+    let elements = &mut state.elements;
+    let bytes = unsafe { std::slice::from_raw_parts(value_ptr as *const u8, value_len) };
+    let value = String::from_utf8_lossy(bytes);
+    let val = value.trim();
+    if val.is_empty() {
+        return;
+    }
+
+    let Some(element_kind) = RawElementKind::from_c_int(kind) else {
+        return;
     };
 
-    // Replace underscores with spaces if there are few or no spaces
-    let mut cleaned = if !working.contains(' ') && working.contains('_') {
-        working.replace('_', " ")
-    } else {
-        working.replace('_', " ")
-    };
-
-    // Extract leading release group [Group]
-    if let Some(cap) = RE_LEADING_GROUP.captures(&cleaned) {
-        let group = cap.get(1).unwrap().as_str().trim();
-        // Ensure it's not a resolution or checksum
-        if !RE_CHECKSUM.is_match(group) && !RE_RESOLUTION.is_match(group) {
-            elements.release_group = Some(group.to_string());
-        }
-    }
-
-    // Inspect all bracketed segments [ ... ], ( ... ), { ... }
-    for cap in RE_BRACKETS.captures_iter(&cleaned) {
-        let inner = cap
-            .get(1)
-            .or_else(|| cap.get(2))
-            .or_else(|| cap.get(3))
-            .map(|m| m.as_str().trim())
-            .unwrap_or("");
-        if inner.is_empty() {
-            continue;
-        }
-
-        // Checksum e.g. [F02B9C1A]
-        if RE_CHECKSUM.is_match(inner) {
-            elements.file_checksum = Some(inner.to_uppercase());
-            continue;
-        }
-
-        // Resolution inside brackets
-        if let Some(res_m) = RE_RESOLUTION.find(inner) {
-            let r = res_m.as_str().to_lowercase();
-            elements.video_resolution = Some(match r.as_str() {
-                "3840x2160" | "4k" | "uhd" | "2160p" => "2160p".to_string(),
-                "1920x1080" | "1080p" => "1080p".to_string(),
-                "1280x720" | "720p" => "720p".to_string(),
-                _ => r,
-            });
-        }
-
-        let inner_lower = inner.to_lowercase();
-
-        for (needle, label) in VIDEO_TERMS {
-            if inner_lower.contains(needle) && !elements.video_term.contains(&label.to_string()) {
-                elements.video_term.push(label.to_string());
-            }
-        }
-        for (needle, label) in AUDIO_TERMS {
-            if inner_lower.contains(needle) && !elements.audio_term.contains(&label.to_string()) {
-                elements.audio_term.push(label.to_string());
-            }
-        }
-        if elements.source.is_none() {
-            for (needle, label) in SOURCE_TERMS {
-                if inner_lower.split(|c: char| !c.is_alphanumeric() && c != '-').any(|tok| tok == *needle) {
-                    elements.source = Some(label.to_string());
-                    break;
-                }
-            }
-        }
-        if inner_lower.contains("multi-sub")
-            || inner_lower.contains("multiple subtitle")
-            || inner_lower.contains("multisub")
-        {
-            elements.subtitles = Some("Multi-Subs".to_string());
-        } else if inner_lower.contains("eng") || inner_lower.contains("english") {
-            elements.subtitles = Some("ENG".to_string());
-        }
-        if inner_lower.contains("batch") || inner_lower.contains("complete") {
-            elements.is_batch = true;
-        }
-    }
-
-    // Check trailing release group like "-Group" at end before extension if release_group is still None
-    // Now remove all bracketed tags to isolate Title + Episode + Season
-    let without_brackets = RE_BRACKETS.replace_all(&cleaned, " ").to_string();
-    cleaned = without_brackets
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    // Also scan non-bracketed string for resolution / video terms / source if not found yet
-    if elements.video_resolution.is_none() {
-        if let Some(res_m) = RE_RESOLUTION.find(&cleaned) {
-            let r = res_m.as_str().to_lowercase();
-            elements.video_resolution = Some(match r.as_str() {
-                "3840x2160" | "4k" | "uhd" | "2160p" => "2160p".to_string(),
-                "1920x1080" | "1080p" => "1080p".to_string(),
-                "1280x720" | "720p" => "720p".to_string(),
-                _ => r,
-            });
-            cleaned = cleaned.replace(res_m.as_str(), " ");
-        }
-    }
-
-    let cleaned_lower = cleaned.to_lowercase();
-    for (needle, label) in VIDEO_TERMS {
-        if cleaned_lower
-            .split(|c: char| !c.is_alphanumeric() && c != '.' && c != '-')
-            .any(|t| t == *needle)
-            && !elements.video_term.contains(&label.to_string())
-        {
-            elements.video_term.push(label.to_string());
-        }
-    }
-    for (needle, label) in AUDIO_TERMS {
-        if cleaned_lower
-            .split(|c: char| !c.is_alphanumeric() && c != '-')
-            .any(|t| t == *needle)
-            && !elements.audio_term.contains(&label.to_string())
-        {
-            elements.audio_term.push(label.to_string());
-        }
-    }
-    if elements.source.is_none() {
-        for (needle, label) in SOURCE_TERMS {
-            if cleaned_lower
-                .split(|c: char| !c.is_alphanumeric() && c != '-')
-                .any(|t| t == *needle)
+    match element_kind {
+        RawElementKind::AudioTerm => {
+            if !elements
+                .audio_term
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(val))
             {
-                elements.source = Some(label.to_string());
-                break;
+                elements.audio_term.push(val.to_string());
             }
         }
-    }
-
-    // Detect volume number if present
-    if let Some(cap) = RE_VOLUME.captures(&cleaned) {
-        if let Ok(v) = cap[1].parse::<u32>() {
-            elements.volume_number = Some(v);
-        }
-    }
-
-    // 1. Check S01E12 pattern
-    let mut title_part = cleaned.clone();
-    if let Some(cap) = RE_SXXEXX.captures(&cleaned) {
-        let full_match = cap.get(0).unwrap();
-        if let Ok(s) = cap[1].parse::<u32>() {
-            elements.anime_season = Some(s);
-        }
-        if let Ok(ep) = cap[2].parse::<u32>() {
-            elements.episode_number = Some(ep);
-        }
-        if let Some(v) = cap.get(3).and_then(|m| m.as_str().parse::<u32>().ok()) {
-            elements.episode_version = Some(v);
-        }
-        if let Some(ep2) = cap.get(4).and_then(|m| m.as_str().parse::<u32>().ok()) {
-            elements.episode_number_alt = Some(ep2);
-        }
-        title_part = cleaned[..full_match.start()].trim_end_matches(['-', '–', '—', ' ', '.']).to_string();
-    } else if let Some(cap) = RE_DASH_EP.captures(&cleaned) {
-        // 2. Check "Title - 04v2" pattern (use last occurrence if Title itself has a dash like "Title - Season 2 - 04")
-        let mut last_cap = cap;
-        for c in RE_DASH_EP.captures_iter(&cleaned) {
-            last_cap = c;
-        }
-        let full_match = last_cap.get(0).unwrap();
-        if let Ok(ep) = last_cap[1].parse::<u32>() {
-            elements.episode_number = Some(ep);
-        }
-        if let Some(v) = last_cap.get(2).and_then(|m| m.as_str().parse::<u32>().ok()) {
-            elements.episode_version = Some(v);
-        }
-        if let Some(ep2) = last_cap.get(3).and_then(|m| m.as_str().parse::<u32>().ok()) {
-            elements.episode_number_alt = Some(ep2);
-            elements.is_batch = true;
-        }
-        let after = cleaned[full_match.end()..].trim();
-        if !after.is_empty() && !after.starts_with('-') {
-            elements.episode_title = Some(after.trim_start_matches(['-', ' ', ':']).to_string());
-        }
-        title_part = cleaned[..full_match.start()].trim().to_string();
-    } else if let Some(cap) = RE_EP_EXPLICIT.captures(&cleaned) {
-        // 3. Check "Title Episode 05" / "Title Ep 05"
-        let full_match = cap.get(0).unwrap();
-        if let Ok(ep) = cap[1].parse::<u32>() {
-            elements.episode_number = Some(ep);
-        }
-        if let Some(v) = cap.get(2).and_then(|m| m.as_str().parse::<u32>().ok()) {
-            elements.episode_version = Some(v);
-        }
-        title_part = cleaned[..full_match.start()]
-            .trim_end_matches(['-', '–', '—', ' ', '.'])
-            .to_string();
-    } else if let Some(cap) = RE_TRAILING_EP.captures(&cleaned) {
-        // 4. Check "Title 05" at end of string (avoid matching years like 2024 or "Mob Psycho 100")
-        if let Ok(ep) = cap[2].parse::<u32>() {
-            let prefix = cap[1].trim();
-            let is_hundred_title = ep == 100 && prefix.to_lowercase().ends_with("psycho");
-            let is_eighty_six = ep == 86 && prefix.is_empty();
-            if !is_hundred_title && !is_eighty_six && ep <= 1500 {
-                elements.episode_number = Some(ep);
-                if let Some(v) = cap.get(3).and_then(|m| m.as_str().parse::<u32>().ok()) {
-                    elements.episode_version = Some(v);
+        RawElementKind::Episode => {
+            if let Some(ep) = parse_u32_prefix(val) {
+                if elements.episode_number.is_none() {
+                    elements.episode_number = Some(ep);
+                } else {
+                    elements.episode_number_alt = Some(ep);
+                    elements.is_batch = true;
                 }
-                title_part = prefix.trim_end_matches(['-', '–', '—', ' ']).to_string();
             }
         }
-    }
-
-    // Check if Season indicator is inside title_part (e.g., "Kusuriya no Hitorigoto 2nd Season" or "Attack on Titan - Season 4")
-    if let Some(cap) = RE_SEASON_SUFFIX.captures(&title_part) {
-        let s_num = cap
-            .get(1)
-            .or_else(|| cap.get(2))
-            .or_else(|| cap.get(3))
-            .and_then(|m| m.as_str().parse::<u32>().ok());
-        if let Some(s) = s_num {
-            if elements.anime_season.is_none() {
+        RawElementKind::EpisodeTitle => {
+            elements.episode_title = Some(val.to_string());
+        }
+        RawElementKind::FileChecksum => {
+            elements.file_checksum = Some(val.to_string());
+        }
+        RawElementKind::FileExtension => {
+            elements.file_extension = Some(val.to_lowercase());
+        }
+        RawElementKind::Part => {
+            if let Some(part) = parse_u32_prefix(val) {
+                state.anime_part = Some(part);
+            }
+        }
+        RawElementKind::ReleaseGroup => {
+            elements.release_group = Some(val.to_string());
+        }
+        RawElementKind::ReleaseInformation => {
+            let lower = val.to_ascii_lowercase();
+            if lower.contains("batch") || lower.contains("complete") {
+                elements.is_batch = true;
+            }
+        }
+        RawElementKind::ReleaseVersion => {
+            if let Some(v) = parse_u32_prefix(val) {
+                elements.episode_version = Some(v);
+            }
+        }
+        RawElementKind::Season => {
+            if let Some(s) = parse_u32_prefix(val) {
                 elements.anime_season = Some(s);
             }
         }
+        RawElementKind::Source => {
+            elements.source = Some(val.to_string());
+        }
+        RawElementKind::Subtitles => {
+            elements.subtitles = Some(val.to_string());
+        }
+        RawElementKind::Title => {
+            elements.anime_title = val.to_string();
+        }
+        RawElementKind::Type => {
+            elements.anime_type = Some(val.to_string());
+        }
+        RawElementKind::VideoResolution => {
+            elements.video_resolution = Some(val.to_string());
+        }
+        RawElementKind::VideoTerm => {
+            if !elements
+                .video_term
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(val))
+            {
+                elements.video_term.push(val.to_string());
+            }
+        }
+        RawElementKind::Volume => {
+            if let Some(vol) = parse_u32_prefix(val) {
+                elements.volume_number = Some(vol);
+            }
+        }
+        RawElementKind::Year => {
+            if let Some(yr) = parse_u32_prefix(val) {
+                state.anime_year = Some(yr);
+            }
+        }
+        RawElementKind::Language => {
+            if elements.subtitles.is_none() {
+                elements.subtitles = Some(val.to_string());
+            }
+        }
+        RawElementKind::Device | RawElementKind::Other => {}
     }
+}
 
-    // Check batch indicator
-    if !elements.is_batch && RE_BATCH_RANGE.is_match(&cleaned) && elements.episode_number.is_none() {
-        elements.is_batch = true;
-    }
-
-    // Detect OVA / ONA / Movie type tokens
-    for (needle, label) in ANIME_TYPES {
-        if cleaned_lower
-            .split(|c: char| !c.is_alphanumeric())
-            .any(|tok| tok == *needle)
-        {
-            elements.anime_type = Some(label.to_string());
-            break;
+/// Normalize an anime title using Taiga's `recognition_normalize.cpp` rules:
+/// - Roman numerals (`II` -> `2`, `III` -> `3`, ..., `XIII` -> `13`)
+/// - Character transliteration (`@` -> `a`, `×` -> `x`, `ō` -> `ou`, `ū` -> `uu`, `&` -> `and`)
+/// - Ordinal & season normalization (`2nd season` / `season 2` / `s2` / `s02` -> `2`, `1st season` / `season 1` / `s1` -> removed)
+/// - Common noise word removal (`the animation`, `the`, `(tv)`, `episode`, `special` -> `sp`, `oad`/`oav` -> `ova`)
+pub fn normalize_anime_title(title: &str) -> String {
+    let mut pre = String::with_capacity(title.len() + 8);
+    for ch in title.chars() {
+        match ch {
+            '@' => pre.push('a'),
+            '×' => pre.push('x'),
+            '꞉' => pre.push(':'),
+            'Ō' | 'ō' => pre.push_str("ou"),
+            'Ū' | 'ū' => pre.push_str("uu"),
+            '&' => pre.push_str(" and "),
+            _ if ch.is_alphanumeric() => {
+                for l in ch.to_lowercase() {
+                    pre.push(l);
+                }
+            }
+            _ => pre.push(' '),
         }
     }
 
-    // Clean dots if filename was dot-separated (e.g. "Sousou.no.Frieren.S01E28.1080p")
-    if !title_part.contains(' ') && title_part.contains('.') {
-        title_part = title_part.replace('.', " ");
+    // Split into raw case-preserved and lowercased word pairs so we only convert uppercase Roman numerals
+    let orig_words: Vec<&str> = title
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let lower_words: Vec<&str> = pre.split_whitespace().collect();
+
+    let mut tokens: Vec<String> = Vec::with_capacity(lower_words.len());
+    for (idx, &w) in lower_words.iter().enumerate() {
+        // Check if original word at similar position was uppercase Roman numeral (like Taiga's `normalizeRomanNumbers`)
+        let is_upper_roman = orig_words
+            .get(idx)
+            .map(|orig| orig.chars().all(|c| matches!(c, 'I' | 'V' | 'X')))
+            .unwrap_or(false);
+
+        let mapped = if is_upper_roman {
+            match w {
+                "ii" => "2",
+                "iii" => "3",
+                "iv" => "4",
+                "v" => "5",
+                "vi" => "6",
+                "vii" => "7",
+                "viii" => "8",
+                "ix" => "9",
+                "xi" => "11",
+                "xii" => "12",
+                "xiii" => "13",
+                _ => w,
+            }
+        } else {
+            match w {
+                "first" => "1st",
+                "second" => "2nd",
+                "third" => "3rd",
+                "fourth" => "4th",
+                "fifth" => "5th",
+                "sixth" => "6th",
+                "seventh" => "7th",
+                "eighth" => "8th",
+                "ninth" => "9th",
+                "oad" | "oav" => "ova",
+                "special" | "specials" => "sp",
+                _ => w,
+            }
+        };
+        tokens.push(mapped.to_string());
     }
 
-    let final_title = title_part
-        .trim_matches(|c: char| c == '-' || c == '–' || c == '—' || c.is_whitespace())
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    // Multi-word and single-word season/noise normalization (ported from `normalizeSeasonNumbers`)
+    let mut out_tokens: Vec<String> = Vec::with_capacity(tokens.len());
+    let mut i = 0;
+    while i < tokens.len() {
+        let cur = tokens[i].as_str();
+        let next = tokens.get(i + 1).map(|s| s.as_str());
 
-    elements.anime_title = if final_title.is_empty() {
-        working
-    } else {
-        final_title
-    };
-    elements.normalized_title = normalize_anime_title(&elements.anime_title);
+        // "the animation" -> skip both
+        if cur == "the" && next == Some("animation") {
+            i += 2;
+            continue;
+        }
 
-    elements
+        // Ordinal + "season": "1st season" -> skip, "2nd season" -> "2", etc.
+        if next == Some("season") {
+            match cur {
+                "1st" => {
+                    i += 2;
+                    continue;
+                }
+                "2nd" => {
+                    out_tokens.push("2".to_string());
+                    i += 2;
+                    continue;
+                }
+                "3rd" => {
+                    out_tokens.push("3".to_string());
+                    i += 2;
+                    continue;
+                }
+                "4th" => {
+                    out_tokens.push("4".to_string());
+                    i += 2;
+                    continue;
+                }
+                "5th" => {
+                    out_tokens.push("5".to_string());
+                    i += 2;
+                    continue;
+                }
+                "6th" => {
+                    out_tokens.push("6".to_string());
+                    i += 2;
+                    continue;
+                }
+                "7th" => {
+                    out_tokens.push("7".to_string());
+                    i += 2;
+                    continue;
+                }
+                "8th" => {
+                    out_tokens.push("8".to_string());
+                    i += 2;
+                    continue;
+                }
+                "9th" => {
+                    out_tokens.push("9".to_string());
+                    i += 2;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+
+        // "season N" / "series N"
+        if cur == "season" || cur == "series" {
+            if let Some(n_str) = next {
+                if let Ok(n) = n_str.parse::<u32>() {
+                    if n == 1 {
+                        i += 2;
+                        continue;
+                    } else if (2..=20).contains(&n) {
+                        out_tokens.push(n.to_string());
+                        i += 2;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Single-token season shorthands: "s1"/"s01" -> skip, "s2"/"s02" -> "2", etc.
+        if let Some(digits) = cur.strip_prefix('s') {
+            if !digits.is_empty() && digits.len() <= 2 && digits.chars().all(|c| c.is_ascii_digit())
+            {
+                if let Ok(n) = digits.parse::<u32>() {
+                    if n == 1 {
+                        i += 1;
+                        continue;
+                    } else if (2..=20).contains(&n) {
+                        out_tokens.push(n.to_string());
+                        i += 1;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Skip noise words
+        if matches!(cur, "the" | "episode" | "tv") {
+            i += 1;
+            continue;
+        }
+
+        out_tokens.push(cur.to_string());
+        i += 1;
+    }
+
+    out_tokens.join(" ")
+}
+
+/// Extract the effective season number from a raw or normalized anime title (defaults to 1).
+pub fn extract_effective_season(title: &str) -> u32 {
+    if let Some(s) = infer_season_from_title_suffix(title) {
+        return s;
+    }
+    let norm = normalize_anime_title(title);
+    if let Some(last) = norm.split_whitespace().last() {
+        if let Ok(n) = last.parse::<u32>() {
+            if (2..=15).contains(&n) {
+                return n;
+            }
+        }
+    }
+    1
+}
+
+fn parse_raw_with_cpp_anitomy(input: &str) -> RawAnitomyParseState {
+    let mut state = RawAnitomyParseState::default();
+    if input.is_empty() {
+        return state;
+    }
+    unsafe {
+        tora_anitomy_parse(
+            input.as_ptr() as *const c_char,
+            input.len(),
+            &mut state as *mut RawAnitomyParseState as *mut c_void,
+            on_anitomy_element,
+        );
+    }
+    state
+}
+
+fn is_invalid_parent_dir(name: &str) -> bool {
+    if name.is_empty() || name.contains(':') {
+        return true;
+    }
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "anime" | "download" | "downloads" | "extra" | "extras" | "subs" | "subtitles"
+    )
+}
+
+/// Parse an anime filename, window title, or full path into structured Anitomy elements:
+/// 1. Direct C++ `erengy/anitomy` tokenization & parsing
+/// 2. Parent directory season/title fallback (ported from Taiga's `recognition_path.cpp`)
+/// 3. `ExtendAnimeTitle` season/part composition (ported from Taiga's `recognition.cpp`)
+/// 4. `erengy/anime-relations` sequential episode redirection (ported from Taiga's `recognition_relations.cpp`)
+pub fn parse_filename(input: &str) -> AnitomyElements {
+    let segments: Vec<&str> = input
+        .split(['\\', '/'])
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let base_name = segments.last().copied().unwrap_or(input.trim());
+    if base_name.is_empty() {
+        return AnitomyElements {
+            file_name: input.to_string(),
+            ..Default::default()
+        };
+    }
+
+    let mut state = parse_raw_with_cpp_anitomy(base_name);
+    state.elements.file_name = input.to_string();
+
+    // Parent directory fallback (up to 2 levels up, matching Taiga's `parseParentDirectories`)
+    if segments.len() > 1
+        && (state.elements.anime_title.is_empty() || state.elements.anime_season.is_none())
+    {
+        for &parent_dir in segments[..segments.len() - 1].iter().rev().take(2) {
+            if is_invalid_parent_dir(parent_dir) {
+                continue;
+            }
+            let dir_state = parse_raw_with_cpp_anitomy(parent_dir);
+            if state.elements.anime_season.is_none() {
+                if let Some(s) = dir_state
+                    .elements
+                    .anime_season
+                    .or_else(|| infer_season_from_title_suffix(parent_dir))
+                {
+                    state.elements.anime_season = Some(s);
+                }
+            }
+            if state.elements.anime_title.is_empty() && !dir_state.elements.anime_title.is_empty() {
+                state.elements.anime_title = dir_state.elements.anime_title;
+            }
+        }
+    }
+
+    if state.elements.anime_title.is_empty() {
+        state.elements.anime_title = base_name.to_string();
+    }
+
+    let base_title = state.elements.anime_title.clone();
+    let base_norm_title = normalize_anime_title(&base_title);
+
+    // If `anime_season` wasn't tagged as a separate element by Anitomy (e.g. Roman numeral `II` in title),
+    // infer it from the title so `elements.anime_season` is populated.
+    if state.elements.anime_season.is_none() {
+        if let Some(inferred_s) = infer_season_from_title_suffix(&base_title) {
+            if inferred_s > 1 {
+                state.elements.anime_season = Some(inferred_s);
+            }
+        }
+    }
+
+    // Port of Taiga's `Engine::ExtendAnimeTitle` + canonical season title resolution from `anime-relations`:
+    // Anitomy v2 strips `S02`, `Season 2`, `2nd Season`, and `Part 2` out of `ElementKind::Title`.
+    let target_season = state.elements.anime_season.unwrap_or(1);
+    if let Some((canonical_title, _)) =
+        relations_db().resolve_canonical_season_title(&base_norm_title, target_season)
+    {
+        state.elements.anime_title = canonical_title;
+    } else if let Some(s) = state.elements.anime_season {
+        if s > 1 && infer_season_from_title_suffix(&state.elements.anime_title).is_none() {
+            state.elements.anime_title = format!("{} Season {}", state.elements.anime_title, s);
+        }
+    }
+
+    if let Some(part) = state.anime_part {
+        if part > 1
+            && !state
+                .elements
+                .anime_title
+                .to_ascii_lowercase()
+                .contains("part ")
+        {
+            state.elements.anime_title = format!("{} Part {}", state.elements.anime_title, part);
+        }
+    }
+
+    state.elements.normalized_title = normalize_anime_title(&state.elements.anime_title);
+
+    // Check `erengy/anime-relations` for sequential episode redirections
+    // (e.g., `Kusuriya no Hitorigoto - 51` -> `Kusuriya no Hitorigoto 3rd Season`, Season 3, Episode 3)
+    if let Some(ep) = state.elements.episode_number {
+        if let Some(redirection) = relations_db().find_by_title(
+            &state.elements.normalized_title,
+            &base_norm_title,
+            ep,
+            state.elements.episode_number_alt,
+        ) {
+            state.elements.episode_number = Some(redirection.dst_episode);
+            if let Some(alt_ep) = redirection.dst_episode_alt {
+                state.elements.episode_number_alt = Some(alt_ep);
+            }
+            if !redirection.dst_title.is_empty() {
+                state.elements.anime_title = redirection.dst_title;
+                state.elements.normalized_title = redirection.dst_norm_title;
+            }
+            if let Some(dst_season) = redirection.dst_season {
+                state.elements.anime_season = Some(dst_season);
+            }
+        }
+    }
+
+    state.elements
 }
 
 #[cfg(test)]
@@ -446,32 +599,68 @@ mod tests {
         assert_eq!(res.episode_number, Some(4));
         assert_eq!(res.episode_version, Some(2));
         assert_eq!(res.video_resolution.as_deref(), Some("1080p"));
-        assert_eq!(res.subtitles.as_deref(), Some("Multi-Subs"));
+        assert_eq!(res.subtitles.as_deref(), Some("Multiple Subtitle"));
     }
 
     #[test]
-    fn test_sxxexx_hevc() {
-        let res = parse_filename(
+    fn test_sxxexx_hevc_season_1_and_season_2() {
+        let s1 = parse_filename(
             "[EMBER] Bocchi the Rock! - S01E12 [1080p] [HEVC WEBRip 10bit] [Dual-Audio].mkv",
         );
-        assert_eq!(res.release_group.as_deref(), Some("EMBER"));
-        assert_eq!(res.anime_title, "Bocchi the Rock!");
-        assert_eq!(res.anime_season, Some(1));
-        assert_eq!(res.episode_number, Some(12));
-        assert_eq!(res.video_resolution.as_deref(), Some("1080p"));
-        assert!(res.video_term.contains(&"HEVC".to_string()));
-        assert!(res.video_term.contains(&"10-bit".to_string()));
-        assert!(res.audio_term.contains(&"Dual Audio".to_string()));
+        assert_eq!(s1.release_group.as_deref(), Some("EMBER"));
+        assert_eq!(s1.anime_title, "Bocchi the Rock!");
+        assert_eq!(s1.anime_season, Some(1));
+        assert_eq!(s1.episode_number, Some(12));
+        assert_eq!(s1.normalized_title, "bocchi rock");
+
+        let s2 = parse_filename(
+            "[EMBER] Bocchi the Rock! - S02E12 [1080p] [HEVC WEBRip 10bit] [Dual-Audio].mkv",
+        );
+        assert_eq!(s2.release_group.as_deref(), Some("EMBER"));
+        assert_eq!(s2.anime_title, "Bocchi the Rock! Season 2");
+        assert_eq!(s2.anime_season, Some(2));
+        assert_eq!(s2.episode_number, Some(12));
+        assert_eq!(s2.normalized_title, "bocchi rock 2");
+        assert_ne!(s1.normalized_title, s2.normalized_title);
     }
 
     #[test]
-    fn test_multi_dash_season() {
+    fn test_kusuriya_no_hitorigoto_sequential_redirection() {
+        // Season 1 (ep 1..24) stays Season 1
+        let ep12 = parse_filename("[SubsPlease] Kusuriya no Hitorigoto - 12 (1080p).mkv");
+        assert_eq!(ep12.anime_title, "Kusuriya no Hitorigoto");
+        assert_eq!(ep12.episode_number, Some(12));
+
+        // Season 2 (ep 25..48 -> S2 ep 1..24)
+        let ep27 = parse_filename("[SubsPlease] Kusuriya no Hitorigoto - 27 (1080p).mkv");
+        assert_eq!(ep27.anime_title, "Kusuriya no Hitorigoto 2nd Season");
+        assert_eq!(ep27.anime_season, Some(2));
+        assert_eq!(ep27.episode_number, Some(3));
+
+        // Season 3 (ep 49..60 -> S3 ep 1..12): ep 51 is ep 3 of season 3!
+        let ep51 = parse_filename("[SubsPlease] Kusuriya no Hitorigoto - 51 (1080p).mkv");
+        assert_eq!(ep51.anime_title, "Kusuriya no Hitorigoto 3rd Season");
+        assert_eq!(ep51.anime_season, Some(3));
+        assert_eq!(ep51.episode_number, Some(3));
+        assert_eq!(ep51.normalized_title, "kusuriya no hitorigoto 3");
+
+        // Abbreviated title with explicit season: [Judas] Kusuriya - S03E03.mkv
+        let judas_s3 = parse_filename("[Judas] Kusuriya - S03E03.mkv");
+        assert_eq!(judas_s3.release_group.as_deref(), Some("Judas"));
+        assert_eq!(judas_s3.anime_title, "Kusuriya no Hitorigoto 3rd Season");
+        assert_eq!(judas_s3.anime_season, Some(3));
+        assert_eq!(judas_s3.episode_number, Some(3));
+        assert_eq!(judas_s3.normalized_title, "kusuriya no hitorigoto 3");
+    }
+
+    #[test]
+    fn test_multi_dash_season_and_relations_redirection() {
+        // Shingeki no Kyojin Season 4 Ep 87 is continuous numbering (76-87 -> Final Season Part 2 Ep 1-12)
         let res = parse_filename(
             "[Judas] Shingeki no Kyojin - Season 4 - 87 [1080p][HEVC x265 10bit].mkv",
         );
         assert_eq!(res.release_group.as_deref(), Some("Judas"));
-        assert_eq!(res.anime_title, "Shingeki no Kyojin - Season 4");
         assert_eq!(res.anime_season, Some(4));
-        assert_eq!(res.episode_number, Some(87));
+        assert_eq!(res.episode_number, Some(12));
     }
 }
