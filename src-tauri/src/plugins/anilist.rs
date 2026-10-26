@@ -102,9 +102,9 @@ impl AniListPlugin {
         let cover_obj = media.get("coverImage");
         let cover_image = cover_obj
             .and_then(|c| {
-                c.get("extraLarge")
+                c.get("large")
                     .and_then(|v| v.as_str())
-                    .or_else(|| c.get("large").and_then(|v| v.as_str()))
+                    .or_else(|| c.get("extraLarge").and_then(|v| v.as_str()))
             })
             .unwrap_or("")
             .to_string();

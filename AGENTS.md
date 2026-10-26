@@ -64,7 +64,8 @@ Tora/
 │       ├── RecognitionView.tsx           # Live episode detection, unmatched anime linking prompt & watch history
 │       ├── SettingsAndPluginsView.tsx    # Themes, AniList account sync, recognition delay & qBittorrent config
 │       ├── TestingView.tsx               # Playback simulator, interactive Anitomy token parser & player registry
-│       └── TorrentsView.tsx              # Nyaa/AnimeTosho RSS search & automated torrent rule editor
+│       ├── TorrentsView.tsx              # Nyaa/AnimeTosho RSS search & automated torrent rule editor
+│       └── VirtualWatchlist.tsx          # Viewport-windowed virtual list/grid for Grid, Compact & Table modes
 └── src-tauri/                            # Tauri v2 Rust Backend & Native C++ Bindings
     ├── build.rs                          # Compiles vendored C++ `anitomy` (/std:c++latest) & `anisthesia` (/std:c++20)
     ├── cpp/
@@ -120,3 +121,8 @@ When a filename or media player window title is parsed (`parse_filename` in `src
 - Use `AnimeMatcherIndex` (`db.build_matcher_index()`) for any batch matching (library scans, torrent RSS evaluation). It loads all titles, synonyms, and aliases in a single SQL query and performs matching in memory in O(1) / microsecond time.
 - Single-entry mutations (`update_anime_user_state`) must query only the target `anime_id` (`get_anime_entry_by_id`) and only trigger `rematch_all_local_episodes()` if `custom_folder` or `synonyms` actually changed.
 - Adding anime (`add_or_upsert_anime`) must never block on `rematch_all_local_episodes()`. Instead, run targeted background matching for unmatched episodes via `match_unmatched_episodes_for_anime(anime_id)` and provide instant 0ms optimistic UI updates in React.
+
+### 5. Memory Footprint & Virtualization
+- **DOM Virtualization**: Large lists (`VirtualWatchlist.tsx` for the Anime Watchlist across `"grid"`, `"compact"`, and `"table"` modes, and the Indexed Local Episodes table in `LibraryManagerView.tsx`) must remain virtualized so WebView2 only mounts visible rows (+ overscan) and releases decoded cover image bitmaps for off-screen rows.
+- **Cover Image Resolution (`getOptimizedCoverUrl`)**: Never use AniList `/cover/extraLarge/` URLs in lists or grids. Use `getOptimizedCoverUrl(url, "medium")` for small thumbnails (`w-7` to `w-24`) and `getOptimizedCoverUrl(url, "large")` for poster cards.
+- **SQLite Page Cache**: Keep `PRAGMA cache_size = -4000` (4 MB) in `src-tauri/src/db/mod.rs` to avoid unnecessary native heap usage.

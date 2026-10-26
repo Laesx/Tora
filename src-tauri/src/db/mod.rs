@@ -456,7 +456,8 @@ impl Database {
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
              PRAGMA temp_store = MEMORY;
-             PRAGMA cache_size = -64000;
+             PRAGMA cache_size = -4000;
+             PRAGMA mmap_size = 0;
              PRAGMA foreign_keys = ON;",
         )
         .map_err(|e| e.to_string())?;

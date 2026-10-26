@@ -18,7 +18,7 @@ import {
   Tag,
 } from "lucide-react";
 import { AnimeEntry, LocalEpisodeFile } from "../types";
-import { formatBytes, formatCountdown, toraApi } from "../api";
+import { formatBytes, formatCountdown, getOptimizedCoverUrl, toraApi } from "../api";
 
 interface AnimeDetailModalProps {
   anime: AnimeEntry;
@@ -192,7 +192,7 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
         <div className="relative h-48 w-full bg-bg-tertiary shrink-0 overflow-hidden">
           {anime.banner_image || anime.cover_image ? (
             <img
-              src={anime.banner_image || anime.cover_image}
+              src={anime.banner_image || getOptimizedCoverUrl(anime.cover_image, "large")}
               alt={anime.title_romaji}
               decoding="async"
               className="w-full h-full object-cover opacity-45 scale-105 blur-[1px]"
@@ -211,7 +211,7 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
           {/* Cover & Title Header */}
           <div className="absolute bottom-3 left-6 right-6 flex items-end gap-5">
             <img
-              src={anime.cover_image}
+              src={getOptimizedCoverUrl(anime.cover_image, "medium")}
               alt={anime.title_romaji}
               decoding="async"
               className="w-24 h-36 object-cover rounded-xl shadow-xl border-2 border-border-subtle shrink-0 bg-bg-tertiary"

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Tv,
   HardDrive,
@@ -10,16 +10,9 @@ import {
   LayoutGrid,
   List,
   Rows,
-  Plus,
-  Minus,
   Play,
-  Star,
-  Clock,
-  MoreHorizontal,
   Sparkles,
   CheckCircle2,
-  Command as CommandIcon,
-  RefreshCw,
   Shuffle,
   Palette,
   FlaskConical,
@@ -33,11 +26,10 @@ import {
 import {
   THEME_PRESETS,
   applyThemeToDocument,
-  formatCountdown,
   toraApi,
 } from "./api";
 import { AnimeDetailModal } from "./components/AnimeDetailModal";
-import { AnimeQuickMenu } from "./components/AnimeQuickMenu";
+import { VirtualWatchlist } from "./components/VirtualWatchlist";
 import { LibraryManagerView } from "./components/LibraryManagerView";
 import { TorrentsView } from "./components/TorrentsView";
 import { RecognitionView } from "./components/RecognitionView";
@@ -65,6 +57,7 @@ const STATUS_TABS = [
 ];
 
 export const App: React.FC = () => {
+  const mainScrollRef = useRef<HTMLElement | null>(null);
   const [activeTab, setActiveTab] = useState<NavTab>("watchlist");
   const [statusFilter, setStatusFilter] = useState<string>("CURRENT");
   const [searchQuery, setSearchQuery] = useState("");
@@ -166,6 +159,20 @@ export const App: React.FC = () => {
               } Episode ${session.parsed.episode_number ?? ""}!`,
               "success"
             );
+          }
+          // Avoid unnecessary React re-renders and object allocations when session state is unchanged
+          if (
+            prev &&
+            session &&
+            prev.cleaned_media_title === session.cleaned_media_title &&
+            prev.player_name === session.player_name &&
+            prev.matched_anime_id === session.matched_anime_id &&
+            prev.auto_synced === session.auto_synced &&
+            (session.auto_synced ||
+              !session.matched_anime_id ||
+              prev.elapsed_seconds === session.elapsed_seconds)
+          ) {
+            return prev;
           }
           return session;
         });
@@ -594,7 +601,7 @@ export const App: React.FC = () => {
         )}
 
         {/* Active View Content */}
-        <main className="flex-1 overflow-y-auto">
+        <main ref={mainScrollRef} className="flex-1 overflow-y-auto">
           {activeTab === "watchlist" && (
             <div className="p-6 space-y-5 max-w-7xl mx-auto">
               {/* Top Watchlist Filter & View Mode Toolbar */}
@@ -724,314 +731,23 @@ export const App: React.FC = () => {
                 </div>
               </div>
 
-              {/* Watchlist Rendering */}
-              {filteredAnime.length === 0 ? (
-                <div className="py-16 text-center bg-bg-secondary border border-border-subtle rounded-2xl space-y-3">
-                  <p className="text-sm font-semibold text-text-primary">
-                    No anime in this list view
-                  </p>
-                  <p className="text-xs text-text-muted">
-                    Use the Discover tab to add shows or sync your AniList account in Settings.
-                  </p>
-                </div>
-              ) : viewMode === "grid" ? (
-                /* Poster Grid View */
-                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
-                  {filteredAnime.map((anime) => {
-                    const pct = anime.episodes
-                      ? Math.min(
-                          100,
-                          Math.round((anime.user_progress / anime.episodes) * 100)
-                        )
-                      : 50;
-                    const cd = formatCountdown(anime.next_airing_at);
-
-                    return (
-                      <div
-                        key={anime.id}
-                        onClick={() => setSelectedAnime(anime)}
-                        className="group relative bg-bg-secondary border border-border-subtle hover:border-accent/70 rounded-2xl overflow-visible flex flex-col cursor-pointer transition shadow-sm hover:shadow-xl"
-                      >
-                        <div className="relative aspect-[3/4] w-full rounded-t-2xl overflow-hidden bg-bg-tertiary">
-                          <img
-                            src={anime.cover_image}
-                            alt={anime.title_romaji}
-                            loading="lazy"
-                            decoding="async"
-                            className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
-                          />
-                          <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/15 to-transparent" />
-
-                          {/* Top Left Badges: Disk Episodes & Airing Countdown */}
-                          <div className="absolute top-2.5 left-2.5 flex flex-col gap-1">
-                            {anime.local_episode_count > 0 && (
-                              <span className="px-2 py-0.5 rounded-md bg-emerald-500/90 text-black text-[10px] font-bold flex items-center gap-1 shadow">
-                                <HardDrive className="w-3 h-3" />
-                                {anime.local_episode_count} on disk
-                              </span>
-                            )}
-                            {cd && anime.next_airing_episode && (
-                              <span className="px-2 py-0.5 rounded-md bg-black/80 backdrop-blur-sm text-emerald-400 text-[10px] font-mono font-semibold flex items-center gap-1">
-                                <Clock className="w-2.5 h-2.5" />
-                                Ep {anime.next_airing_episode} in {cd}
-                              </span>
-                            )}
-                          </div>
-
-                          {/* Top Right Quick Menu Trigger (Small Menu per Anime) */}
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setQuickMenuAnimeId(
-                                quickMenuAnimeId === anime.id ? null : anime.id
-                              );
-                            }}
-                            className="absolute top-2.5 right-2.5 p-1.5 rounded-lg bg-black/75 hover:bg-accent text-white transition"
-                            title="Quick Info Menu"
-                          >
-                            <MoreHorizontal className="w-4 h-4" />
-                          </button>
-
-                          {/* Bottom Overlay: Score & Progress +1 */}
-                          <div className="absolute bottom-2.5 left-3 right-3 flex items-center justify-between text-white">
-                            <span className="text-xs font-mono font-bold">
-                              Ep {anime.user_progress} / {anime.episodes ?? "?"}
-                            </span>
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleStepEpisode(anime, 1);
-                              }}
-                              className="px-2 py-1 rounded-lg bg-accent hover:bg-accent-hover text-white text-[11px] font-bold flex items-center gap-0.5 shadow"
-                              title="Increment Episode (+1)"
-                            >
-                              <Plus className="w-3 h-3" />1
-                            </button>
-                          </div>
-                        </div>
-
-                        {/* Progress Bar */}
-                        <div className="w-full h-1 bg-bg-tertiary overflow-hidden">
-                          <div
-                            className="h-full bg-accent transition-all"
-                            style={{ width: `${pct}%` }}
-                          />
-                        </div>
-
-                        {/* Card Footer */}
-                        <div className="p-3 flex-1 flex flex-col justify-between">
-                          <h3
-                            className="text-xs font-bold text-text-primary line-clamp-1 group-hover:text-accent transition"
-                            title={anime.title_romaji}
-                          >
-                            {anime.title_romaji}
-                          </h3>
-                          <div className="flex items-center justify-between text-[11px] text-text-muted mt-1">
-                            <span className="truncate">
-                              {anime.studios[0] || anime.format}
-                            </span>
-                            {anime.user_score > 0 && (
-                              <span className="flex items-center gap-0.5 text-amber-400 font-mono font-semibold shrink-0">
-                                <Star className="w-3 h-3 fill-amber-400" />
-                                {anime.user_score}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-
-                        {/* Floating Small Quick Info Menu */}
-                        {quickMenuAnimeId === anime.id && (
-                          <div className="absolute top-11 right-2 z-40">
-                            <AnimeQuickMenu
-                              anime={anime}
-                              onClose={() => setQuickMenuAnimeId(null)}
-                              onOpenFullModal={(a) => setSelectedAnime(a)}
-                              onStepEpisode={handleStepEpisode}
-                              onSearchTorrents={(q) => {
-                                setTorrentSearchQuery(q);
-                                setActiveTab("torrents");
-                              }}
-                              onSimulatePlayback={(fname) =>
-                                handleSimulatePlayback("mpv", fname)
-                              }
-                            />
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              ) : viewMode === "compact" ? (
-                /* Detailed 2-Column Cards View */
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                  {filteredAnime.map((anime) => (
-                    <div
-                      key={anime.id}
-                      onClick={() => setSelectedAnime(anime)}
-                      className="flex gap-4 p-3.5 rounded-2xl bg-bg-secondary border border-border-subtle hover:border-accent/60 cursor-pointer transition"
-                    >
-                      <img
-                        src={anime.cover_image}
-                        alt={anime.title_romaji}
-                        loading="lazy"
-                        decoding="async"
-                        className="w-20 h-28 object-cover rounded-xl shrink-0"
-                      />
-                      <div className="flex-1 min-w-0 flex flex-col justify-between">
-                        <div>
-                          <div className="flex items-center justify-between gap-2">
-                            <h3 className="text-sm font-bold text-text-primary truncate">
-                              {anime.title_romaji}
-                            </h3>
-                            <span className="px-2 py-0.5 rounded bg-bg-tertiary text-[10px] font-mono text-text-secondary shrink-0">
-                              {anime.format}
-                            </span>
-                          </div>
-                          <p className="text-[11px] text-text-muted line-clamp-2 mt-1">
-                            {anime.synopsis}
-                          </p>
-                        </div>
-
-                        <div className="flex items-center justify-between gap-2 pt-2 border-t border-border-subtle text-xs">
-                          <div className="flex items-center gap-2">
-                            <span className="font-mono font-bold text-accent">
-                              Ep {anime.user_progress} / {anime.episodes ?? "?"}
-                            </span>
-                            {anime.local_episode_count > 0 && (
-                              <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 text-[10px] font-mono">
-                                {anime.local_episode_count} local
-                              </span>
-                            )}
-                          </div>
-
-                          <div
-                            className="flex items-center gap-1"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <button
-                              onClick={() => handleStepEpisode(anime, -1)}
-                              className="p-1.5 rounded-lg bg-bg-primary hover:bg-bg-tertiary border border-border-subtle text-text-secondary"
-                            >
-                              <Minus className="w-3 h-3" />
-                            </button>
-                            <button
-                              onClick={() => handleStepEpisode(anime, 1)}
-                              className="px-2.5 py-1 rounded-lg bg-accent hover:bg-accent-hover text-white font-semibold text-xs flex items-center gap-1"
-                            >
-                              <Plus className="w-3 h-3" />1
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                /* Taiga Classic Dense Table View */
-                <div className="bg-bg-secondary border border-border-subtle rounded-2xl overflow-hidden">
-                  <table className="w-full text-left border-collapse text-xs">
-                    <thead className="bg-bg-tertiary text-text-muted uppercase text-[10px]">
-                      <tr>
-                        <th className="py-2.5 px-4">Anime Title</th>
-                        <th className="py-2.5 px-3">Type</th>
-                        <th className="py-2.5 px-3">Progress</th>
-                        <th className="py-2.5 px-3">On Disk</th>
-                        <th className="py-2.5 px-3">Score</th>
-                        <th className="py-2.5 px-3">Season</th>
-                        <th className="py-2.5 px-4 text-right">Quick Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-border-subtle">
-                      {filteredAnime.map((anime) => {
-                        const pct = anime.episodes
-                          ? Math.min(
-                              100,
-                              Math.round(
-                                (anime.user_progress / anime.episodes) * 100
-                              )
-                            )
-                          : 50;
-                        return (
-                          <tr
-                            key={anime.id}
-                            onClick={() => setSelectedAnime(anime)}
-                            className="hover:bg-bg-tertiary/60 cursor-pointer transition"
-                          >
-                            <td className="py-2.5 px-4 flex items-center gap-3">
-                              <img
-                                src={anime.cover_image}
-                                alt={anime.title_romaji}
-                                loading="lazy"
-                                decoding="async"
-                                className="w-7 h-10 object-cover rounded shrink-0"
-                              />
-                              <div>
-                                <div className="font-semibold text-text-primary">
-                                  {anime.title_romaji}
-                                </div>
-                                <div className="text-[10px] text-text-muted">
-                                  {anime.studios.join(", ")}
-                                </div>
-                              </div>
-                            </td>
-                            <td className="py-2.5 px-3 font-mono text-[11px] text-text-secondary">
-                              {anime.format}
-                            </td>
-                            <td className="py-2.5 px-3 w-44">
-                              <div className="flex items-center justify-between text-[11px] font-mono mb-1">
-                                <span>
-                                  {anime.user_progress} / {anime.episodes ?? "?"}
-                                </span>
-                                <span className="text-text-muted">{pct}%</span>
-                              </div>
-                              <div className="w-full h-1.5 rounded-full bg-bg-tertiary overflow-hidden">
-                                <div
-                                  className="h-full bg-accent rounded-full"
-                                  style={{ width: `${pct}%` }}
-                                />
-                              </div>
-                            </td>
-                            <td className="py-2.5 px-3 font-mono text-[11px]">
-                              {anime.local_episode_count > 0 ? (
-                                <span className="text-emerald-400 font-semibold">
-                                  {anime.local_episode_count} files
-                                </span>
-                              ) : (
-                                <span className="text-text-muted">-</span>
-                              )}
-                            </td>
-                            <td className="py-2.5 px-3 font-mono font-bold text-amber-400">
-                              {anime.user_score > 0 ? anime.user_score : "-"}
-                            </td>
-                            <td className="py-2.5 px-3 text-[11px] text-text-secondary">
-                              {anime.season || ""} {anime.season_year || ""}
-                            </td>
-                            <td
-                              className="py-2.5 px-4 text-right"
-                              onClick={(e) => e.stopPropagation()}
-                            >
-                              <div className="flex items-center justify-end gap-1">
-                                <button
-                                  onClick={() => handleStepEpisode(anime, -1)}
-                                  className="p-1.5 rounded bg-bg-primary hover:bg-bg-tertiary border border-border-subtle text-text-secondary"
-                                >
-                                  <Minus className="w-3 h-3" />
-                                </button>
-                                <button
-                                  onClick={() => handleStepEpisode(anime, 1)}
-                                  className="px-2 py-1 rounded bg-accent hover:bg-accent-hover text-white font-mono font-bold text-[11px]"
-                                >
-                                  +1
-                                </button>
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              )}
+              {/* Virtualized Watchlist Rendering */}
+              <VirtualWatchlist
+                items={filteredAnime}
+                viewMode={viewMode}
+                scrollContainerRef={mainScrollRef}
+                quickMenuAnimeId={quickMenuAnimeId}
+                onSetQuickMenuAnimeId={setQuickMenuAnimeId}
+                onSelectAnime={(a) => setSelectedAnime(a)}
+                onStepEpisode={handleStepEpisode}
+                onSearchTorrents={(q) => {
+                  setTorrentSearchQuery(q);
+                  setActiveTab("torrents");
+                }}
+                onSimulatePlayback={(fname) =>
+                  handleSimulatePlayback("mpv", fname)
+                }
+              />
             </div>
           )}
 

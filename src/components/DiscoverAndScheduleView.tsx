@@ -10,7 +10,7 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { AnimeEntry } from "../types";
-import { formatCountdown, toraApi } from "../api";
+import { formatCountdown, getOptimizedCoverUrl, toraApi } from "../api";
 
 interface DiscoverAndScheduleViewProps {
   animeList: AnimeEntry[];
@@ -105,8 +105,10 @@ export const DiscoverAndScheduleView: React.FC<
                   className="flex items-center gap-3 p-3 rounded-xl bg-bg-primary border border-border-subtle hover:border-accent/60 cursor-pointer transition"
                 >
                   <img
-                    src={a.cover_image}
+                    src={getOptimizedCoverUrl(a.cover_image, "medium")}
                     alt={a.title_romaji}
+                    loading="lazy"
+                    decoding="async"
                     className="w-12 h-16 object-cover rounded-lg shrink-0"
                   />
                   <div className="min-w-0 flex-1">
@@ -224,9 +226,11 @@ export const DiscoverAndScheduleView: React.FC<
                 >
                   <div className="relative aspect-[3/4] w-full bg-bg-tertiary overflow-hidden">
                     <img
-                      src={item.cover_image}
+                      src={getOptimizedCoverUrl(item.cover_image, "large")}
                       alt={item.title_romaji}
-                      className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
+                      loading="lazy"
+                      decoding="async"
+                      className="w-full h-full object-cover"
                     />
                     {item.average_score && (
                       <span className="absolute top-2 right-2 px-2 py-0.5 rounded-md bg-black/75 backdrop-blur-sm text-amber-400 text-[11px] font-bold flex items-center gap-1">

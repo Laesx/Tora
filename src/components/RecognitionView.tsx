@@ -16,7 +16,7 @@ import {
   DetectedMediaSession,
   WatchHistoryEntry,
 } from "../types";
-import { toraApi } from "../api";
+import { getOptimizedCoverUrl, toraApi } from "../api";
 
 interface RecognitionViewProps {
   activeSession: DetectedMediaSession | null;
@@ -64,13 +64,15 @@ export const RecognitionView: React.FC<RecognitionViewProps> = ({
 
   const filteredAnimeChoices = useMemo(() => {
     const q = animeSearch.trim().toLowerCase();
-    if (!q) return animeList;
-    return animeList.filter(
-      (a) =>
-        a.title_romaji.toLowerCase().includes(q) ||
-        (a.title_english && a.title_english.toLowerCase().includes(q)) ||
-        a.synonyms.some((s) => s.toLowerCase().includes(q))
-    );
+    const list = !q
+      ? animeList
+      : animeList.filter(
+          (a) =>
+            a.title_romaji.toLowerCase().includes(q) ||
+            (a.title_english && a.title_english.toLowerCase().includes(q)) ||
+            a.synonyms.some((s) => s.toLowerCase().includes(q))
+        );
+    return list.slice(0, 48);
   }, [animeList, animeSearch]);
 
   const showAnimeSelector =
@@ -177,8 +179,12 @@ export const RecognitionView: React.FC<RecognitionViewProps> = ({
             >
               {activeSession.matched_cover_image && (
                 <img
-                  src={activeSession.matched_cover_image}
+                  src={getOptimizedCoverUrl(
+                    activeSession.matched_cover_image,
+                    "medium"
+                  )}
                   alt={activeSession.matched_anime_title || ""}
+                  decoding="async"
                   className="w-16 h-24 object-cover rounded-lg border border-border-subtle shrink-0"
                 />
               )}
@@ -284,8 +290,10 @@ export const RecognitionView: React.FC<RecognitionViewProps> = ({
                         }`}
                       >
                         <img
-                          src={anime.cover_image}
+                          src={getOptimizedCoverUrl(anime.cover_image, "medium")}
                           alt={anime.title_romaji}
+                          loading="lazy"
+                          decoding="async"
                           className="w-9 h-12 object-cover rounded-md shrink-0"
                         />
                         <div className="min-w-0 flex-1">

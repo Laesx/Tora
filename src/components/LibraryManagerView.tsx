@@ -53,6 +53,15 @@ export const LibraryManagerView: React.FC<LibraryManagerViewProps> = ({
   const [selectedBindAnimeId, setSelectedBindAnimeId] = useState<number>(
     animeList[0]?.id || 0
   );
+  const [tableScrollTop, setTableScrollTop] = useState(0);
+
+  const animeByIdMap = useMemo(() => {
+    const map = new Map<number, AnimeEntry>();
+    for (const a of animeList) {
+      map.set(a.id, a);
+    }
+    return map;
+  }, [animeList]);
 
   const loadLibraryState = async () => {
     try {
@@ -431,147 +440,186 @@ export const LibraryManagerView: React.FC<LibraryManagerViewProps> = ({
             No indexed video files match the current filter.
           </div>
         ) : (
-          <div className="overflow-x-auto border border-border-subtle rounded-xl max-h-[420px] overflow-y-auto">
-            <table className="w-full text-left border-collapse text-xs">
-              <thead className="bg-bg-tertiary text-text-muted uppercase text-[10px] sticky top-0 z-10">
-                <tr>
-                  <th className="py-2.5 px-3">Drive</th>
-                  <th className="py-2.5 px-3">Parsed Title (Anitomy)</th>
-                  <th className="py-2.5 px-3">Ep</th>
-                  <th className="py-2.5 px-3">Metadata</th>
-                  <th className="py-2.5 px-3">Linked Anime</th>
-                  <th className="py-2.5 px-3 text-right">Size</th>
-                  <th className="py-2.5 px-3 text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border-subtle bg-bg-primary/40">
-                {filteredEpisodes.slice(0, 250).map((ep) => {
-                  const linkedAnime = animeList.find(
-                    (a) => a.id === ep.matched_anime_id
-                  );
-                  return (
-                    <tr
-                      key={ep.id}
-                      className="hover:bg-bg-tertiary/50 transition"
-                    >
-                      <td className="py-2 px-3 font-mono text-[11px] text-text-secondary">
-                        {ep.drive_root}
-                      </td>
-                      <td className="py-2 px-3">
-                        <div className="font-medium text-text-primary">
-                          {ep.parsed_title}
-                        </div>
-                        <div
-                          className="text-[11px] text-text-muted truncate max-w-xs font-mono"
-                          title={ep.file_path}
-                        >
-                          {ep.file_name}
-                        </div>
-                      </td>
-                      <td className="py-2 px-3 font-mono font-bold text-accent">
-                        {ep.episode_number ?? "-"}
-                      </td>
-                      <td className="py-2 px-3">
-                        <div className="flex flex-wrap gap-1">
-                          {ep.release_group && (
-                            <span className="px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary text-[10px]">
-                              {ep.release_group}
-                            </span>
-                          )}
-                          {ep.resolution && (
-                            <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 font-mono text-[10px]">
-                              {ep.resolution}
-                            </span>
-                          )}
-                          {ep.video_terms.map((vt) => (
-                            <span
-                              key={vt}
-                              className="px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400 font-mono text-[10px]"
-                            >
-                              {vt}
-                            </span>
-                          ))}
-                        </div>
-                      </td>
-                      <td className="py-2 px-3">
-                        {linkedAnime ? (
-                          <button
-                            onClick={() => onSelectAnime(linkedAnime)}
-                            className="flex items-center gap-1.5 text-emerald-400 hover:underline font-medium"
-                          >
-                            <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
-                            <span className="truncate max-w-[180px]">
-                              {linkedAnime.title_romaji}
-                            </span>
-                          </button>
-                        ) : bindingFileId === ep.id ? (
-                          <div className="flex items-center gap-1">
-                            <select
-                              value={selectedBindAnimeId}
-                              onChange={(e) =>
-                                setSelectedBindAnimeId(Number(e.target.value))
-                              }
-                              className="px-2 py-1 rounded bg-bg-primary border border-border-subtle text-[11px] text-text-primary max-w-[160px]"
-                            >
-                              {animeList.map((a) => (
-                                <option key={a.id} value={a.id}>
-                                  {a.title_romaji}
-                                </option>
-                              ))}
-                            </select>
-                            <button
-                              onClick={() =>
-                                handleBindAlias(
-                                  ep.normalized_title,
-                                  selectedBindAnimeId
-                                )
-                              }
-                              className="px-2 py-1 rounded bg-accent text-white text-[10px] font-semibold"
-                            >
-                              Bind
-                            </button>
-                          </div>
-                        ) : (
-                          <button
-                            onClick={() => {
-                              setBindingFileId(ep.id);
-                              setSelectedBindAnimeId(animeList[0]?.id || 0);
-                            }}
-                            className="flex items-center gap-1 text-amber-400 hover:underline text-[11px]"
-                          >
-                            <Link2 className="w-3.5 h-3.5" />
-                            Bind to Anime
-                          </button>
-                        )}
-                      </td>
-                      <td className="py-2 px-3 text-right font-mono text-[11px] text-text-muted">
-                        {formatBytes(ep.file_size)}
-                      </td>
-                      <td className="py-2 px-3 text-right">
-                        <div className="flex items-center justify-end gap-1">
-                          <button
-                            onClick={() => toraApi.playEpisodeFile(ep.file_path)}
-                            className="p-1.5 rounded bg-accent/15 hover:bg-accent text-accent hover:text-white transition"
-                            title="Play Episode"
-                          >
-                            <Play className="w-3.5 h-3.5 fill-current" />
-                          </button>
-                          <button
-                            onClick={() =>
-                              toraApi.revealInExplorer(ep.file_path)
-                            }
-                            className="p-1.5 rounded bg-bg-tertiary hover:bg-bg-elevated text-text-secondary hover:text-text-primary transition"
-                            title="Reveal in Explorer"
-                          >
-                            <FolderOpen className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </td>
+          <div
+            onScroll={(e) => setTableScrollTop(e.currentTarget.scrollTop)}
+            className="overflow-x-auto border border-border-subtle rounded-xl max-h-[420px] overflow-y-auto"
+          >
+            {(() => {
+              const rowHeight = 46;
+              const viewportHeight = 420;
+              const overscan = 5;
+              const totalRows = filteredEpisodes.length;
+              const startRow = Math.max(
+                0,
+                Math.floor(tableScrollTop / rowHeight) - overscan
+              );
+              const endRow = Math.min(
+                totalRows,
+                Math.ceil((tableScrollTop + viewportHeight) / rowHeight) +
+                  overscan
+              );
+              const visibleEpisodes = filteredEpisodes.slice(startRow, endRow);
+              const topSpacer = startRow * rowHeight;
+              const bottomSpacer = Math.max(0, (totalRows - endRow) * rowHeight);
+
+              return (
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead className="bg-bg-tertiary text-text-muted uppercase text-[10px] sticky top-0 z-10">
+                    <tr>
+                      <th className="py-2.5 px-3">Drive</th>
+                      <th className="py-2.5 px-3">Parsed Title (Anitomy)</th>
+                      <th className="py-2.5 px-3">Ep</th>
+                      <th className="py-2.5 px-3">Metadata</th>
+                      <th className="py-2.5 px-3">Linked Anime</th>
+                      <th className="py-2.5 px-3 text-right">Size</th>
+                      <th className="py-2.5 px-3 text-right">Actions</th>
                     </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                  </thead>
+                  <tbody className="divide-y divide-border-subtle bg-bg-primary/40">
+                    {topSpacer > 0 && (
+                      <tr style={{ height: topSpacer }} aria-hidden="true">
+                        <td colSpan={7} className="p-0 border-0" />
+                      </tr>
+                    )}
+                    {visibleEpisodes.map((ep) => {
+                      const linkedAnime = ep.matched_anime_id
+                        ? animeByIdMap.get(ep.matched_anime_id)
+                        : undefined;
+                      return (
+                        <tr
+                          key={ep.id}
+                          style={{ height: rowHeight }}
+                          className="hover:bg-bg-tertiary/50 transition-colors"
+                        >
+                          <td className="py-2 px-3 font-mono text-[11px] text-text-secondary">
+                            {ep.drive_root}
+                          </td>
+                          <td className="py-2 px-3">
+                            <div className="font-medium text-text-primary truncate max-w-xs">
+                              {ep.parsed_title}
+                            </div>
+                            <div
+                              className="text-[11px] text-text-muted truncate max-w-xs font-mono"
+                              title={ep.file_path}
+                            >
+                              {ep.file_name}
+                            </div>
+                          </td>
+                          <td className="py-2 px-3 font-mono font-bold text-accent">
+                            {ep.episode_number ?? "-"}
+                          </td>
+                          <td className="py-2 px-3">
+                            <div className="flex flex-wrap gap-1">
+                              {ep.release_group && (
+                                <span className="px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary text-[10px]">
+                                  {ep.release_group}
+                                </span>
+                              )}
+                              {ep.resolution && (
+                                <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 font-mono text-[10px]">
+                                  {ep.resolution}
+                                </span>
+                              )}
+                              {ep.video_terms.map((vt) => (
+                                <span
+                                  key={vt}
+                                  className="px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400 font-mono text-[10px]"
+                                >
+                                  {vt}
+                                </span>
+                              ))}
+                            </div>
+                          </td>
+                          <td className="py-2 px-3">
+                            {linkedAnime ? (
+                              <button
+                                onClick={() => onSelectAnime(linkedAnime)}
+                                className="flex items-center gap-1.5 text-emerald-400 hover:underline font-medium"
+                              >
+                                <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                                <span className="truncate max-w-[180px]">
+                                  {linkedAnime.title_romaji}
+                                </span>
+                              </button>
+                            ) : bindingFileId === ep.id ? (
+                              <div className="flex items-center gap-1">
+                                <select
+                                  value={selectedBindAnimeId}
+                                  onChange={(e) =>
+                                    setSelectedBindAnimeId(
+                                      Number(e.target.value)
+                                    )
+                                  }
+                                  className="px-2 py-1 rounded bg-bg-primary border border-border-subtle text-[11px] text-text-primary max-w-[160px]"
+                                >
+                                  {animeList.map((a) => (
+                                    <option key={a.id} value={a.id}>
+                                      {a.title_romaji}
+                                    </option>
+                                  ))}
+                                </select>
+                                <button
+                                  onClick={() =>
+                                    handleBindAlias(
+                                      ep.normalized_title,
+                                      selectedBindAnimeId
+                                    )
+                                  }
+                                  className="px-2 py-1 rounded bg-accent text-white text-[10px] font-semibold"
+                                >
+                                  Bind
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                onClick={() => {
+                                  setBindingFileId(ep.id);
+                                  setSelectedBindAnimeId(animeList[0]?.id || 0);
+                                }}
+                                className="flex items-center gap-1 text-amber-400 hover:underline text-[11px]"
+                              >
+                                <Link2 className="w-3.5 h-3.5" />
+                                Bind to Anime
+                              </button>
+                            )}
+                          </td>
+                          <td className="py-2 px-3 text-right font-mono text-[11px] text-text-muted">
+                            {formatBytes(ep.file_size)}
+                          </td>
+                          <td className="py-2 px-3 text-right">
+                            <div className="flex items-center justify-end gap-1">
+                              <button
+                                onClick={() =>
+                                  toraApi.playEpisodeFile(ep.file_path)
+                                }
+                                className="p-1.5 rounded bg-accent/15 hover:bg-accent text-accent hover:text-white transition"
+                                title="Play Episode"
+                              >
+                                <Play className="w-3.5 h-3.5 fill-current" />
+                              </button>
+                              <button
+                                onClick={() =>
+                                  toraApi.revealInExplorer(ep.file_path)
+                                }
+                                className="p-1.5 rounded bg-bg-tertiary hover:bg-bg-elevated text-text-secondary hover:text-text-primary transition"
+                                title="Reveal in Explorer"
+                              >
+                                <FolderOpen className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    {bottomSpacer > 0 && (
+                      <tr style={{ height: bottomSpacer }} aria-hidden="true">
+                        <td colSpan={7} className="p-0 border-0" />
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              );
+            })()}
           </div>
         )}
       </div>

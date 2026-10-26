@@ -10,7 +10,7 @@ import {
   X,
 } from "lucide-react";
 import { AnimeEntry } from "../types";
-import { THEME_PRESETS } from "../api";
+import { THEME_PRESETS, getOptimizedCoverUrl } from "../api";
 
 interface CommandPaletteProps {
   open: boolean;
@@ -98,8 +98,10 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
               >
                 <div className="flex items-center gap-2.5 min-w-0">
                   <img
-                    src={a.cover_image}
+                    src={getOptimizedCoverUrl(a.cover_image, "medium")}
                     alt={a.title_romaji}
+                    loading="lazy"
+                    decoding="async"
                     className="w-7 h-10 object-cover rounded shrink-0"
                   />
                   <div className="min-w-0">
