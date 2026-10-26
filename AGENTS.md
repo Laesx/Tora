@@ -119,3 +119,4 @@ When a filename or media player window title is parsed (`parse_filename` in `src
 ### 4. Database Performance (`src-tauri/src/db/mod.rs`)
 - Use `AnimeMatcherIndex` (`db.build_matcher_index()`) for any batch matching (library scans, torrent RSS evaluation). It loads all titles, synonyms, and aliases in a single SQL query and performs matching in memory in O(1) / microsecond time.
 - Single-entry mutations (`update_anime_user_state`) must query only the target `anime_id` (`get_anime_entry_by_id`) and only trigger `rematch_all_local_episodes()` if `custom_folder` or `synonyms` actually changed.
+- Adding anime (`add_or_upsert_anime`) must never block on `rematch_all_local_episodes()`. Instead, run targeted background matching for unmatched episodes via `match_unmatched_episodes_for_anime(anime_id)` and provide instant 0ms optimistic UI updates in React.

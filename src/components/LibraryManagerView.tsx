@@ -138,23 +138,6 @@ export const LibraryManagerView: React.FC<LibraryManagerViewProps> = ({
     }
   };
 
-  const handleCreateDemoLibrary = async () => {
-    setScanning(true);
-    try {
-      const summary = await toraApi.createDemoLibraryFiles();
-      setLastScan(summary);
-      await loadLibraryState();
-      await onRefreshAnimeList();
-      showToast(
-        `Created & indexed ${summary.total_files_indexed} demo anime files across 2 folders!`,
-        "success"
-      );
-    } catch (err: any) {
-      showToast(String(err), "error");
-    } finally {
-      setScanning(false);
-    }
-  };
 
   const handleBindAlias = async (normalizedTitle: string, animeId: number) => {
     try {
@@ -208,15 +191,6 @@ export const LibraryManagerView: React.FC<LibraryManagerViewProps> = ({
         </div>
 
         <div className="flex items-center gap-2.5">
-          <button
-            onClick={handleCreateDemoLibrary}
-            disabled={scanning}
-            className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-bg-tertiary hover:bg-bg-elevated text-text-primary text-xs font-medium border border-border-subtle transition"
-            title="Create sample anime folders & MKV files to test multi-folder scanning"
-          >
-            <Sparkles className="w-4 h-4 text-amber-400" />
-            Generate Demo Library
-          </button>
 
           <button
             onClick={handleScanAll}

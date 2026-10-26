@@ -543,6 +543,101 @@ impl Database {
         Ok(matched_count)
     }
 
+    /// Fast targeted matching for a single newly added anime entry against only unmatched local episodes.
+    pub fn match_unmatched_episodes_for_anime(&self, anime_id: i64) -> Result<usize, String> {
+        let matcher = self.build_matcher_index()?;
+
+        // Only query local episodes where matched_anime_id IS NULL
+        let unmatched_episodes: Vec<(i64, String, String, String, Option<u32>, Option<u32>)> = {
+            let conn = self.conn.lock().map_err(|e| e.to_string())?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, parsed_title, normalized_title, file_path, episode_number, anime_season
+                     FROM local_episodes
+                     WHERE matched_anime_id IS NULL",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                })
+                .map_err(|e| e.to_string())?;
+            rows.flatten().collect()
+        };
+
+        if unmatched_episodes.is_empty() {
+            return Ok(0);
+        }
+
+        let mut updates = Vec::new();
+        for (ep_id, parsed_title, norm_title, file_path, ep_num, season_num) in &unmatched_episodes {
+            let mut ep_elements = AnitomyElements {
+                anime_title: parsed_title.clone(),
+                normalized_title: normalize_anime_title(parsed_title),
+                episode_number: *ep_num,
+                anime_season: *season_num,
+                ..Default::default()
+            };
+            if ep_elements.normalized_title.is_empty() {
+                ep_elements.normalized_title = norm_title.clone();
+            }
+
+            if let Some((matched_id, _, _, user_prog, _)) =
+                matcher.match_episode(&mut ep_elements, Some(file_path))
+            {
+                if matched_id == anime_id {
+                    let watched = ep_elements
+                        .episode_number
+                        .map(|n| n <= user_prog)
+                        .unwrap_or(false) as i32;
+                    updates.push((
+                        *ep_id,
+                        matched_id,
+                        watched,
+                        ep_elements.episode_number,
+                        ep_elements.anime_season,
+                        ep_elements.anime_title,
+                        ep_elements.normalized_title,
+                    ));
+                }
+            }
+        }
+
+        if !updates.is_empty() {
+            let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            {
+                let mut stmt = tx
+                    .prepare(
+                        "UPDATE local_episodes
+                         SET matched_anime_id = ?1,
+                             watched = ?2,
+                             episode_number = ?3,
+                             anime_season = ?4,
+                             parsed_title = ?5,
+                             normalized_title = ?6
+                         WHERE id = ?7",
+                    )
+                    .map_err(|e| e.to_string())?;
+
+                for u in &updates {
+                    stmt.execute(params![u.1, u.2, u.3, u.4, u.5, u.6, u.0])
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+            tx.commit().map_err(|e| e.to_string())?;
+        }
+
+        Ok(updates.len())
+    }
+
     pub fn list_local_episodes(&self, anime_id_filter: Option<i64>) -> Result<Vec<LocalEpisodeFile>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let sql = if anime_id_filter.is_some() {

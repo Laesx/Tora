@@ -107,14 +107,53 @@ async fn add_or_upsert_anime(
     mut entry: AnimeEntry,
 ) -> Result<Vec<AnimeEntry>, String> {
     let db = state.db.clone();
-    tokio::task::spawn_blocking(move || {
+    let anime_id = entry.id;
+    let anilist_id = entry.anilist_id;
+    let user_status = entry.user_status.clone();
+    let user_progress = entry.user_progress;
+    let user_score = entry.user_score;
+    let user_repeats = entry.user_repeats;
+    let user_notes = entry.user_notes.clone();
+
+    let (list, settings) = tokio::task::spawn_blocking(move || {
         entry.updated_at = chrono::Utc::now().timestamp();
         db.upsert_anime_entry(&entry)?;
-        let _ = db.rematch_all_local_episodes();
-        db.list_anime_entries()
+        let list = db.list_anime_entries()?;
+        let settings = db.get_settings()?;
+        Ok::<_, String>((list, settings))
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())??;
+
+    // Push update to tracker plugin asynchronously in the background so UI returns in <1ms
+    if settings.auto_sync_tracker && !settings.anilist_token.trim().is_empty() {
+        if let Some(plugin) = state.plugins.get(&settings.active_tracker_plugin) {
+            if let Some(media_id) = anilist_id {
+                let tok = settings.anilist_token.clone();
+                tokio::spawn(async move {
+                    let _ = plugin
+                        .update_list_entry(
+                            &tok,
+                            media_id,
+                            &user_status,
+                            user_progress,
+                            user_score,
+                            user_repeats,
+                            &user_notes,
+                        )
+                        .await;
+                });
+            }
+        }
+    }
+
+    // Match only unmatched local files in background without blocking response
+    let db_bg = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let _ = db_bg.match_unmatched_episodes_for_anime(anime_id);
+    });
+
+    Ok(list)
 }
 
 #[tauri::command]

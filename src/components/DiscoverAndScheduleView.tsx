@@ -55,18 +55,27 @@ export const DiscoverAndScheduleView: React.FC<
   }, []);
 
   const handleAddAnime = async (entry: AnimeEntry, status: string) => {
+    const optimisticEntry: AnimeEntry = {
+      ...entry,
+      user_status: status,
+      updated_at: Math.floor(Date.now() / 1000),
+    };
+
+    // Instant 0ms optimistic UI update so the card button immediately turns to "In Watchlist"
+    await onRefreshAnimeList([
+      ...animeList.filter((a) => a.id !== entry.id),
+      optimisticEntry,
+    ]);
+    showToast(
+      `Added "${entry.title_romaji}" to ${
+        status === "CURRENT" ? "Watching" : "Plan to Watch"
+      }`,
+      "success"
+    );
+
     try {
-      const updated = await toraApi.addOrUpsertAnime({
-        ...entry,
-        user_status: status,
-      });
+      const updated = await toraApi.addOrUpsertAnime(optimisticEntry);
       await onRefreshAnimeList(updated);
-      showToast(
-        `Added "${entry.title_romaji}" to ${
-          status === "CURRENT" ? "Watching" : "Plan to Watch"
-        }`,
-        "success"
-      );
     } catch (err: any) {
       showToast(String(err), "error");
     }
