@@ -361,6 +361,15 @@ impl AnimeMatcherIndex {
             return Some((aid, title, cover, prog, eps));
         };
 
+        // Check if this match came from an explicit user binding (custom folder or title_aliases)
+        let is_explicit_binding = self.user_aliases.contains_key(&parsed.normalized_title)
+            || file_path.map_or(false, |fp| {
+                let fp_lower = fp.to_ascii_lowercase();
+                self.custom_folders
+                    .iter()
+                    .any(|(prefix, id)| *id == aid && fp_lower.starts_with(prefix))
+            });
+
         // Port of Taiga's `isValidEpisodeNumber`:
         // Episode 0 or an episode exceeding the entry's total episode count triggers redirection.
         let is_valid_ep = if ep == 0 {
@@ -385,18 +394,6 @@ impl AnimeMatcherIndex {
         if let Some(red) =
             relations_db().find_by_id(anilist_id, mal_id, ep, parsed.episode_number_alt)
         {
-            parsed.episode_number = Some(red.dst_episode);
-            if let Some(alt) = red.dst_episode_alt {
-                parsed.episode_number_alt = Some(alt);
-            }
-            if let Some(s) = red.dst_season {
-                parsed.anime_season = Some(s);
-            }
-            if !red.dst_title.is_empty() {
-                parsed.anime_title = red.dst_title.clone();
-                parsed.normalized_title = red.dst_norm_title.clone();
-            }
-
             let dst_aid = red
                 .dst_anilist_id
                 .and_then(|id| self.by_anilist_id.get(&id).copied())
@@ -404,12 +401,29 @@ impl AnimeMatcherIndex {
                     red.dst_mal_id
                         .and_then(|id| self.by_mal_id.get(&id).copied())
                 })
-                .or_else(|| self.exact_norm.get(&red.dst_norm_title).copied());
+                .or_else(|| self.user_aliases.get(&red.dst_norm_title).copied())
+                .or_else(|| self.exact_norm.get(&red.dst_norm_title).copied())
+                .or_else(|| self.match_title(&red.dst_norm_title, None).map(|m| m.0));
 
             if let Some(target_id) = dst_aid {
                 if let Some((t, cov, p, e)) = self.by_id.get(&target_id) {
+                    parsed.episode_number = Some(red.dst_episode);
+                    if let Some(alt) = red.dst_episode_alt {
+                        parsed.episode_number_alt = Some(alt);
+                    }
+                    if let Some(s) = red.dst_season {
+                        parsed.anime_season = Some(s);
+                    }
+                    if !red.dst_title.is_empty() {
+                        parsed.anime_title = red.dst_title.clone();
+                        parsed.normalized_title = red.dst_norm_title.clone();
+                    }
                     return Some((target_id, t.clone(), cov.clone(), *p, *e));
                 }
+            }
+
+            if is_explicit_binding || ep == 0 {
+                return Some((aid, title, cover, prog, eps));
             }
             return None;
         }
@@ -436,6 +450,10 @@ impl AnimeMatcherIndex {
                 }
                 rem_ep -= max_for_season;
             }
+        }
+
+        if is_explicit_binding || ep == 0 {
+            return Some((aid, title, cover, prog, eps));
         }
 
         None
@@ -1036,14 +1054,32 @@ impl Database {
                 .map_err(|e| e.to_string())?;
 
             for entry in entries {
+                let mut merged_synonyms = entry.synonyms.clone();
+                if let Ok(Some(existing_syns_str)) = tx
+                    .query_row(
+                        "SELECT synonyms_json FROM anime_entries WHERE id = ?1",
+                        params![entry.id],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .optional()
+                {
+                    if let Ok(existing_syns) = serde_json::from_str::<Vec<String>>(&existing_syns_str) {
+                        for s in existing_syns {
+                            if !merged_synonyms.iter().any(|x| x.eq_ignore_ascii_case(&s)) {
+                                merged_synonyms.push(s);
+                            }
+                        }
+                    }
+                }
+
                 let norm_titles = Self::build_normalized_titles(
                     &entry.title_romaji,
                     entry.title_english.as_deref(),
                     entry.title_native.as_deref(),
-                    &entry.synonyms,
+                    &merged_synonyms,
                 );
                 let synonyms_json =
-                    serde_json::to_string(&entry.synonyms).unwrap_or_else(|_| "[]".into());
+                    serde_json::to_string(&merged_synonyms).unwrap_or_else(|_| "[]".into());
                 let norm_json =
                     serde_json::to_string(&norm_titles).unwrap_or_else(|_| "[]".into());
                 let genres_json =
@@ -1472,7 +1508,7 @@ impl Database {
             }
         }
 
-        // Load explicit user title aliases (override exact_norm)
+        // Load explicit user title aliases (override exact_norm and include in norm_list)
         {
             let mut alias_stmt = conn
                 .prepare("SELECT normalized_alias, anime_id FROM title_aliases")
@@ -1482,8 +1518,13 @@ impl Database {
                 .map_err(|e| e.to_string())?;
             for (alias, aid) in rows.flatten() {
                 if by_id.contains_key(&aid) {
+                    let entry_season = external_ids.get(&aid).map(|x| x.2).unwrap_or(1);
+                    let s = extract_effective_season(&alias).max(entry_season);
                     user_aliases.insert(alias.clone(), aid);
-                    exact_norm.insert(alias, aid);
+                    exact_norm.insert(alias.clone(), aid);
+                    if alias.len() >= 4 {
+                        norm_list.push((alias, s, aid));
+                    }
                 }
             }
         }

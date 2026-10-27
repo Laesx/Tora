@@ -127,6 +127,7 @@ async fn add_or_upsert_anime(
     let (list, settings) = tokio::task::spawn_blocking(move || {
         entry.updated_at = chrono::Utc::now().timestamp();
         db.upsert_anime_entry(&entry)?;
+        let _ = db.match_unmatched_episodes_for_anime(anime_id);
         let list = db.list_anime_entries()?;
         let settings = db.get_settings()?;
         Ok::<_, String>((list, settings))
@@ -155,12 +156,6 @@ async fn add_or_upsert_anime(
             }
         }
     }
-
-    // Match only unmatched local files in background without blocking response
-    let db_bg = state.db.clone();
-    tokio::task::spawn_blocking(move || {
-        let _ = db_bg.match_unmatched_episodes_for_anime(anime_id);
-    });
 
     Ok(list)
 }
@@ -566,6 +561,22 @@ async fn poll_media_recognition(
     // Check if it's the same session continuing
     if let Some(existing) = active_guard.as_mut() {
         if existing.cleaned_media_title == cleaned_title && existing.player_name == player_name {
+            // If previously unmatched, re-check in case the user just added the anime or bound an alias
+            if existing.matched_anime_id.is_none() {
+                if let Some((id, title, cover, prog, total)) =
+                    state.db.match_episode_to_anime(&mut existing.parsed, None)
+                {
+                    existing.matched_anime_id = Some(id);
+                    existing.matched_anime_title = Some(title);
+                    existing.matched_cover_image = Some(cover);
+                    existing.matched_current_progress = Some(prog);
+                    existing.matched_total_episodes = total;
+                    existing.detected_at_unix = now;
+                    existing.elapsed_seconds = 0;
+                    existing.auto_synced = false;
+                }
+            }
+
             if let Some(aid) = existing.matched_anime_id {
                 if let Ok(entry) = state.db.get_anime_entry_by_id(aid) {
                     existing.matched_current_progress = Some(entry.user_progress);

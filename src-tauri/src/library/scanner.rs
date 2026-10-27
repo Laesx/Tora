@@ -13,6 +13,8 @@ pub struct ScanSummary {
     pub folders_scanned: usize,
     pub total_files_indexed: usize,
     pub newly_parsed: usize,
+    #[serde(default)]
+    pub removed_files: usize,
     pub matched_files: usize,
     pub elapsed_ms: u128,
 }
@@ -201,17 +203,23 @@ impl Database {
             .filter(|f| f.enabled)
             .collect();
 
-        // Load existing file cache (file_path -> (modified_unix, file_size))
-        let existing_cache: HashMap<String, (i64, u64)> = {
+        let matcher = self.build_matcher_index()?;
+
+        // Load existing file cache (file_path -> (modified_unix, file_size, matched_anime_id))
+        let existing_cache: HashMap<String, (i64, u64, Option<i64>)> = {
             let conn = self.conn.lock().map_err(|e| e.to_string())?;
             let mut stmt = conn
-                .prepare("SELECT file_path, modified_unix, file_size FROM local_episodes")
+                .prepare("SELECT file_path, modified_unix, file_size, matched_anime_id FROM local_episodes")
                 .map_err(|e| e.to_string())?;
             let rows = stmt
                 .query_map([], |r| {
                     Ok((
                         r.get::<_, String>(0)?,
-                        (r.get::<_, i64>(1)?, r.get::<_, u64>(2)?),
+                        (
+                            r.get::<_, i64>(1)?,
+                            r.get::<_, u64>(2)?,
+                            r.get::<_, Option<i64>>(3)?,
+                        ),
                     ))
                 })
                 .map_err(|e| e.to_string())?;
@@ -220,6 +228,7 @@ impl Database {
 
         let mut total_files_indexed = 0usize;
         let mut newly_parsed = 0usize;
+        let mut removed_files = 0usize;
         let now = chrono::Utc::now().timestamp();
 
         for folder in &folders {
@@ -248,7 +257,7 @@ impl Database {
                 })
                 .collect();
 
-            // Parse new/changed files in parallel using Rayon
+            // Parse and match files in parallel using Rayon
             let root_clone = root_path.clone();
             let parsed_batch: Vec<(
                 String,
@@ -264,6 +273,8 @@ impl Database {
                 String,
                 String,
                 Option<String>,
+                Option<i64>,
+                i32,
                 bool,
             )> = discovered
                 .par_iter()
@@ -275,12 +286,27 @@ impl Database {
                         .unwrap_or("")
                         .to_string();
 
-                    let is_cached = existing_cache
-                        .get(&full_str)
-                        .map(|(old_m, old_s)| *old_m == *mtime && *old_s == *size)
+                    let cached_entry = existing_cache.get(&full_str);
+                    let is_cached = cached_entry
+                        .map(|(old_m, old_s, _)| *old_m == *mtime && *old_s == *size)
                         .unwrap_or(false);
+                    let prev_matched_id = cached_entry
+                        .and_then(|(_, _, prev_id)| *prev_id)
+                        .filter(|id| matcher.by_id.contains_key(id));
 
-                    let mut elements = parse_filename(&full_str);
+                    // Pass path relative to the library folder root so parent folder names above the root never pollute season/title
+                    let rel_str = path
+                        .strip_prefix(&root_clone)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .to_string();
+                    let parse_input = if rel_str.is_empty() {
+                        &file_name
+                    } else {
+                        &rel_str
+                    };
+
+                    let mut elements = parse_filename(parse_input);
 
                     // Fallback to parent directory name if filename only has episode number (e.g., "D:\Anime\Sousou no Frieren\01.mkv")
                     let norm_is_weak = elements.normalized_title.is_empty()
@@ -307,6 +333,27 @@ impl Database {
                         }
                     }
 
+                    // Match immediately in memory so rows are inserted already bound
+                    let resolved = matcher
+                        .match_episode(&mut elements, Some(&full_str))
+                        .map(|(aid, _t, _c, prog, _eps)| (aid, prog))
+                        .or_else(|| {
+                            prev_matched_id.and_then(|aid| {
+                                matcher.by_id.get(&aid).map(|(_t, _c, prog, _eps)| (aid, *prog))
+                            })
+                        });
+
+                    let (matched_id, watched) = match resolved {
+                        Some((anime_id, user_progress)) => {
+                            let w = elements
+                                .episode_number
+                                .map(|n| n <= user_progress)
+                                .unwrap_or(false) as i32;
+                            (Some(anime_id), w)
+                        }
+                        None => (None, 0),
+                    };
+
                     let v_json =
                         serde_json::to_string(&elements.video_term).unwrap_or_else(|_| "[]".into());
                     let a_json =
@@ -326,6 +373,8 @@ impl Database {
                         v_json,
                         a_json,
                         elements.file_checksum,
+                        matched_id,
+                        watched,
                         !is_cached,
                     )
                 })
@@ -334,18 +383,38 @@ impl Database {
             let folder_bytes: u64 = parsed_batch.iter().map(|i| i.2).sum();
             let folder_count = parsed_batch.len() as u32;
             total_files_indexed += parsed_batch.len();
-            newly_parsed += parsed_batch.iter().filter(|i| i.13).count();
+            newly_parsed += parsed_batch.iter().filter(|i| i.15).count();
+
+            let discovered_paths: std::collections::HashSet<&str> =
+                parsed_batch.iter().map(|i| i.0.as_str()).collect();
 
             // Persist in single fast transaction per folder
             let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
             let tx = conn.transaction().map_err(|e| e.to_string())?;
 
-            // Remove stale entries for this folder that no longer exist on disk
-            tx.execute(
-                "DELETE FROM local_episodes WHERE folder_id = ?1",
-                params![folder.id],
-            )
-            .map_err(|e| e.to_string())?;
+            // Remove only stale entries for this folder that no longer exist on disk
+            {
+                let mut existing_in_folder: Vec<(i64, String)> = Vec::new();
+                {
+                    let mut q_stmt = tx
+                        .prepare("SELECT id, file_path FROM local_episodes WHERE folder_id = ?1")
+                        .map_err(|e| e.to_string())?;
+                    let rows = q_stmt
+                        .query_map(params![folder.id], |r| Ok((r.get(0)?, r.get(1)?)))
+                        .map_err(|e| e.to_string())?;
+                    for r in rows.flatten() {
+                        existing_in_folder.push(r);
+                    }
+                }
+                let mut del_stmt = tx
+                    .prepare("DELETE FROM local_episodes WHERE id = ?1")
+                    .map_err(|e| e.to_string())?;
+                for (row_id, row_path) in existing_in_folder {
+                    if !discovered_paths.contains(row_path.as_str()) {
+                        del_stmt.execute(params![row_id]).map_err(|e| e.to_string())?;
+                    }
+                }
+            }
 
             {
                 let mut insert_stmt = tx
@@ -353,8 +422,26 @@ impl Database {
                         "INSERT INTO local_episodes (
                             folder_id, file_path, file_name, drive_root, file_size, modified_unix,
                             parsed_title, normalized_title, episode_number, anime_season,
-                            release_group, resolution, video_terms_json, audio_terms_json, checksum
-                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                            release_group, resolution, video_terms_json, audio_terms_json, checksum,
+                            matched_anime_id, watched
+                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+                        ON CONFLICT(file_path) DO UPDATE SET
+                            folder_id = excluded.folder_id,
+                            file_name = excluded.file_name,
+                            drive_root = excluded.drive_root,
+                            file_size = excluded.file_size,
+                            modified_unix = excluded.modified_unix,
+                            parsed_title = excluded.parsed_title,
+                            normalized_title = excluded.normalized_title,
+                            episode_number = excluded.episode_number,
+                            anime_season = excluded.anime_season,
+                            release_group = excluded.release_group,
+                            resolution = excluded.resolution,
+                            video_terms_json = excluded.video_terms_json,
+                            audio_terms_json = excluded.audio_terms_json,
+                            checksum = excluded.checksum,
+                            matched_anime_id = COALESCE(excluded.matched_anime_id, local_episodes.matched_anime_id),
+                            watched = excluded.watched",
                     )
                     .map_err(|e| e.to_string())?;
 
@@ -376,6 +463,8 @@ impl Database {
                             item.10,
                             item.11,
                             item.12,
+                            item.13,
+                            item.14,
                         ])
                         .map_err(|e| e.to_string())?;
                 }
@@ -475,7 +564,12 @@ impl Database {
 
             let resolved = matcher
                 .match_episode(&mut ep_elements, Some(file_path))
-                .map(|(aid, _t, _c, prog, _eps)| (aid, prog));
+                .map(|(aid, _t, _c, prog, _eps)| (aid, prog))
+                .or_else(|| {
+                    old_matched_id.and_then(|aid| {
+                        matcher.by_id.get(&aid).map(|(_t, _c, prog, _eps)| (aid, *prog))
+                    })
+                });
 
             let (new_matched_id, new_watched) = match resolved {
                 Some((anime_id, user_progress)) => {
@@ -704,7 +798,8 @@ impl Database {
     }
 
     pub fn bind_title_alias(&self, normalized_alias: &str, anime_id: i64) -> Result<usize, String> {
-        let norm = normalize_anime_title(normalized_alias);
+        let trimmed = normalized_alias.trim();
+        let norm = normalize_anime_title(trimmed);
         if norm.is_empty() {
             return Err("Normalized alias cannot be empty".into());
         }
@@ -715,7 +810,13 @@ impl Database {
                 params![norm, anime_id],
             )
             .map_err(|e| e.to_string())?;
+            conn.execute(
+                "UPDATE local_episodes SET matched_anime_id = ?1 WHERE normalized_title = ?2 OR parsed_title = ?3",
+                params![anime_id, norm, trimmed],
+            )
+            .map_err(|e| e.to_string())?;
         }
+        let _ = self.link_alias_to_anime(anime_id, trimmed);
         self.rematch_all_local_episodes()
     }
 }

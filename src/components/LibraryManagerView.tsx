@@ -26,6 +26,7 @@ import { formatBytes, toraApi } from "../api";
 
 interface LibraryManagerViewProps {
   animeList: AnimeEntry[];
+  refreshTick?: number;
   onRefreshAnimeList: () => Promise<void>;
   onSelectAnime: (anime: AnimeEntry) => void;
   showToast: (msg: string, type?: "success" | "info" | "error") => void;
@@ -33,6 +34,7 @@ interface LibraryManagerViewProps {
 
 export const LibraryManagerView: React.FC<LibraryManagerViewProps> = ({
   animeList,
+  refreshTick = 0,
   onRefreshAnimeList,
   onSelectAnime,
   showToast,
@@ -80,7 +82,7 @@ export const LibraryManagerView: React.FC<LibraryManagerViewProps> = ({
 
   useEffect(() => {
     loadLibraryState();
-  }, []);
+  }, [animeList.length, refreshTick]);
 
   const handleBrowseFolder = async () => {
     try {
@@ -108,8 +110,7 @@ export const LibraryManagerView: React.FC<LibraryManagerViewProps> = ({
       );
       setNewPath("");
       setNewLabel("");
-      await loadLibraryState();
-      await onRefreshAnimeList();
+      await Promise.all([loadLibraryState(), onRefreshAnimeList()]);
       showToast("Added library folder and indexed video files!", "success");
     } catch (err: any) {
       showToast(String(err), "error");
@@ -121,8 +122,7 @@ export const LibraryManagerView: React.FC<LibraryManagerViewProps> = ({
   const handleRemoveFolder = async (folderId: number) => {
     try {
       await toraApi.removeLibraryFolder(folderId);
-      await loadLibraryState();
-      await onRefreshAnimeList();
+      await Promise.all([loadLibraryState(), onRefreshAnimeList()]);
       showToast("Removed library folder", "info");
     } catch (err: any) {
       showToast(String(err), "error");
@@ -134,8 +134,7 @@ export const LibraryManagerView: React.FC<LibraryManagerViewProps> = ({
     try {
       const summary = await toraApi.scanLibrary();
       setLastScan(summary);
-      await loadLibraryState();
-      await onRefreshAnimeList();
+      await Promise.all([loadLibraryState(), onRefreshAnimeList()]);
       showToast(
         `Scanned ${summary.folders_scanned} folders (${summary.total_files_indexed} files) in ${summary.elapsed_ms}ms`,
         "success"
@@ -155,8 +154,7 @@ export const LibraryManagerView: React.FC<LibraryManagerViewProps> = ({
         animeId
       );
       setBindingFileId(null);
-      await loadLibraryState();
-      await onRefreshAnimeList();
+      await Promise.all([loadLibraryState(), onRefreshAnimeList()]);
       showToast(
         `Linked "${normalizedTitle}" — ${matchedCount} total files matched!`,
         "success"
@@ -531,14 +529,17 @@ export const LibraryManagerView: React.FC<LibraryManagerViewProps> = ({
                             </div>
                           </td>
                           <td className="py-2 px-3">
-                            {linkedAnime ? (
+                            {linkedAnime || ep.matched_anime_title ? (
                               <button
-                                onClick={() => onSelectAnime(linkedAnime)}
+                                onClick={() =>
+                                  linkedAnime && onSelectAnime(linkedAnime)
+                                }
                                 className="flex items-center gap-1.5 text-emerald-400 hover:underline font-medium"
                               >
                                 <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
                                 <span className="truncate max-w-[180px]">
-                                  {linkedAnime.title_romaji}
+                                  {linkedAnime?.title_romaji ||
+                                    ep.matched_anime_title}
                                 </span>
                               </button>
                             ) : bindingFileId === ep.id ? (
@@ -561,7 +562,7 @@ export const LibraryManagerView: React.FC<LibraryManagerViewProps> = ({
                                 <button
                                   onClick={() =>
                                     handleBindAlias(
-                                      ep.normalized_title,
+                                      ep.parsed_title || ep.normalized_title,
                                       selectedBindAnimeId
                                     )
                                   }

@@ -73,6 +73,7 @@ export const App: React.FC = () => {
   const [activeSession, setActiveSession] =
     useState<DetectedMediaSession | null>(null);
   const [cmdOpen, setCmdOpen] = useState(false);
+  const [libraryRefreshTick, setLibraryRefreshTick] = useState(0);
   const [toast, setToast] = useState<{
     msg: string;
     type: "success" | "info" | "error";
@@ -108,18 +109,16 @@ export const App: React.FC = () => {
   const refreshAnimeList = async (overrideList?: AnimeEntry[]) => {
     if (overrideList) {
       setAnimeList(overrideList);
-      if (selectedAnime) {
-        const found = overrideList.find((a) => a.id === selectedAnime.id);
-        if (found) setSelectedAnime(found);
-      }
+      setSelectedAnime((prev) =>
+        prev ? overrideList.find((a) => a.id === prev.id) ?? prev : null
+      );
       return;
     }
     const list = await toraApi.getAnimeList();
     setAnimeList(list);
-    if (selectedAnime) {
-      const found = list.find((a) => a.id === selectedAnime.id);
-      if (found) setSelectedAnime(found);
-    }
+    setSelectedAnime((prev) =>
+      prev ? list.find((a) => a.id === prev.id) ?? prev : null
+    );
   };
 
   useEffect(() => {
@@ -838,6 +837,7 @@ export const App: React.FC = () => {
           {activeTab === "library" && (
             <LibraryManagerView
               animeList={animeList}
+              refreshTick={libraryRefreshTick}
               onRefreshAnimeList={() => refreshAnimeList()}
               onSelectAnime={(a) => setSelectedAnime(a)}
               showToast={showToast}
@@ -935,6 +935,7 @@ export const App: React.FC = () => {
         onScanDrives={async () => {
           const sum = await toraApi.scanLibrary();
           await refreshAnimeList();
+          setLibraryRefreshTick((t) => t + 1);
           showToast(
             `Scanned ${sum.total_files_indexed} files in ${sum.elapsed_ms}ms`,
             "success"

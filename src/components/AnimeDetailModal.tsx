@@ -72,13 +72,17 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
     anime.user_repeats,
   ]);
 
-  // Only reload local files and text inputs when switching to a different anime ID
+  // Reload text inputs when switching to a different anime ID
   useEffect(() => {
     setNotes(anime.user_notes);
     setCustomFolder(anime.custom_folder || "");
     setSynonymsInput(anime.synonyms.join(", "));
-    loadLocalFiles(anime.id);
   }, [anime.id]);
+
+  // Reload local files when anime ID or matched episode count changes
+  useEffect(() => {
+    loadLocalFiles(anime.id);
+  }, [anime.id, anime.local_episode_count]);
 
   const loadLocalFiles = async (animeId: number) => {
     try {
@@ -431,7 +435,9 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
             <div className="grid grid-cols-8 sm:grid-cols-12 gap-1.5 p-3 rounded-xl bg-bg-primary/60 border border-border-subtle">
               {Array.from({ length: totalGridCount }, (_, idx) => idx + 1).map(
                 (epNum) => {
-                  const hasLocal = anime.available_episodes.includes(epNum);
+                  const hasLocal =
+                    anime.available_episodes.includes(epNum) ||
+                    localFiles.some((f) => f.episode_number === epNum);
                   const isWatched = epNum <= progress;
                   let btnClass =
                     "bg-bg-tertiary text-text-muted border-border-subtle hover:border-text-secondary";
