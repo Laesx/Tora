@@ -295,4 +295,10 @@ export const toraApi = {
 
   saveAppSettings: (settings: AppSettings) =>
     invoke<AppSettings>("save_app_settings", { settings }),
+
+  startAnilistOauth: () => invoke<string>("start_anilist_oauth"),
+
+  signOutTracker: () => invoke<AppSettings>("sign_out_tracker"),
+
+  openExternalUrl: (url: string) => invoke<void>("open_external_url", { url }),
 };

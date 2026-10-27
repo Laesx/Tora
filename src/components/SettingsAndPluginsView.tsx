@@ -4,16 +4,11 @@ import {
   Plug,
   Download,
   CheckCircle2,
-  RefreshCw,
-  ExternalLink,
-  Sliders,
   Tv,
-  Sparkles,
 } from "lucide-react";
 import {
   AppSettings,
   TrackerPluginDescriptor,
-  TrackerUserProfile,
 } from "../types";
 import {
   ACCENT_SWATCHES,
@@ -25,33 +20,21 @@ import {
 interface SettingsAndPluginsViewProps {
   settings: AppSettings;
   onUpdateSettings: (next: AppSettings) => Promise<void>;
-  onRefreshAnimeList: (updatedList?: any) => Promise<void>;
+  onRefreshAnimeList?: (updatedList?: any) => Promise<void>;
   showToast: (msg: string, type?: "success" | "info" | "error") => void;
 }
 
 export const SettingsAndPluginsView: React.FC<SettingsAndPluginsViewProps> = ({
   settings,
   onUpdateSettings,
-  onRefreshAnimeList,
   showToast,
 }) => {
   const [plugins, setPlugins] = useState<TrackerPluginDescriptor[]>([]);
-  const [username, setUsername] = useState(settings.anilist_username);
-  const [token, setToken] = useState(settings.anilist_token);
-  const [verifying, setVerifying] = useState(false);
-  const [syncing, setSyncing] = useState(false);
-  const [verifiedProfile, setVerifiedProfile] =
-    useState<TrackerUserProfile | null>(null);
   const [testingQb, setTestingQb] = useState(false);
 
   useEffect(() => {
     toraApi.getTrackerPlugins().then(setPlugins).catch(console.error);
   }, []);
-
-  useEffect(() => {
-    setUsername(settings.anilist_username);
-    setToken(settings.anilist_token);
-  }, [settings.anilist_username, settings.anilist_token]);
 
   const handleSelectTheme = async (themeId: string, defaultAccent?: string) => {
     const nextAccent = defaultAccent || settings.accent_color;
@@ -69,48 +52,6 @@ export const SettingsAndPluginsView: React.FC<SettingsAndPluginsViewProps> = ({
       ...settings,
       accent_color: accentHex,
     });
-  };
-
-  const handleVerifyTracker = async () => {
-    setVerifying(true);
-    try {
-      const profile = await toraApi.verifyTrackerAccount(
-        settings.active_tracker_plugin,
-        username.trim(),
-        token.trim() || null
-      );
-      setVerifiedProfile(profile);
-      const refreshed = await toraApi.getAppSettings();
-      await onUpdateSettings(refreshed);
-      showToast(
-        `Connected to AniList as ${profile.username} (${profile.anime_count} anime)!`,
-        "success"
-      );
-    } catch (err: any) {
-      showToast(String(err), "error");
-    } finally {
-      setVerifying(false);
-    }
-  };
-
-  const handleSyncFromTracker = async () => {
-    setSyncing(true);
-    try {
-      const list = await toraApi.syncTrackerList({
-        pluginId: settings.active_tracker_plugin,
-        username: username.trim(),
-        token: token.trim() || undefined,
-      });
-      await onRefreshAnimeList(list);
-      showToast(
-        `Synced ${list.length} anime entries from ${settings.active_tracker_plugin.toUpperCase()}!`,
-        "success"
-      );
-    } catch (err: any) {
-      showToast(String(err), "error");
-    } finally {
-      setSyncing(false);
-    }
   };
 
   const handleTestQb = async () => {
@@ -224,10 +165,10 @@ export const SettingsAndPluginsView: React.FC<SettingsAndPluginsViewProps> = ({
         <div>
           <h2 className="text-base font-bold text-text-primary flex items-center gap-2">
             <Plug className="w-5 h-5 text-accent" />
-            Tracker Plugin System (AniList Primary)
+            Tracker Plugin System
           </h2>
           <p className="text-xs text-text-secondary mt-0.5">
-            Modular internal plugin architecture (`TrackerPlugin` trait). Sync any public AniList username immediately, or add an OAuth token for 2-way updates.
+            Select the active tracker plugin used for synchronization and metadata discovery.
           </p>
         </div>
 
@@ -274,123 +215,6 @@ export const SettingsAndPluginsView: React.FC<SettingsAndPluginsViewProps> = ({
               </div>
             );
           })}
-        </div>
-
-        {/* AniList Credentials & Sync Controls */}
-        <div className="p-4 rounded-xl bg-bg-primary border border-border-subtle space-y-4">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-[11px] font-semibold text-text-secondary uppercase mb-1">
-                AniList Username
-              </label>
-              <input
-                type="text"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                onBlur={() =>
-                  onUpdateSettings({
-                    ...settings,
-                    anilist_username: username.trim(),
-                  })
-                }
-                placeholder="Enter your AniList username (e.g. Josh)"
-                className="w-full px-3.5 py-2 rounded-xl bg-bg-secondary border border-border-subtle text-xs text-text-primary focus:outline-none focus:border-accent"
-              />
-            </div>
-
-            <div>
-              <div className="flex items-center justify-between mb-1">
-                <label className="text-[11px] font-semibold text-text-secondary uppercase">
-                  OAuth Access Token
-                </label>
-                <a
-                  href="https://anilist.co/api/v2/oauth/authorize?client_id=14954&response_type=token"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-[11px] text-accent hover:underline flex items-center gap-1"
-                >
-                  Get OAuth Token
-                  <ExternalLink className="w-3 h-3" />
-                </a>
-              </div>
-              <input
-                type="password"
-                value={token}
-                onChange={(e) => setToken(e.target.value)}
-                onBlur={() =>
-                  onUpdateSettings({
-                    ...settings,
-                    anilist_token: token.trim(),
-                  })
-                }
-                placeholder="Paste Bearer OAuth token for automatic 2-way scrobbling..."
-                className="w-full px-3.5 py-2 rounded-xl bg-bg-secondary border border-border-subtle text-xs font-mono text-text-primary focus:outline-none focus:border-accent"
-              />
-            </div>
-          </div>
-
-          <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
-            <label className="flex items-center gap-2 text-xs text-text-secondary cursor-pointer">
-              <input
-                type="checkbox"
-                checked={settings.auto_sync_tracker}
-                onChange={(e) =>
-                  onUpdateSettings({
-                    ...settings,
-                    auto_sync_tracker: e.target.checked,
-                  })
-                }
-                className="rounded accent-accent"
-              />
-              Automatically push episode progress & score updates to AniList
-            </label>
-
-            <div className="flex items-center gap-2.5">
-              <button
-                onClick={handleVerifyTracker}
-                disabled={verifying}
-                className="px-4 py-2 rounded-xl bg-bg-tertiary hover:bg-bg-elevated text-text-primary text-xs font-semibold border border-border-subtle transition"
-              >
-                {verifying ? "Verifying..." : "Verify Account"}
-              </button>
-
-              <button
-                onClick={handleSyncFromTracker}
-                disabled={syncing}
-                className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-accent hover:bg-accent-hover text-white text-xs font-semibold transition shadow-sm"
-              >
-                <RefreshCw
-                  className={`w-3.5 h-3.5 ${syncing ? "animate-spin" : ""}`}
-                />
-                {syncing ? "Syncing List..." : "Sync Anime List from AniList"}
-              </button>
-            </div>
-          </div>
-
-          {verifiedProfile && (
-            <div className="flex items-center gap-3 p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-300">
-              {verifiedProfile.avatar_url && (
-                <img
-                  src={verifiedProfile.avatar_url}
-                  alt={verifiedProfile.username}
-                  className="w-9 h-9 rounded-full object-cover"
-                />
-              )}
-              <div>
-                <div className="font-bold">
-                  Verified AniList User: {verifiedProfile.username} (ID #
-                  {verifiedProfile.user_id})
-                </div>
-                <div className="text-[11px] opacity-90">
-                  {verifiedProfile.anime_count} anime on list •{" "}
-                  {verifiedProfile.episodes_watched} episodes watched •{" "}
-                  {verifiedProfile.authenticated
-                    ? "OAuth Write Access Active"
-                    : "Public Read-Only Mode"}
-                </div>
-              </div>
-            </div>
-          )}
         </div>
       </div>
 

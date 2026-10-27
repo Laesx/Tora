@@ -18,6 +18,10 @@ import {
   Palette,
   FlaskConical,
   AlertTriangle,
+  LogOut,
+  LogIn,
+  ExternalLink,
+  User,
 } from "lucide-react";
 import {
   AnimeEntry,
@@ -77,6 +81,8 @@ export const App: React.FC = () => {
   const [activeSession, setActiveSession] =
     useState<DetectedMediaSession | null>(null);
   const [cmdOpen, setCmdOpen] = useState(false);
+  const [signOutModalOpen, setSignOutModalOpen] = useState(false);
+  const [isAuthorizingAnilist, setIsAuthorizingAnilist] = useState(false);
   const [libraryRefreshTick, setLibraryRefreshTick] = useState(0);
   const [toast, setToast] = useState<{
     msg: string;
@@ -106,6 +112,21 @@ export const App: React.FC = () => {
       applyThemeToDocument(s.theme, s.accent_color);
       setAnimeList(list);
 
+      // Hydrate AniList profile picture/username in background if signed in without cached avatar
+      if ((s.anilist_token || s.anilist_username) && (!s.anilist_avatar || !s.anilist_username)) {
+        toraApi
+          .verifyTrackerAccount(
+            s.active_tracker_plugin || "anilist",
+            s.anilist_username || "",
+            s.anilist_token || null
+          )
+          .then(async () => {
+            const refreshed = await toraApi.getAppSettings();
+            setSettings(refreshed);
+          })
+          .catch(() => { });
+      }
+
       // Run fast delta startup scan in the background without blocking initial UI render
       toraApi
         .quickScanLibrary()
@@ -115,7 +136,7 @@ export const App: React.FC = () => {
             setLibraryRefreshTick((t) => t + 1);
           }
         })
-        .catch(() => {});
+        .catch(() => { });
     } catch (e) {
       console.error("Failed to initialize Tora:", e);
     }
@@ -140,24 +161,51 @@ export const App: React.FC = () => {
     loadInitialData();
 
     // Listen for live folder watcher events when new episodes are downloaded or removed
-    let unlistenFn: (() => void) | null = null;
+    let unlistenLibrary: (() => void) | null = null;
+    let unlistenAuth: (() => void) | null = null;
+    let unlistenSync: (() => void) | null = null;
+
     listen<ScanSummary>("library-changed", async (event) => {
       await refreshAnimeList();
       setLibraryRefreshTick((t) => t + 1);
       if (event.payload.newly_parsed > 0) {
         showToast(
-          `Detected ${event.payload.newly_parsed} new episode${
-            event.payload.newly_parsed === 1 ? "" : "s"
+          `Detected ${event.payload.newly_parsed} new episode${event.payload.newly_parsed === 1 ? "" : "s"
           } in library folders`,
           "success"
         );
       }
     }).then((fn) => {
-      unlistenFn = fn;
+      unlistenLibrary = fn;
+    });
+
+    listen<AppSettings>("tracker-auth-updated", (event) => {
+      setSettings(event.payload);
+      setIsAuthorizingAnilist(false);
+      if (event.payload.anilist_username) {
+        showToast(
+          `Signed in to AniList as @${event.payload.anilist_username}!`,
+          "success"
+        );
+      }
+    }).then((fn) => {
+      unlistenAuth = fn;
+    });
+
+    listen<AnimeEntry[]>("tracker-list-synced", async (event) => {
+      await refreshAnimeList(event.payload);
+      showToast(
+        `Synced ${event.payload.length} anime entries from AniList!`,
+        "success"
+      );
+    }).then((fn) => {
+      unlistenSync = fn;
     });
 
     return () => {
-      if (unlistenFn) unlistenFn();
+      if (unlistenLibrary) unlistenLibrary();
+      if (unlistenAuth) unlistenAuth();
+      if (unlistenSync) unlistenSync();
     };
   }, []);
 
@@ -440,15 +488,52 @@ export const App: React.FC = () => {
       });
   }, [animeList, statusFilter, searchQuery, sortBy, pendingStepSnapshots]);
 
-  const totalEpisodesWatched = useMemo(
-    () => animeList.reduce((acc, a) => acc + a.user_progress, 0),
-    [animeList]
-  );
-
   const totalLocalFilesMatched = useMemo(
     () => animeList.reduce((acc, a) => acc + a.local_episode_count, 0),
     [animeList]
   );
+
+  const isSignedIn = Boolean(
+    settings && (settings.anilist_username.trim() || settings.anilist_token.trim())
+  );
+
+  const handleStartAnilistLogin = async () => {
+    try {
+      setIsAuthorizingAnilist(true);
+      await toraApi.startAnilistOauth();
+      showToast(
+        "Opened AniList in your browser — click Authorize to sign in",
+        "info"
+      );
+    } catch (err: any) {
+      setIsAuthorizingAnilist(false);
+      showToast(String(err), "error");
+    }
+  };
+
+  const handleConfirmSignOut = async () => {
+    try {
+      const updated = await toraApi.signOutTracker();
+      setSettings(updated);
+      setSignOutModalOpen(false);
+      setIsAuthorizingAnilist(false);
+      showToast("Signed out of AniList", "info");
+    } catch (err: any) {
+      showToast(String(err), "error");
+    }
+  };
+
+  const handleOpenAnilistProfile = async () => {
+    if (!settings?.anilist_username) return;
+    const url = `https://anilist.co/user/${encodeURIComponent(
+      settings.anilist_username.trim()
+    )}`;
+    try {
+      await toraApi.openExternalUrl(url);
+    } catch (err: any) {
+      showToast(String(err), "error");
+    }
+  };
 
   const viewMode = settings?.view_mode || "grid";
 
@@ -492,7 +577,9 @@ export const App: React.FC = () => {
           setSelectedAnime(found);
         }
       } else if (e.key === "Escape") {
-        if (cmdOpen) {
+        if (signOutModalOpen) {
+          setSignOutModalOpen(false);
+        } else if (cmdOpen) {
           setCmdOpen(false);
         } else if (quickMenuAnimeId !== null) {
           setQuickMenuAnimeId(null);
@@ -513,6 +600,7 @@ export const App: React.FC = () => {
     quickMenuAnimeId,
     selectedAnime,
     selectedAnimeIds,
+    signOutModalOpen,
   ]);
 
   const handleDeleteAnime = async (anime: AnimeEntry) => {
@@ -623,8 +711,8 @@ export const App: React.FC = () => {
             <button
               onClick={() => setActiveTab("watchlist")}
               className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${activeTab === "watchlist"
-                  ? "bg-accent text-white shadow-sm"
-                  : "text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
+                ? "bg-accent text-white shadow-sm"
+                : "text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
                 }`}
             >
               <span className="flex items-center gap-2.5">
@@ -639,8 +727,8 @@ export const App: React.FC = () => {
             <button
               onClick={() => setActiveTab("library")}
               className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${activeTab === "library"
-                  ? "bg-accent text-white shadow-sm"
-                  : "text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
+                ? "bg-accent text-white shadow-sm"
+                : "text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
                 }`}
             >
               <span className="flex items-center gap-2.5">
@@ -657,8 +745,8 @@ export const App: React.FC = () => {
             <button
               onClick={() => setActiveTab("torrents")}
               className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${activeTab === "torrents"
-                  ? "bg-accent text-white shadow-sm"
-                  : "text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
+                ? "bg-accent text-white shadow-sm"
+                : "text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
                 }`}
             >
               <span className="flex items-center gap-2.5">
@@ -670,8 +758,8 @@ export const App: React.FC = () => {
             <button
               onClick={() => setActiveTab("discover")}
               className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${activeTab === "discover"
-                  ? "bg-accent text-white shadow-sm"
-                  : "text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
+                ? "bg-accent text-white shadow-sm"
+                : "text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
                 }`}
             >
               <span className="flex items-center gap-2.5">
@@ -683,8 +771,8 @@ export const App: React.FC = () => {
             <button
               onClick={() => setActiveTab("recognition")}
               className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${activeTab === "recognition"
-                  ? "bg-accent text-white shadow-sm"
-                  : "text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
+                ? "bg-accent text-white shadow-sm"
+                : "text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
                 }`}
             >
               <span className="flex items-center gap-2.5">
@@ -699,8 +787,8 @@ export const App: React.FC = () => {
             <button
               onClick={() => setActiveTab("testing")}
               className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${activeTab === "testing"
-                  ? "bg-accent text-white shadow-sm"
-                  : "text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
+                ? "bg-accent text-white shadow-sm"
+                : "text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
                 }`}
             >
               <span className="flex items-center gap-2.5">
@@ -712,8 +800,8 @@ export const App: React.FC = () => {
             <button
               onClick={() => setActiveTab("settings")}
               className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${activeTab === "settings"
-                  ? "bg-accent text-white shadow-sm"
-                  : "text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
+                ? "bg-accent text-white shadow-sm"
+                : "text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
                 }`}
             >
               <span className="flex items-center gap-2.5">
@@ -724,41 +812,73 @@ export const App: React.FC = () => {
           </nav>
         </div>
 
-        {/* Bottom Stats & Tracker Status Footer */}
-        <div className="p-4 border-t border-border-subtle space-y-3 text-xs">
-          <div className="grid grid-cols-2 gap-2">
-            <div className="p-2.5 rounded-xl bg-bg-primary border border-border-subtle">
-              <div className="text-[10px] text-text-muted uppercase">
-                Episodes Seen
-              </div>
-              <div className="font-mono font-bold text-sm text-accent mt-0.5">
-                {totalEpisodesWatched}
-              </div>
-            </div>
-            <div className="p-2.5 rounded-xl bg-bg-primary border border-border-subtle">
-              <div className="text-[10px] text-text-muted uppercase">
-                On Disk
-              </div>
-              <div className="font-mono font-bold text-sm text-emerald-400 mt-0.5">
-                {totalLocalFilesMatched} eps
-              </div>
-            </div>
-          </div>
+        {/* Bottom Account & AniList Auth Section */}
+        <div className="p-3">
+          {isSignedIn && settings ? (
+            <div className="flex items-center justify-between gap-2 p-2 rounded-xl bg-bg-primary border border-border-subtle">
+              <button
+                onClick={handleOpenAnilistProfile}
+                className="flex items-center gap-2.5 min-w-0 flex-1 text-left group cursor-pointer"
+                title={`Open @${settings.anilist_username} on AniList`}
+              >
+                {settings.anilist_avatar ? (
+                  <img
+                    src={settings.anilist_avatar}
+                    alt={settings.anilist_username}
+                    className="w-9 h-9 rounded-full object-cover border border-border-subtle group-hover:border-accent transition shrink-0 bg-bg-tertiary"
+                  />
+                ) : (
+                  <div className="w-9 h-9 rounded-full bg-accent/15 border border-accent/30 group-hover:border-accent flex items-center justify-center text-accent font-bold text-xs shrink-0 transition">
+                    {settings.anilist_username ? (
+                      settings.anilist_username.charAt(0).toUpperCase()
+                    ) : (
+                      <User className="w-4 h-4" />
+                    )}
+                  </div>
+                )}
+                <div className="min-w-0 flex-1">
+                  <div className="text-xs font-bold text-text-primary group-hover:text-accent transition truncate flex items-center gap-1">
+                    <span className="truncate">
+                      {settings.anilist_username || "AniList User"}
+                    </span>
+                    <ExternalLink className="w-3 h-3 opacity-0 group-hover:opacity-100 transition shrink-0 text-accent" />
+                  </div>
+                  <div className="text-[10px] text-text-muted truncate">
+                    AniList Profile
+                  </div>
+                </div>
+              </button>
 
-          <div className="flex items-center justify-between text-[11px] text-text-muted px-1">
-            <span className="flex items-center gap-1.5 truncate">
-              <span className="w-2 h-2 rounded-full bg-emerald-400" />
-              Plugin:{" "}
-              <strong className="text-text-primary uppercase">
-                {settings?.active_tracker_plugin || "AniList"}
-              </strong>
-            </span>
-            {settings?.anilist_username && (
-              <span className="font-mono text-accent truncate max-w-[90px]">
-                @{settings.anilist_username}
-              </span>
-            )}
-          </div>
+              <button
+                onClick={() => setSignOutModalOpen(true)}
+                className="p-2 rounded-lg text-text-muted hover:text-rose-400 hover:bg-rose-500/10 transition shrink-0 cursor-pointer"
+                title="Sign Out"
+              >
+                <LogOut className="w-4 h-4" />
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={handleStartAnilistLogin}
+              className="w-full flex items-center gap-3 p-3 rounded-xl bg-gradient-to-r from-accent/15 via-bg-primary to-bg-primary border border-accent/40 hover:border-accent hover:from-accent/25 transition text-left group cursor-pointer shadow-sm"
+            >
+              <div className="w-9 h-9 rounded-xl bg-accent text-white flex items-center justify-center shrink-0 shadow-sm group-hover:scale-105 transition">
+                <LogIn className="w-4 h-4" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="text-xs font-bold text-text-primary group-hover:text-accent transition">
+                  {isAuthorizingAnilist
+                    ? "Waiting for AniList..."
+                    : "Sign in with AniList"}
+                </div>
+                <div className="text-[10px] text-text-muted truncate">
+                  {isAuthorizingAnilist
+                    ? "Authorize in browser or click to retry"
+                    : "Click to authorize & sync your list"}
+                </div>
+              </div>
+            </button>
+          )}
         </div>
       </aside>
 
@@ -851,15 +971,15 @@ export const App: React.FC = () => {
                         key={tab.id}
                         onClick={() => setStatusFilter(tab.id)}
                         className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 ${active
-                            ? "bg-accent text-white shadow-sm"
-                            : "text-text-secondary hover:text-text-primary"
+                          ? "bg-accent text-white shadow-sm"
+                          : "text-text-secondary hover:text-text-primary"
                           }`}
                       >
                         <span>{tab.label}</span>
                         <span
                           className={`text-[10px] font-mono px-1.5 py-0.2 rounded-full ${active
-                              ? "bg-black/25 text-white"
-                              : "bg-bg-tertiary text-text-muted"
+                            ? "bg-black/25 text-white"
+                            : "bg-bg-tertiary text-text-muted"
                             }`}
                         >
                           {count}
@@ -919,8 +1039,8 @@ export const App: React.FC = () => {
                           })
                         }
                         className={`p-1.5 rounded-lg transition ${viewMode === "grid"
-                            ? "bg-accent text-white"
-                            : "text-text-muted hover:text-text-primary"
+                          ? "bg-accent text-white"
+                          : "text-text-muted hover:text-text-primary"
                           }`}
                         title="Poster Grid View"
                       >
@@ -934,8 +1054,8 @@ export const App: React.FC = () => {
                           })
                         }
                         className={`p-1.5 rounded-lg transition ${viewMode === "compact"
-                            ? "bg-accent text-white"
-                            : "text-text-muted hover:text-text-primary"
+                          ? "bg-accent text-white"
+                          : "text-text-muted hover:text-text-primary"
                           }`}
                         title="Detailed Cards View"
                       >
@@ -949,8 +1069,8 @@ export const App: React.FC = () => {
                           })
                         }
                         className={`p-1.5 rounded-lg transition ${viewMode === "table"
-                            ? "bg-accent text-white"
-                            : "text-text-muted hover:text-text-primary"
+                          ? "bg-accent text-white"
+                          : "text-text-muted hover:text-text-primary"
                           }`}
                         title="Taiga Classic Dense Table View"
                       >
@@ -1103,14 +1223,60 @@ export const App: React.FC = () => {
         }}
       />
 
+      {/* Sign Out Confirmation Modal */}
+      {signOutModalOpen && (
+        <div
+          className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4"
+          onClick={() => setSignOutModalOpen(false)}
+        >
+          <div
+            className="bg-bg-secondary border border-border-subtle rounded-2xl p-5 max-w-sm w-full shadow-2xl space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-rose-500/15 border border-rose-500/30 flex items-center justify-center text-rose-400 shrink-0">
+                <LogOut className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-text-primary">
+                  Sign out of AniList?
+                </h3>
+                <p className="text-[11px] text-text-muted">
+                  @{settings?.anilist_username || "AniList Account"}
+                </p>
+              </div>
+            </div>
+
+            <p className="text-xs text-text-secondary leading-relaxed">
+              Are you sure you want to sign out? Your local anime library and settings will remain intact, but automatic AniList synchronization will stop until you sign in again.
+            </p>
+
+            <div className="flex items-center justify-end gap-2.5 pt-1">
+              <button
+                onClick={() => setSignOutModalOpen(false)}
+                className="px-4 py-2 rounded-xl bg-bg-tertiary hover:bg-bg-elevated text-text-secondary hover:text-text-primary text-xs font-semibold border border-border-subtle transition cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleConfirmSignOut}
+                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold transition shadow-sm cursor-pointer"
+              >
+                Sign Out
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Toast Notification */}
       {toast && (
         <div
           className={`fixed bottom-5 right-5 z-50 px-4 py-3 rounded-xl shadow-2xl border text-xs font-semibold flex items-center gap-2.5 transition-all ${toast.type === "error"
-              ? "bg-red-950/95 border-red-500 text-red-200"
-              : toast.type === "success"
-                ? "bg-emerald-950/95 border-emerald-500 text-emerald-200"
-                : "bg-bg-elevated border-accent text-text-primary"
+            ? "bg-red-950/95 border-red-500 text-red-200"
+            : toast.type === "success"
+              ? "bg-emerald-950/95 border-emerald-500 text-emerald-200"
+              : "bg-bg-elevated border-accent text-text-primary"
             }`}
         >
           <Sparkles className="w-4 h-4 text-accent shrink-0" />

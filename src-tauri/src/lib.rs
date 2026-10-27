@@ -17,8 +17,10 @@ use crate::torrents::{
 };
 use serde::{Deserialize, Serialize};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager, State};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub struct AppState {
     pub db: Arc<Database>,
@@ -26,6 +28,7 @@ pub struct AppState {
     pub monitor: LibraryMonitorHandle,
     pub active_session: Mutex<Option<DetectedMediaSession>>,
     pub simulated_session: Mutex<Option<(String, String)>>, // (player_name, window_title)
+    pub oauth_listener_active: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1005,6 +1008,364 @@ async fn save_app_settings(
     .map_err(|e| e.to_string())?
 }
 
+#[tauri::command]
+async fn open_external_url(url: String) -> Result<(), String> {
+    if tauri_plugin_opener::open_url(&url, None::<&str>).is_ok() {
+        return Ok(());
+    }
+    #[cfg(windows)]
+    {
+        Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", &url])
+            .spawn()
+            .map_err(|e| format!("Failed to open URL: {}", e))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn sign_out_tracker(state: State<'_, AppState>) -> Result<AppSettings, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut settings = db.get_settings()?;
+        settings.anilist_username.clear();
+        settings.anilist_token.clear();
+        settings.anilist_user_id = None;
+        settings.anilist_avatar = None;
+        db.save_settings(&settings)?;
+        db.get_settings()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+const OAUTH_CALLBACK_HTML: &str = r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tora — AniList Authorization</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0c0e14;
+      color: #f1f5f9;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 24px;
+    }
+    .card {
+      background: #141824;
+      border: 1px solid #262d40;
+      border-radius: 18px;
+      padding: 32px;
+      max-width: 420px;
+      width: 100%;
+      text-align: center;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
+    }
+    .logo {
+      width: 52px;
+      height: 52px;
+      border-radius: 14px;
+      background: linear-gradient(135deg, #f59e0b, #ea580c);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 900;
+      font-size: 24px;
+      color: #fff;
+      margin-bottom: 16px;
+      box-shadow: 0 6px 20px rgba(245, 158, 11, 0.35);
+    }
+    h1 { font-size: 18px; font-weight: 800; margin-bottom: 8px; }
+    p { font-size: 13px; color: #94a3b8; line-height: 1.5; }
+    .avatar {
+      width: 56px;
+      height: 56px;
+      border-radius: 50%;
+      object-fit: cover;
+      border: 2px solid #f59e0b;
+      margin: 14px auto 8px;
+      display: none;
+    }
+    .badge {
+      display: inline-block;
+      margin-top: 16px;
+      padding: 6px 14px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      background: rgba(16, 185, 129, 0.15);
+      color: #34d399;
+      border: 1px solid rgba(16, 185, 129, 0.3);
+    }
+    .error {
+      background: rgba(239, 68, 68, 0.15);
+      color: #f87171;
+      border-color: rgba(239, 68, 68, 0.3);
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">虎</div>
+    <img id="avatar" class="avatar" alt="Avatar" />
+    <h1 id="title">Connecting to Tora...</h1>
+    <p id="desc">Completing AniList authorization, please wait a moment.</p>
+    <div id="status" class="badge">Verifying OAuth Token...</div>
+  </div>
+  <script>
+    (async function() {
+      const titleEl = document.getElementById("title");
+      const descEl = document.getElementById("desc");
+      const statusEl = document.getElementById("status");
+      const avatarEl = document.getElementById("avatar");
+
+      const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+      const queryParams = new URLSearchParams(window.location.search);
+      const token = hashParams.get("access_token") || queryParams.get("access_token");
+
+      if (window.history && window.history.replaceState) {
+        window.history.replaceState(null, "", "/AniSync/authCallback");
+      }
+
+      if (!token) {
+        titleEl.textContent = "Authorization Incomplete";
+        descEl.textContent = "No AniList access token was found in the callback URL. Please click the Sign In banner inside Tora and try again.";
+        statusEl.textContent = "Missing Token";
+        statusEl.className = "badge error";
+        return;
+      }
+
+      try {
+        const res = await fetch("/AniSync/token?access_token=" + encodeURIComponent(token));
+        const data = await res.json();
+        if (res.ok && data.ok) {
+          if (data.avatar_url) {
+            avatarEl.src = data.avatar_url;
+            avatarEl.style.display = "block";
+          }
+          titleEl.textContent = "Signed in as @" + (data.username || "AniList User") + "!";
+          descEl.textContent = "Your AniList account is now linked and syncing with Tora. You can close this tab and return to the app.";
+          statusEl.textContent = "Authenticated Successfully";
+          setTimeout(() => { try { window.close(); } catch (_) {} }, 1500);
+        } else {
+          throw new Error(data.error || "Failed to verify AniList account");
+        }
+      } catch (err) {
+        titleEl.textContent = "Authentication Failed";
+        descEl.textContent = String(err.message || err);
+        statusEl.textContent = "Verification Error";
+        statusEl.className = "badge error";
+      }
+    })();
+  </script>
+</body>
+</html>"#;
+
+fn extract_query_param(query: &str, key: &str) -> Option<String> {
+    for pair in query.split('&') {
+        let mut parts = pair.splitn(2, '=');
+        let k = parts.next()?.trim();
+        let v = parts.next().unwrap_or("").trim();
+        if k == key && !v.is_empty() {
+            return Some(
+                urlencoding::decode(v)
+                    .map(|c| c.into_owned())
+                    .unwrap_or_else(|_| v.to_string()),
+            );
+        }
+    }
+    None
+}
+
+async fn handle_oauth_http_stream(
+    mut stream: tokio::net::TcpStream,
+    app_handle: tauri::AppHandle,
+    db: Arc<Database>,
+    plugins: Arc<PluginManager>,
+) {
+    let mut buf = vec![0u8; 8192];
+    let n = match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        stream.read(&mut buf),
+    )
+    .await
+    {
+        Ok(Ok(n)) if n > 0 => n,
+        _ => return,
+    };
+
+    let req_str = String::from_utf8_lossy(&buf[..n]);
+    let first_line = req_str.lines().next().unwrap_or("");
+    let mut parts = first_line.split_whitespace();
+    let _method = parts.next().unwrap_or("GET");
+    let full_path = parts.next().unwrap_or("/");
+
+    if full_path.starts_with("/favicon.ico") {
+        let resp = "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n";
+        let _ = stream.write_all(resp.as_bytes()).await;
+        let _ = stream.shutdown().await;
+        return;
+    }
+
+    let (path, query) = match full_path.split_once('?') {
+        Some((p, q)) => (p, q),
+        None => (full_path, ""),
+    };
+
+    if path.starts_with("/AniSync/token") || query.contains("access_token=") {
+        if let Some(token) = extract_query_param(query, "access_token") {
+            let result: Result<(AppSettings, TrackerUserProfile), String> = async {
+                let plugin = plugins
+                    .get("anilist")
+                    .ok_or_else(|| "AniList plugin not found".to_string())?;
+                let profile = plugin.verify_account("", Some(&token)).await?;
+
+                let mut settings = db.get_settings()?;
+                settings.active_tracker_plugin = "anilist".into();
+                settings.anilist_username = profile.username.clone();
+                settings.anilist_token = token.clone();
+                settings.anilist_user_id = Some(profile.user_id);
+                settings.anilist_avatar = profile.avatar_url.clone();
+                db.save_settings(&settings)?;
+                Ok((settings, profile))
+            }
+            .await;
+
+            match result {
+                Ok((saved_settings, profile)) => {
+                    let body = serde_json::json!({
+                        "ok": true,
+                        "username": profile.username,
+                        "avatar_url": profile.avatar_url,
+                    })
+                    .to_string();
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+
+                    let _ = app_handle.emit("tracker-auth-updated", &saved_settings);
+                    if let Some(win) = app_handle.get_webview_window("main") {
+                        let _ = win.unminimize();
+                        let _ = win.set_focus();
+                    }
+
+                    // Automatically fetch and sync the user's AniList library in the background
+                    let app_clone = app_handle.clone();
+                    let db_clone = db.clone();
+                    let plugins_clone = plugins.clone();
+                    let uname = profile.username.clone();
+                    let tok = token.clone();
+                    tokio::spawn(async move {
+                        if let Some(plugin) = plugins_clone.get("anilist") {
+                            if let Ok(remote_entries) =
+                                plugin.fetch_user_list(&uname, Some(&tok)).await
+                            {
+                                if let Ok(Ok(updated_list)) =
+                                    tokio::task::spawn_blocking(move || -> Result<Vec<AnimeEntry>, String> {
+                                        db_clone.upsert_anime_entries_batch(&remote_entries)?;
+                                        let _ = db_clone.rematch_all_local_episodes();
+                                        db_clone.list_anime_entries()
+                                    })
+                                    .await
+                                {
+                                    let _ = app_clone.emit("tracker-list-synced", &updated_list);
+                                }
+                            }
+                        }
+                    });
+                    return;
+                }
+                Err(err) => {
+                    let body = serde_json::json!({
+                        "ok": false,
+                        "error": err,
+                    })
+                    .to_string();
+                    let resp = format!(
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json; charset=utf-8\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                    return;
+                }
+            }
+        }
+    }
+
+    // Serve the HTML callback page that reads `#access_token=...` from `window.location.hash`
+    let body = OAUTH_CALLBACK_HTML.as_bytes();
+    let headers = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(headers.as_bytes()).await;
+    let _ = stream.write_all(body).await;
+    let _ = stream.shutdown().await;
+}
+
+fn ensure_oauth_callback_listener(
+    app_handle: tauri::AppHandle,
+    db: Arc<Database>,
+    plugins: Arc<PluginManager>,
+    active_flag: Arc<AtomicBool>,
+) {
+    if active_flag
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+
+    tauri::async_runtime::spawn(async move {
+        match tokio::net::TcpListener::bind("127.0.0.1:8096").await {
+            Ok(listener) => {
+                while let Ok((stream, _addr)) = listener.accept().await {
+                    let app_c = app_handle.clone();
+                    let db_c = db.clone();
+                    let plugins_c = plugins.clone();
+                    tokio::spawn(async move {
+                        handle_oauth_http_stream(stream, app_c, db_c, plugins_c).await;
+                    });
+                }
+                active_flag.store(false, Ordering::SeqCst);
+            }
+            Err(_) => {
+                active_flag.store(false, Ordering::SeqCst);
+            }
+        }
+    });
+}
+
+#[tauri::command]
+async fn start_anilist_oauth(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    ensure_oauth_callback_listener(
+        app.clone(),
+        state.db.clone(),
+        state.plugins.clone(),
+        state.oauth_listener_active.clone(),
+    );
+
+    let authorize_url =
+        "https://anilist.co/api/v2/oauth/authorize?client_id=14954&response_type=token";
+    open_external_url(authorize_url.to_string()).await?;
+    Ok(authorize_url.to_string())
+}
+
 fn start_library_monitor(
     app_handle: tauri::AppHandle,
     db: Arc<Database>,
@@ -1030,6 +1391,14 @@ pub fn run() {
             let plugins = Arc::new(PluginManager::new());
 
             let monitor = start_library_monitor(app.handle().clone(), db.clone());
+            let oauth_listener_active = Arc::new(AtomicBool::new(false));
+
+            ensure_oauth_callback_listener(
+                app.handle().clone(),
+                db.clone(),
+                plugins.clone(),
+                oauth_listener_active.clone(),
+            );
 
             app.manage(AppState {
                 db,
@@ -1037,6 +1406,7 @@ pub fn run() {
                 monitor,
                 active_session: Mutex::new(None),
                 simulated_session: Mutex::new(None),
+                oauth_listener_active,
             });
 
             Ok(())
@@ -1076,6 +1446,9 @@ pub fn run() {
             test_qbittorrent_cmd,
             get_app_settings,
             save_app_settings,
+            open_external_url,
+            sign_out_tracker,
+            start_anilist_oauth,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tora application");
