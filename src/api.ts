@@ -215,6 +215,8 @@ export const toraApi = {
 
   scanLibrary: () => invoke<ScanSummary>("scan_library"),
 
+  quickScanLibrary: () => invoke<ScanSummary>("quick_scan_library"),
+
   getLocalEpisodes: (animeId?: number | null) =>
     invoke<LocalEpisodeFile[]>("get_local_episodes", {
       animeId: animeId ?? null,

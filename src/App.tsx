@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import {
   Tv,
   HardDrive,
@@ -22,6 +23,7 @@ import {
   AnimeEntry,
   AppSettings,
   DetectedMediaSession,
+  ScanSummary,
 } from "./types";
 import {
   THEME_PRESETS,
@@ -101,6 +103,17 @@ export const App: React.FC = () => {
       setSettings(s);
       applyThemeToDocument(s.theme, s.accent_color);
       setAnimeList(list);
+
+      // Run fast delta startup scan in the background without blocking initial UI render
+      toraApi
+        .quickScanLibrary()
+        .then(async (summary) => {
+          if (summary.newly_parsed > 0 || (summary.removed_files ?? 0) > 0) {
+            await refreshAnimeList();
+            setLibraryRefreshTick((t) => t + 1);
+          }
+        })
+        .catch(() => {});
     } catch (e) {
       console.error("Failed to initialize Tora:", e);
     }
@@ -123,6 +136,27 @@ export const App: React.FC = () => {
 
   useEffect(() => {
     loadInitialData();
+
+    // Listen for live folder watcher events when new episodes are downloaded or removed
+    let unlistenFn: (() => void) | null = null;
+    listen<ScanSummary>("library-changed", async (event) => {
+      await refreshAnimeList();
+      setLibraryRefreshTick((t) => t + 1);
+      if (event.payload.newly_parsed > 0) {
+        showToast(
+          `Detected ${event.payload.newly_parsed} new episode${
+            event.payload.newly_parsed === 1 ? "" : "s"
+          } in library folders`,
+          "success"
+        );
+      }
+    }).then((fn) => {
+      unlistenFn = fn;
+    });
+
+    return () => {
+      if (unlistenFn) unlistenFn();
+    };
   }, []);
 
   // Poll Anisthesia Windows Media Player Recognition every 2.5 seconds without overlapping calls

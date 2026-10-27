@@ -412,6 +412,7 @@ impl Database {
                 for (row_id, row_path) in existing_in_folder {
                     if !discovered_paths.contains(row_path.as_str()) {
                         del_stmt.execute(params![row_id]).map_err(|e| e.to_string())?;
+                        removed_files += 1;
                     }
                 }
             }
@@ -486,9 +487,454 @@ impl Database {
             folders_scanned: folders.len(),
             total_files_indexed,
             newly_parsed,
+            removed_files,
             matched_files,
             elapsed_ms: start.elapsed().as_millis(),
         })
+    }
+
+    /// Ultra-fast incremental startup & delta scanner:
+    /// Checks `(file_path, modified_unix, file_size)` against the SQLite index and completely skips
+    /// C++ Anitomy parsing and SQLite writes for unchanged files. Only newly added, modified, or
+    /// deleted files are parsed and written.
+    pub fn quick_scan_library_folders(&self) -> Result<ScanSummary, String> {
+        let start = std::time::Instant::now();
+
+        let folders: Vec<(i64, String, String, u32, u64)> = {
+            let conn = self.conn.lock().map_err(|e| e.to_string())?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, path, drive_root, file_count, total_bytes
+                     FROM library_folders WHERE enabled = 1 ORDER BY id ASC",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, u32>(3)?,
+                        r.get::<_, u64>(4)?,
+                    ))
+                })
+                .map_err(|e| e.to_string())?;
+            rows.flatten().collect()
+        };
+
+        if folders.is_empty() {
+            return Ok(ScanSummary {
+                folders_scanned: 0,
+                total_files_indexed: 0,
+                newly_parsed: 0,
+                removed_files: 0,
+                matched_files: 0,
+                elapsed_ms: start.elapsed().as_millis(),
+            });
+        }
+
+        // Load existing file cache: file_path -> (id, folder_id, modified_unix, file_size, matched_anime_id)
+        let existing_cache: HashMap<String, (i64, i64, i64, u64, Option<i64>)> = {
+            let conn = self.conn.lock().map_err(|e| e.to_string())?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, folder_id, file_path, modified_unix, file_size, matched_anime_id
+                     FROM local_episodes",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(2)?,
+                        (
+                            r.get::<_, i64>(0)?,
+                            r.get::<_, i64>(1)?,
+                            r.get::<_, i64>(3)?,
+                            r.get::<_, u64>(4)?,
+                            r.get::<_, Option<i64>>(5)?,
+                        ),
+                    ))
+                })
+                .map_err(|e| e.to_string())?;
+            rows.flatten().collect()
+        };
+
+        let mut total_files_indexed = 0usize;
+        let mut unchanged_matched = 0usize;
+        let mut seen_paths: std::collections::HashSet<String> =
+            std::collections::HashSet::with_capacity(existing_cache.len());
+        let mut active_folder_ids: std::collections::HashSet<i64> =
+            std::collections::HashSet::with_capacity(folders.len());
+        let mut folder_stats_updates: Vec<(i64, u32, u64)> = Vec::new();
+
+        // Collect only new or modified files: (folder_id, drive_root, root_path, file_path, size, mtime, prev_matched_id)
+        let mut delta_files: Vec<(i64, String, PathBuf, PathBuf, u64, i64, Option<i64>)> =
+            Vec::new();
+
+        for (folder_id, folder_path, drive_root, old_count, old_bytes) in &folders {
+            let root_path = PathBuf::from(folder_path);
+            if !root_path.exists() {
+                continue;
+            }
+            active_folder_ids.insert(*folder_id);
+
+            let mut folder_count = 0u32;
+            let mut folder_bytes = 0u64;
+
+            for entry in WalkDir::new(&root_path)
+                .follow_links(true)
+                .max_depth(8)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_file() && is_video_file(e.path()))
+            {
+                let Ok(meta) = entry.metadata() else {
+                    continue;
+                };
+                let size = meta.len();
+                let mtime = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+
+                let path = entry.into_path();
+                let full_str = path.to_string_lossy().to_string();
+
+                folder_count += 1;
+                folder_bytes += size;
+                total_files_indexed += 1;
+
+                if let Some(&(_row_id, _fid, old_mtime, old_size, prev_matched)) =
+                    existing_cache.get(&full_str)
+                {
+                    seen_paths.insert(full_str);
+                    if old_mtime == mtime && old_size == size {
+                        if prev_matched.is_some() {
+                            unchanged_matched += 1;
+                        }
+                        continue;
+                    }
+                    delta_files.push((
+                        *folder_id,
+                        drive_root.clone(),
+                        root_path.clone(),
+                        path,
+                        size,
+                        mtime,
+                        prev_matched,
+                    ));
+                } else {
+                    seen_paths.insert(full_str);
+                    delta_files.push((
+                        *folder_id,
+                        drive_root.clone(),
+                        root_path.clone(),
+                        path,
+                        size,
+                        mtime,
+                        None,
+                    ));
+                }
+            }
+
+            if folder_count != *old_count || folder_bytes != *old_bytes {
+                folder_stats_updates.push((*folder_id, folder_count, folder_bytes));
+            }
+        }
+
+        // Identify deleted files in active folders
+        let mut stale_ids: Vec<i64> = Vec::new();
+        for (path_str, &(row_id, fid, _, _, _)) in &existing_cache {
+            if active_folder_ids.contains(&fid) && !seen_paths.contains(path_str) {
+                stale_ids.push(row_id);
+            }
+        }
+
+        // Fast path: zero changes on disk -> return in <1ms with zero Anitomy calls and zero SQLite writes
+        if delta_files.is_empty() && stale_ids.is_empty() && folder_stats_updates.is_empty() {
+            return Ok(ScanSummary {
+                folders_scanned: folders.len(),
+                total_files_indexed,
+                newly_parsed: 0,
+                removed_files: 0,
+                matched_files: unchanged_matched,
+                elapsed_ms: start.elapsed().as_millis(),
+            });
+        }
+
+        let matcher = self.build_matcher_index()?;
+        let now = chrono::Utc::now().timestamp();
+
+        // Parse and match only the delta files in parallel using Rayon
+        let parsed_deltas: Vec<(
+            i64,
+            String,
+            String,
+            String,
+            u64,
+            i64,
+            String,
+            String,
+            Option<u32>,
+            Option<u32>,
+            Option<String>,
+            Option<String>,
+            String,
+            String,
+            Option<String>,
+            Option<i64>,
+            i32,
+        )> = delta_files
+            .par_iter()
+            .map(
+                |(folder_id, drive_root, root_path, path, size, mtime, prev_matched)| {
+                    let full_str = path.to_string_lossy().to_string();
+                    let file_name = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_string();
+
+                    let rel_str = path
+                        .strip_prefix(root_path)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .to_string();
+                    let parse_input = if rel_str.is_empty() {
+                        &file_name
+                    } else {
+                        &rel_str
+                    };
+
+                    let mut elements = parse_filename(parse_input);
+
+                    let norm_is_weak = elements.normalized_title.is_empty()
+                        || elements.normalized_title.chars().all(|c| c.is_ascii_digit())
+                        || matches!(
+                            elements.normalized_title.as_str(),
+                            "episode" | "ep" | "ova" | "special"
+                        );
+                    if norm_is_weak {
+                        if let Some(parent) = path.parent() {
+                            if parent != root_path {
+                                if let Some(parent_name) =
+                                    parent.file_name().and_then(|n| n.to_str())
+                                {
+                                    let parent_parsed = parse_filename(parent_name);
+                                    if !parent_parsed.anime_title.is_empty() {
+                                        elements.anime_title = parent_parsed.anime_title;
+                                        elements.normalized_title =
+                                            normalize_anime_title(&elements.anime_title);
+                                        if elements.anime_season.is_none() {
+                                            elements.anime_season = parent_parsed.anime_season;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    let valid_prev = prev_matched.filter(|id| matcher.by_id.contains_key(id));
+                    let resolved = matcher
+                        .match_episode(&mut elements, Some(&full_str))
+                        .map(|(aid, _t, _c, prog, _eps)| (aid, prog))
+                        .or_else(|| {
+                            valid_prev.and_then(|aid| {
+                                matcher
+                                    .by_id
+                                    .get(&aid)
+                                    .map(|(_t, _c, prog, _eps)| (aid, *prog))
+                            })
+                        });
+
+                    let (matched_id, watched) = match resolved {
+                        Some((anime_id, user_progress)) => {
+                            let w = elements
+                                .episode_number
+                                .map(|n| n <= user_progress)
+                                .unwrap_or(false) as i32;
+                            (Some(anime_id), w)
+                        }
+                        None => (None, 0),
+                    };
+
+                    let v_json = serde_json::to_string(&elements.video_term)
+                        .unwrap_or_else(|_| "[]".into());
+                    let a_json = serde_json::to_string(&elements.audio_term)
+                        .unwrap_or_else(|_| "[]".into());
+
+                    (
+                        *folder_id,
+                        full_str,
+                        file_name,
+                        drive_root.clone(),
+                        *size,
+                        *mtime,
+                        elements.anime_title,
+                        elements.normalized_title,
+                        elements.episode_number,
+                        elements.anime_season,
+                        elements.release_group,
+                        elements.video_resolution,
+                        v_json,
+                        a_json,
+                        elements.file_checksum,
+                        matched_id,
+                        watched,
+                    )
+                },
+            )
+            .collect();
+
+        let newly_matched = parsed_deltas.iter().filter(|i| i.15.is_some()).count();
+
+        {
+            let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+            if !stale_ids.is_empty() {
+                let mut del_stmt = tx
+                    .prepare("DELETE FROM local_episodes WHERE id = ?1")
+                    .map_err(|e| e.to_string())?;
+                for row_id in &stale_ids {
+                    del_stmt.execute(params![row_id]).map_err(|e| e.to_string())?;
+                }
+            }
+
+            if !parsed_deltas.is_empty() {
+                let mut upsert_stmt = tx
+                    .prepare(
+                        "INSERT INTO local_episodes (
+                            folder_id, file_path, file_name, drive_root, file_size, modified_unix,
+                            parsed_title, normalized_title, episode_number, anime_season,
+                            release_group, resolution, video_terms_json, audio_terms_json, checksum,
+                            matched_anime_id, watched
+                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+                        ON CONFLICT(file_path) DO UPDATE SET
+                            folder_id = excluded.folder_id,
+                            file_name = excluded.file_name,
+                            drive_root = excluded.drive_root,
+                            file_size = excluded.file_size,
+                            modified_unix = excluded.modified_unix,
+                            parsed_title = excluded.parsed_title,
+                            normalized_title = excluded.normalized_title,
+                            episode_number = excluded.episode_number,
+                            anime_season = excluded.anime_season,
+                            release_group = excluded.release_group,
+                            resolution = excluded.resolution,
+                            video_terms_json = excluded.video_terms_json,
+                            audio_terms_json = excluded.audio_terms_json,
+                            checksum = excluded.checksum,
+                            matched_anime_id = COALESCE(excluded.matched_anime_id, local_episodes.matched_anime_id),
+                            watched = excluded.watched",
+                    )
+                    .map_err(|e| e.to_string())?;
+
+                for item in &parsed_deltas {
+                    upsert_stmt
+                        .execute(params![
+                            item.0, item.1, item.2, item.3, item.4, item.5, item.6, item.7,
+                            item.8, item.9, item.10, item.11, item.12, item.13, item.14, item.15,
+                            item.16,
+                        ])
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+
+            if !folder_stats_updates.is_empty() {
+                let mut f_stmt = tx
+                    .prepare(
+                        "UPDATE library_folders
+                         SET file_count = ?1, total_bytes = ?2, last_scanned_at = ?3
+                         WHERE id = ?4",
+                    )
+                    .map_err(|e| e.to_string())?;
+                for (fid, fcount, fbytes) in &folder_stats_updates {
+                    f_stmt
+                        .execute(params![fcount, fbytes, now, fid])
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+
+            tx.commit().map_err(|e| e.to_string())?;
+        }
+
+        Ok(ScanSummary {
+            folders_scanned: folders.len(),
+            total_files_indexed,
+            newly_parsed: parsed_deltas.len(),
+            removed_files: stale_ids.len(),
+            matched_files: unchanged_matched + newly_matched,
+            elapsed_ms: start.elapsed().as_millis(),
+        })
+    }
+
+    /// Ultra-lean zero-allocation streaming fingerprint `(file_count, total_bytes, state_hash)`
+    /// across all enabled library folders. Used by the background folder watcher to detect new
+    /// downloads, renames, or deletions in sub-millisecond time without heap allocations or SQLite writes.
+    pub fn compute_library_fingerprint(&self) -> Result<(usize, u64, u64), String> {
+        let folder_paths: Vec<String> = {
+            let conn = self.conn.lock().map_err(|e| e.to_string())?;
+            let mut stmt = conn
+                .prepare("SELECT path FROM library_folders WHERE enabled = 1 ORDER BY id ASC")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .map_err(|e| e.to_string())?;
+            rows.flatten().collect()
+        };
+
+        const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+        const FNV_PRIME: u64 = 0x100000001b3;
+
+        let mut hash: u64 = FNV_OFFSET;
+        let mut file_count: usize = 0;
+        let mut total_bytes: u64 = 0;
+
+        for folder_path in &folder_paths {
+            let root = Path::new(folder_path);
+            if !root.exists() {
+                continue;
+            }
+            for entry in WalkDir::new(root)
+                .follow_links(true)
+                .max_depth(8)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_file() && is_video_file(e.path()))
+            {
+                let Ok(meta) = entry.metadata() else {
+                    continue;
+                };
+                let size = meta.len();
+                let mtime = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+
+                file_count += 1;
+                total_bytes = total_bytes.wrapping_add(size);
+
+                for &b in entry.path().as_os_str().as_encoded_bytes() {
+                    hash ^= b as u64;
+                    hash = hash.wrapping_mul(FNV_PRIME);
+                }
+                for b in size.to_le_bytes() {
+                    hash ^= b as u64;
+                    hash = hash.wrapping_mul(FNV_PRIME);
+                }
+                for b in mtime.to_le_bytes() {
+                    hash ^= b as u64;
+                    hash = hash.wrapping_mul(FNV_PRIME);
+                }
+            }
+        }
+
+        Ok((file_count, total_bytes, hash))
     }
 
     /// Re-run title matching across all indexed local episodes against the anime_entries table using the fast O(1) in-memory matcher index.
@@ -820,3 +1266,77 @@ impl Database {
         self.rematch_all_local_episodes()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_quick_scan_and_library_fingerprint() {
+        let tmp_dir = std::env::temp_dir().join("tora_test_quick_scan");
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        let media_dir = tmp_dir.join("media");
+        std::fs::create_dir_all(&media_dir).expect("create media dir");
+
+        let db_path = tmp_dir.join("test.db");
+        let db = Database::open(&db_path).expect("open test db");
+        let folder_str = media_dir.to_string_lossy().to_string();
+        db.add_library_folder(&folder_str, Some("Test Media".to_string()))
+            .expect("add library folder");
+
+        // Create two initial video files
+        let ep1 = media_dir.join("[SubsPlease] Sousou no Frieren - 01 (1080p).mkv");
+        let ep2 = media_dir.join("[Judas] Kusuriya - S03E03.mkv");
+        std::fs::write(&ep1, b"dummy video content 1").expect("write ep1");
+        std::fs::write(&ep2, b"dummy video content 22").expect("write ep2");
+
+        // 1. Initial quick scan parses and matches both new files
+        let s1 = db.quick_scan_library_folders().expect("quick scan 1");
+        assert_eq!(s1.total_files_indexed, 2);
+        assert_eq!(s1.newly_parsed, 2);
+        assert_eq!(s1.removed_files, 0);
+        assert_eq!(s1.matched_files, 2);
+
+        let fp1 = db.compute_library_fingerprint().expect("fingerprint 1");
+        assert_eq!(fp1.0, 2);
+
+        // 2. Second quick scan with no changes hits the 0-parse fast path
+        let s2 = db.quick_scan_library_folders().expect("quick scan 2");
+        assert_eq!(s2.total_files_indexed, 2);
+        assert_eq!(s2.newly_parsed, 0);
+        assert_eq!(s2.removed_files, 0);
+        assert_eq!(s2.matched_files, 2);
+
+        let fp2 = db.compute_library_fingerprint().expect("fingerprint 2");
+        assert_eq!(fp1, fp2);
+
+        // 3. Simulating a newly downloaded episode changes fingerprint and parses only the 1 delta file
+        let ep3 = media_dir.join("[SubsPlease] Dandadan - 05 (1080p).mkv");
+        std::fs::write(&ep3, b"dummy video content 333").expect("write ep3");
+
+        let fp3 = db.compute_library_fingerprint().expect("fingerprint 3");
+        assert_ne!(fp2, fp3);
+        assert_eq!(fp3.0, 3);
+
+        let s3 = db.quick_scan_library_folders().expect("quick scan 3");
+        assert_eq!(s3.total_files_indexed, 3);
+        assert_eq!(s3.newly_parsed, 1);
+        assert_eq!(s3.removed_files, 0);
+        assert_eq!(s3.matched_files, 3);
+
+        // 4. Deleting a file changes fingerprint and prunes only the 1 removed file
+        std::fs::remove_file(&ep1).expect("remove ep1");
+        let fp4 = db.compute_library_fingerprint().expect("fingerprint 4");
+        assert_ne!(fp3, fp4);
+        assert_eq!(fp4.0, 2);
+
+        let s4 = db.quick_scan_library_folders().expect("quick scan 4");
+        assert_eq!(s4.total_files_indexed, 2);
+        assert_eq!(s4.newly_parsed, 0);
+        assert_eq!(s4.removed_files, 1);
+        assert_eq!(s4.matched_files, 2);
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+}
+

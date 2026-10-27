@@ -85,6 +85,7 @@ export interface ScanSummary {
   folders_scanned: number;
   total_files_indexed: number;
   newly_parsed: number;
+  removed_files?: number;
   matched_files: number;
   elapsed_ms: number;
 }

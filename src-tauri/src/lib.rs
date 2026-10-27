@@ -18,7 +18,7 @@ use crate::torrents::{
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 
 pub struct AppState {
     pub db: Arc<Database>,
@@ -310,6 +310,14 @@ async fn scan_library(state: State<'_, AppState>) -> Result<ScanSummary, String>
 }
 
 #[tauri::command]
+async fn quick_scan_library(state: State<'_, AppState>) -> Result<ScanSummary, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || db.quick_scan_library_folders())
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 async fn get_local_episodes(
     state: State<'_, AppState>,
     anime_id: Option<i64>,
@@ -366,22 +374,76 @@ async fn play_episode_file(state: State<'_, AppState>, file_path: String) -> Res
 
 #[tauri::command]
 async fn reveal_in_explorer(file_path: String) -> Result<(), String> {
-    #[cfg(windows)]
-    {
+    tokio::task::spawn_blocking(move || {
         let p = std::path::Path::new(&file_path);
+
+        // If it's a directory, open the directory itself
         if p.is_dir() {
-            Command::new("explorer.exe")
-                .arg(&file_path)
-                .spawn()
-                .map_err(|e| e.to_string())?;
-        } else {
-            Command::new("explorer.exe")
-                .arg(format!("/select,{}", file_path))
-                .spawn()
-                .map_err(|e| e.to_string())?;
+            #[cfg(windows)]
+            {
+                if tauri_plugin_opener::open_path(p, None::<&str>).is_ok() {
+                    return Ok(());
+                }
+                let clean = file_path.replace('/', "\\");
+                Command::new("explorer.exe")
+                    .arg(&clean)
+                    .spawn()
+                    .map_err(|e| e.to_string())?;
+                return Ok(());
+            }
+            #[cfg(not(windows))]
+            {
+                return tauri_plugin_opener::open_path(p, None::<&str>).map_err(|e| e.to_string());
+            }
         }
-    }
-    Ok(())
+
+        // If it's a file, reveal and select it in its parent directory
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+
+            if p.exists() {
+                // First try native Shell API via tauri_plugin_opener (SHOpenFolderAndSelectItems)
+                if tauri_plugin_opener::reveal_item_in_dir(p).is_ok() {
+                    return Ok(());
+                }
+
+                // Fallback to explorer.exe /select,"<path>" using raw_arg so Rust doesn't quote /select
+                let clean = file_path.replace('/', "\\");
+                Command::new("explorer.exe")
+                    .raw_arg(format!("/select,\"{}\"", clean))
+                    .spawn()
+                    .map_err(|e| e.to_string())?;
+                return Ok(());
+            } else if let Some(parent) = p.parent().filter(|par| par.exists()) {
+                // If the file was moved or deleted, fall back to opening its containing directory
+                if tauri_plugin_opener::open_path(parent, None::<&str>).is_ok() {
+                    return Ok(());
+                }
+                let clean = parent.to_string_lossy().replace('/', "\\");
+                Command::new("explorer.exe")
+                    .arg(&clean)
+                    .spawn()
+                    .map_err(|e| e.to_string())?;
+                return Ok(());
+            } else {
+                return Err(format!("Path does not exist: {}", file_path));
+            }
+        }
+
+        #[cfg(not(windows))]
+        {
+            if p.exists() {
+                tauri_plugin_opener::reveal_item_in_dir(p).map_err(|e| e.to_string())
+            } else if let Some(parent) = p.parent().filter(|par| par.exists()) {
+                tauri_plugin_opener::open_path(parent, None::<&str>).map_err(|e| e.to_string())
+            } else {
+                Err(format!("Path does not exist: {}", file_path))
+            }
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -852,6 +914,72 @@ async fn save_app_settings(
     .map_err(|e| e.to_string())?
 }
 
+fn spawn_library_folder_watcher(app_handle: tauri::AppHandle, db: Arc<Database>) {
+    tauri::async_runtime::spawn(async move {
+        // 1. Run quick incremental delta scan on startup
+        let db_init = db.clone();
+        let init_res = tokio::task::spawn_blocking(move || {
+            let summary = db_init.quick_scan_library_folders()?;
+            let fp = db_init.compute_library_fingerprint()?;
+            Ok::<_, String>((summary, fp))
+        })
+        .await;
+
+        let mut last_fingerprint = match init_res {
+            Ok(Ok((summary, fp))) => {
+                if summary.newly_parsed > 0 || summary.removed_files > 0 {
+                    let _ = app_handle.emit("library-changed", &summary);
+                }
+                fp
+            }
+            _ => (0, 0, 0),
+        };
+
+        // 2. Lean background watcher loop checking zero-allocation folder metadata fingerprint
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+
+            let db_check = db.clone();
+            let Ok(Ok(current_fp)) =
+                tokio::task::spawn_blocking(move || db_check.compute_library_fingerprint()).await
+            else {
+                continue;
+            };
+
+            if current_fp == last_fingerprint {
+                continue;
+            }
+
+            // Wait briefly for any active file write/rename (e.g. torrent completion) to settle
+            let mut settled_fp = current_fp;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+                let db_settle = db.clone();
+                let Ok(Ok(next_fp)) =
+                    tokio::task::spawn_blocking(move || db_settle.compute_library_fingerprint())
+                        .await
+                else {
+                    break;
+                };
+                if next_fp == settled_fp {
+                    break;
+                }
+                settled_fp = next_fp;
+            }
+
+            let db_scan = db.clone();
+            if let Ok(Ok(summary)) =
+                tokio::task::spawn_blocking(move || db_scan.quick_scan_library_folders()).await
+            {
+                last_fingerprint = settled_fp;
+                if summary.newly_parsed > 0 || summary.removed_files > 0 {
+                    let _ = app_handle.emit("library-changed", &summary);
+                }
+            }
+        }
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -865,6 +993,8 @@ pub fn run() {
             let db_path = app_data.join("tora_library.db");
             let db = Arc::new(Database::open(&db_path).expect("Failed to initialize Tora SQLite DB"));
             let plugins = Arc::new(PluginManager::new());
+
+            spawn_library_folder_watcher(app.handle().clone(), db.clone());
 
             app.manage(AppState {
                 db,
@@ -889,6 +1019,7 @@ pub fn run() {
             remove_library_folder,
             get_drive_summaries,
             scan_library,
+            quick_scan_library,
             get_local_episodes,
             bind_title_alias,
             play_episode_file,
