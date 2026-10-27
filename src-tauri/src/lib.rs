@@ -10,7 +10,7 @@ use crate::db::{
 };
 use crate::detection::anisthesia::{detect_active_media_player, DetectedMediaSession};
 use crate::detection::anitomy::{parse_filename, AnitomyElements};
-use crate::library::scanner::{DriveStorageSummary, ScanSummary};
+use crate::library::scanner::{DriveStorageSummary, LibraryMonitorHandle, ScanSummary};
 use crate::plugins::{PluginManager, TrackerPluginDescriptor, TrackerUserProfile};
 use crate::torrents::{
     search_torrents, send_to_qbittorrent, test_qbittorrent_connection, TorrentItem,
@@ -23,6 +23,7 @@ use tauri::{Emitter, Manager, State};
 pub struct AppState {
     pub db: Arc<Database>,
     pub plugins: Arc<PluginManager>,
+    pub monitor: LibraryMonitorHandle,
     pub active_session: Mutex<Option<DetectedMediaSession>>,
     pub simulated_session: Mutex<Option<(String, String)>>, // (player_name, window_title)
 }
@@ -273,9 +274,11 @@ async fn add_library_folder(
     label: Option<String>,
 ) -> Result<Vec<LibraryFolder>, String> {
     let db = state.db.clone();
+    let monitor = state.monitor.clone();
     tokio::task::spawn_blocking(move || {
         db.add_library_folder(&path, label)?;
         let _ = db.scan_all_library_folders();
+        monitor.reload();
         db.list_library_folders()
     })
     .await
@@ -288,9 +291,14 @@ async fn remove_library_folder(
     folder_id: i64,
 ) -> Result<Vec<LibraryFolder>, String> {
     let db = state.db.clone();
-    tokio::task::spawn_blocking(move || db.remove_library_folder(folder_id))
-        .await
-        .map_err(|e| e.to_string())?
+    let monitor = state.monitor.clone();
+    tokio::task::spawn_blocking(move || {
+        let folders = db.remove_library_folder(folder_id)?;
+        monitor.reload();
+        Ok(folders)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -453,6 +461,7 @@ async fn create_demo_library_files(
 ) -> Result<ScanSummary, String> {
     let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let db = state.db.clone();
+    let monitor = state.monitor.clone();
 
     tokio::task::spawn_blocking(move || {
         let demo_drive_a = app_dir.join("DemoLibrary_DriveA_Seasonal");
@@ -506,7 +515,9 @@ async fn create_demo_library_files(
             Some("BD Archive (Demo Folder B)".into()),
         )?;
 
-        db.scan_all_library_folders()
+        let summary = db.scan_all_library_folders()?;
+        monitor.reload();
+        Ok(summary)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -914,70 +925,14 @@ async fn save_app_settings(
     .map_err(|e| e.to_string())?
 }
 
-fn spawn_library_folder_watcher(app_handle: tauri::AppHandle, db: Arc<Database>) {
-    tauri::async_runtime::spawn(async move {
-        // 1. Run quick incremental delta scan on startup
-        let db_init = db.clone();
-        let init_res = tokio::task::spawn_blocking(move || {
-            let summary = db_init.quick_scan_library_folders()?;
-            let fp = db_init.compute_library_fingerprint()?;
-            Ok::<_, String>((summary, fp))
-        })
-        .await;
-
-        let mut last_fingerprint = match init_res {
-            Ok(Ok((summary, fp))) => {
-                if summary.newly_parsed > 0 || summary.removed_files > 0 {
-                    let _ = app_handle.emit("library-changed", &summary);
-                }
-                fp
-            }
-            _ => (0, 0, 0),
-        };
-
-        // 2. Lean background watcher loop checking zero-allocation folder metadata fingerprint
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-
-            let db_check = db.clone();
-            let Ok(Ok(current_fp)) =
-                tokio::task::spawn_blocking(move || db_check.compute_library_fingerprint()).await
-            else {
-                continue;
-            };
-
-            if current_fp == last_fingerprint {
-                continue;
-            }
-
-            // Wait briefly for any active file write/rename (e.g. torrent completion) to settle
-            let mut settled_fp = current_fp;
-            loop {
-                tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
-                let db_settle = db.clone();
-                let Ok(Ok(next_fp)) =
-                    tokio::task::spawn_blocking(move || db_settle.compute_library_fingerprint())
-                        .await
-                else {
-                    break;
-                };
-                if next_fp == settled_fp {
-                    break;
-                }
-                settled_fp = next_fp;
-            }
-
-            let db_scan = db.clone();
-            if let Ok(Ok(summary)) =
-                tokio::task::spawn_blocking(move || db_scan.quick_scan_library_folders()).await
-            {
-                last_fingerprint = settled_fp;
-                if summary.newly_parsed > 0 || summary.removed_files > 0 {
-                    let _ = app_handle.emit("library-changed", &summary);
-                }
-            }
-        }
-    });
+fn start_library_monitor(
+    app_handle: tauri::AppHandle,
+    db: Arc<Database>,
+) -> LibraryMonitorHandle {
+    // Start zero-polling Win32 IOCP ReadDirectoryChangesW monitor (0.00% idle CPU)
+    LibraryMonitorHandle::start(db, move |summary| {
+        let _ = app_handle.emit("library-changed", &summary);
+    })
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -994,11 +949,12 @@ pub fn run() {
             let db = Arc::new(Database::open(&db_path).expect("Failed to initialize Tora SQLite DB"));
             let plugins = Arc::new(PluginManager::new());
 
-            spawn_library_folder_watcher(app.handle().clone(), db.clone());
+            let monitor = start_library_monitor(app.handle().clone(), db.clone());
 
             app.manage(AppState {
                 db,
                 plugins,
+                monitor,
                 active_session: Mutex::new(None),
                 simulated_session: Mutex::new(None),
             });
