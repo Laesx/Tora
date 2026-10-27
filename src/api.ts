@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   AnimeEntry,
   AppSettings,
+  BatchAnimeUpdatePatch,
   DetectedMediaSession,
   DriveStorageSummary,
   FilenameTestResult,
@@ -169,7 +170,15 @@ export const toraApi = {
     userNotes: string;
     customFolder?: string | null;
     synonyms?: string[] | null;
+    userStartedAt?: string | null;
+    userCompletedAt?: string | null;
   }) => invoke<AnimeEntry>("update_anime_entry", params),
+
+  batchUpdateAnimeEntries: (patch: BatchAnimeUpdatePatch) =>
+    invoke<AnimeEntry[]>("batch_update_anime_entries", { patch }),
+
+  batchDeleteAnimeEntries: (animeIds: number[]) =>
+    invoke<AnimeEntry[]>("batch_delete_anime_entries", { animeIds }),
 
   addOrUpsertAnime: (entry: AnimeEntry) =>
     invoke<AnimeEntry[]>("add_or_upsert_anime", { entry }),

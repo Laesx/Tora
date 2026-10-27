@@ -5,7 +5,7 @@ pub mod plugins;
 pub mod torrents;
 
 use crate::db::{
-    AnimeEntry, AppSettings, Database, LibraryFolder, LocalEpisodeFile, TorrentRule,
+    AnimeEntry, AppSettings, BatchAnimeUpdatePatch, Database, LibraryFolder, LocalEpisodeFile, TorrentRule,
     WatchHistoryEntry,
 };
 use crate::detection::anisthesia::{detect_active_media_player, DetectedMediaSession};
@@ -55,6 +55,8 @@ async fn update_anime_entry(
     user_notes: String,
     custom_folder: Option<String>,
     synonyms: Option<Vec<String>>,
+    user_started_at: Option<String>,
+    user_completed_at: Option<String>,
 ) -> Result<AnimeEntry, String> {
     let db = state.db.clone();
     let (updated, settings) = tokio::task::spawn_blocking(move || -> Result<(AnimeEntry, AppSettings), String> {
@@ -67,6 +69,8 @@ async fn update_anime_entry(
             &user_notes,
             custom_folder,
             synonyms,
+            user_started_at,
+            user_completed_at,
         )?;
 
         if needs_full_rematch {
@@ -109,6 +113,80 @@ async fn update_anime_entry(
     }
 
     Ok(updated)
+}
+
+#[tauri::command]
+async fn batch_update_anime_entries(
+    state: State<'_, AppState>,
+    patch: BatchAnimeUpdatePatch,
+) -> Result<Vec<AnimeEntry>, String> {
+    let db = state.db.clone();
+    let (updated_list, settings) =
+        tokio::task::spawn_blocking(move || -> Result<(Vec<AnimeEntry>, AppSettings), String> {
+            let updated = db.batch_update_anime_entries(&patch)?;
+            let settings = db.get_settings()?;
+            Ok((updated, settings))
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+
+    // Keep active media recognition session's current progress in sync if it matches any updated anime
+    if let Ok(mut active_guard) = state.active_session.lock() {
+        if let Some(existing) = active_guard.as_mut() {
+            if let Some(matched_id) = existing.matched_anime_id {
+                if let Some(found) = updated_list.iter().find(|e| e.id == matched_id) {
+                    existing.matched_current_progress = Some(found.user_progress);
+                }
+            }
+        }
+    }
+
+    // Push updates to tracker plugin asynchronously in the background
+    if settings.auto_sync_tracker && !settings.anilist_token.trim().is_empty() {
+        if let Some(plugin) = state.plugins.get(&settings.active_tracker_plugin) {
+            let tok = settings.anilist_token.clone();
+            let to_sync: Vec<(i64, String, u32, f64, u32, String)> = updated_list
+                .iter()
+                .filter_map(|e| {
+                    e.anilist_id.map(|mid| {
+                        (
+                            mid,
+                            e.user_status.clone(),
+                            e.user_progress,
+                            e.user_score,
+                            e.user_repeats,
+                            e.user_notes.clone(),
+                        )
+                    })
+                })
+                .collect();
+            if !to_sync.is_empty() {
+                tokio::spawn(async move {
+                    for (media_id, st, prog, sc, rep, nts) in to_sync {
+                        let _ = plugin
+                            .update_list_entry(&tok, media_id, &st, prog, sc, rep, &nts)
+                            .await;
+                    }
+                });
+            }
+        }
+    }
+
+    Ok(updated_list)
+}
+
+#[tauri::command]
+async fn batch_delete_anime_entries(
+    state: State<'_, AppState>,
+    anime_ids: Vec<i64>,
+) -> Result<Vec<AnimeEntry>, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        db.batch_delete_anime_entries(&anime_ids)?;
+        db.list_anime_entries()
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -703,6 +781,8 @@ async fn poll_media_recognition(
                                         &entry.user_notes,
                                         entry.custom_folder,
                                         None,
+                                        None,
+                                        None,
                                     ) {
                                         existing.matched_current_progress =
                                             Some(updated.user_progress);
@@ -964,6 +1044,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_anime_list,
             update_anime_entry,
+            batch_update_anime_entries,
+            batch_delete_anime_entries,
             add_or_upsert_anime,
             delete_anime_entry,
             get_tracker_plugins,

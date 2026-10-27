@@ -22,6 +22,7 @@ import {
 import {
   AnimeEntry,
   AppSettings,
+  BatchAnimeUpdatePatch,
   DetectedMediaSession,
   ScanSummary,
 } from "./types";
@@ -70,6 +71,7 @@ export const App: React.FC = () => {
   const [animeList, setAnimeList] = useState<AnimeEntry[]>([]);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [selectedAnime, setSelectedAnime] = useState<AnimeEntry | null>(null);
+  const [selectedAnimeIds, setSelectedAnimeIds] = useState<number[]>([]);
   const [quickMenuAnimeId, setQuickMenuAnimeId] = useState<number | null>(null);
   const [torrentSearchQuery, setTorrentSearchQuery] = useState("");
   const [activeSession, setActiveSession] =
@@ -242,22 +244,6 @@ export const App: React.FC = () => {
       }
     >
   >({});
-
-  // Keyboard shortcuts: Ctrl+K for Command Palette, Escape to close modals/menus
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
-        e.preventDefault();
-        setCmdOpen((prev) => !prev);
-      } else if (e.key === "Escape") {
-        setCmdOpen(false);
-        setQuickMenuAnimeId(null);
-        setSelectedAnime(null);
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, []);
 
   const handleUpdateSettings = async (next: AppSettings) => {
     setSettings(next);
@@ -466,10 +452,126 @@ export const App: React.FC = () => {
 
   const viewMode = settings?.view_mode || "grid";
 
+  // Keyboard shortcuts: Ctrl+K for Command Palette, Ctrl+A to select all in watchlist,
+  // Enter to open selected anime modal, Escape to close modals/menus or clear selection
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const isInputFocused =
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.tagName === "SELECT" ||
+          target.isContentEditable);
+
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setCmdOpen((prev) => !prev);
+      } else if (
+        (e.ctrlKey || e.metaKey) &&
+        e.key.toLowerCase() === "a" &&
+        !isInputFocused &&
+        activeTab === "watchlist" &&
+        !selectedAnime &&
+        !cmdOpen
+      ) {
+        e.preventDefault();
+        setSelectedAnimeIds(filteredAnime.map((a) => a.id));
+      } else if (
+        e.key === "Enter" &&
+        !isInputFocused &&
+        activeTab === "watchlist" &&
+        !selectedAnime &&
+        !cmdOpen &&
+        quickMenuAnimeId === null &&
+        selectedAnimeIds.length === 1
+      ) {
+        const found = animeList.find((a) => a.id === selectedAnimeIds[0]);
+        if (found) {
+          e.preventDefault();
+          setSelectedAnime(found);
+        }
+      } else if (e.key === "Escape") {
+        if (cmdOpen) {
+          setCmdOpen(false);
+        } else if (quickMenuAnimeId !== null) {
+          setQuickMenuAnimeId(null);
+        } else if (selectedAnime) {
+          setSelectedAnime(null);
+        } else if (selectedAnimeIds.length > 0) {
+          setSelectedAnimeIds([]);
+        }
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [
+    activeTab,
+    animeList,
+    cmdOpen,
+    filteredAnime,
+    quickMenuAnimeId,
+    selectedAnime,
+    selectedAnimeIds,
+  ]);
+
+  const handleDeleteAnime = async (anime: AnimeEntry) => {
+    try {
+      await toraApi.deleteAnimeEntry(anime.id);
+      setAnimeList((prev) => prev.filter((a) => a.id !== anime.id));
+      setSelectedAnime((prev) => (prev?.id === anime.id ? null : prev));
+      setSelectedAnimeIds((prev) => prev.filter((id) => id !== anime.id));
+      showToast(`Removed "${anime.title_romaji}" from list`, "info");
+    } catch (e: any) {
+      showToast(String(e), "error");
+    }
+  };
+
+  const handleBatchUpdate = async (
+    patch: BatchAnimeUpdatePatch,
+    summaryToast: string
+  ) => {
+    try {
+      const updatedItems = await toraApi.batchUpdateAnimeEntries(patch);
+      const updatedMap = new Map<number, AnimeEntry>();
+      for (const u of updatedItems) {
+        updatedMap.set(u.id, u);
+      }
+      setAnimeList((prev) =>
+        prev.map((a) => updatedMap.get(a.id) ?? a)
+      );
+      setSelectedAnime((prev) =>
+        prev ? updatedMap.get(prev.id) ?? prev : null
+      );
+      showToast(summaryToast, "success");
+    } catch (e: any) {
+      showToast(String(e), "error");
+    }
+  };
+
+  const handleBatchDelete = async (targets: AnimeEntry[]) => {
+    if (targets.length === 0) return;
+    const ids = targets.map((a) => a.id);
+    const idSet = new Set(ids);
+    try {
+      const remaining = await toraApi.batchDeleteAnimeEntries(ids);
+      setAnimeList(remaining);
+      setSelectedAnime((prev) => (prev && idSet.has(prev.id) ? null : prev));
+      setSelectedAnimeIds((prev) => prev.filter((id) => !idSet.has(id)));
+      showToast(
+        `Removed ${targets.length} anime from list`,
+        "info"
+      );
+    } catch (e: any) {
+      showToast(String(e), "error");
+    }
+  };
+
   return (
     <div
       className="flex h-screen w-screen overflow-hidden bg-bg-primary text-text-primary select-none"
       onClick={() => setQuickMenuAnimeId(null)}
+      onContextMenu={() => setQuickMenuAnimeId(null)}
     >
       {/* Left Sidebar Navigation */}
       <aside className="w-60 bg-bg-secondary border-r border-border-subtle flex flex-col justify-between shrink-0">
@@ -723,11 +825,22 @@ export const App: React.FC = () => {
         )}
 
         {/* Active View Content */}
-        <main ref={mainScrollRef} className="flex-1 overflow-y-auto">
+        <main
+          ref={mainScrollRef}
+          className="flex-1 overflow-y-auto"
+          onClick={() => {
+            if (selectedAnimeIds.length > 0) {
+              setSelectedAnimeIds([]);
+            }
+          }}
+        >
           {activeTab === "watchlist" && (
-            <div className="p-6 space-y-5 max-w-7xl mx-auto">
+            <div className="p-6 space-y-4 max-w-7xl mx-auto">
               {/* Top Watchlist Filter & View Mode Toolbar */}
-              <div className="flex flex-wrap items-center justify-between gap-4">
+              <div
+                className="flex flex-wrap items-center justify-between gap-4"
+                onClick={(e) => e.stopPropagation()}
+              >
                 {/* Status Tabs */}
                 <div className="flex flex-wrap items-center gap-1 bg-bg-secondary p-1 rounded-xl border border-border-subtle">
                   {STATUS_TABS.map((tab) => {
@@ -851,19 +964,23 @@ export const App: React.FC = () => {
               {/* Virtualized Watchlist Rendering */}
               <VirtualWatchlist
                 items={filteredAnime}
+                allAnime={animeList}
                 viewMode={viewMode}
                 scrollContainerRef={mainScrollRef}
+                selectedAnimeIds={selectedAnimeIds}
+                onSetSelectedAnimeIds={setSelectedAnimeIds}
                 quickMenuAnimeId={quickMenuAnimeId}
                 onSetQuickMenuAnimeId={setQuickMenuAnimeId}
-                onSelectAnime={(a) => setSelectedAnime(a)}
+                onOpenAnimeModal={(a) => setSelectedAnime(a)}
                 onStepEpisode={handleStepEpisode}
+                onBatchUpdate={handleBatchUpdate}
+                onBatchDelete={handleBatchDelete}
                 onSearchTorrents={(q) => {
                   setTorrentSearchQuery(q);
                   setActiveTab("torrents");
                 }}
-                onSimulatePlayback={(fname) =>
-                  handleSimulatePlayback("mpv", fname)
-                }
+                onDeleteAnime={handleDeleteAnime}
+                showToast={showToast}
               />
             </div>
           )}

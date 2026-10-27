@@ -44,6 +44,8 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
   const [score, setScore] = useState(anime.user_score);
   const [repeats, setRepeats] = useState(anime.user_repeats);
   const [notes, setNotes] = useState(anime.user_notes);
+  const [startedAt, setStartedAt] = useState(anime.user_started_at || "");
+  const [completedAt, setCompletedAt] = useState(anime.user_completed_at || "");
   const [customFolder, setCustomFolder] = useState(anime.custom_folder || "");
   const [synonymsInput, setSynonymsInput] = useState(anime.synonyms.join(", "));
   const [localFiles, setLocalFiles] = useState<LocalEpisodeFile[]>([]);
@@ -64,12 +66,16 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
     setProgress(anime.user_progress);
     setScore(anime.user_score);
     setRepeats(anime.user_repeats);
+    setStartedAt(anime.user_started_at || "");
+    setCompletedAt(anime.user_completed_at || "");
   }, [
     anime.id,
     anime.user_status,
     anime.user_progress,
     anime.user_score,
     anime.user_repeats,
+    anime.user_started_at,
+    anime.user_completed_at,
   ]);
 
   // Reload text inputs when switching to a different anime ID
@@ -98,7 +104,9 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
     nextProgress = progress,
     nextScore = score,
     nextRepeats = repeats,
-    includeMetadata = false
+    includeMetadata = false,
+    nextStartedAt = startedAt,
+    nextCompletedAt = completedAt
   ) => {
     setSaving(true);
     try {
@@ -118,6 +126,8 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
         userNotes: notes,
         customFolder: customFolder.trim() || null,
         synonyms: parsedSynonyms,
+        userStartedAt: nextStartedAt.trim(),
+        userCompletedAt: nextCompletedAt.trim(),
       });
       onUpdated(updated);
       if (includeMetadata) {
@@ -404,6 +414,64 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
                 value={repeats}
                 onChange={(e) => setRepeats(Number(e.target.value))}
                 onBlur={() => handleSave(status, progress, score, repeats, false)}
+                className="w-full px-3 py-2 rounded-lg bg-bg-primary border border-border-subtle text-xs font-mono text-text-primary focus:outline-none focus:border-accent"
+              />
+            </div>
+
+            <div className="md:col-span-2">
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-[11px] font-medium text-text-muted uppercase">
+                  Date Started
+                </label>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const today = new Date().toISOString().slice(0, 10);
+                    setStartedAt(today);
+                    handleSave(status, progress, score, repeats, false, today, completedAt);
+                  }}
+                  className="text-[10px] font-semibold text-accent hover:underline"
+                >
+                  Set Today
+                </button>
+              </div>
+              <input
+                type="date"
+                value={startedAt}
+                onChange={(e) => {
+                  const nextDate = e.target.value;
+                  setStartedAt(nextDate);
+                  handleSave(status, progress, score, repeats, false, nextDate, completedAt);
+                }}
+                className="w-full px-3 py-2 rounded-lg bg-bg-primary border border-border-subtle text-xs font-mono text-text-primary focus:outline-none focus:border-accent"
+              />
+            </div>
+
+            <div className="md:col-span-2">
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-[11px] font-medium text-text-muted uppercase">
+                  Date Completed
+                </label>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const today = new Date().toISOString().slice(0, 10);
+                    setCompletedAt(today);
+                    handleSave(status, progress, score, repeats, false, startedAt, today);
+                  }}
+                  className="text-[10px] font-semibold text-accent hover:underline"
+                >
+                  Set Today
+                </button>
+              </div>
+              <input
+                type="date"
+                value={completedAt}
+                onChange={(e) => {
+                  const nextDate = e.target.value;
+                  setCompletedAt(nextDate);
+                  handleSave(status, progress, score, repeats, false, startedAt, nextDate);
+                }}
                 className="w-full px-3 py-2 rounded-lg bg-bg-primary border border-border-subtle text-xs font-mono text-text-primary focus:outline-none focus:border-accent"
               />
             </div>

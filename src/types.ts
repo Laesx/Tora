@@ -52,11 +52,27 @@ export interface AnimeEntry {
   user_score: number;
   user_repeats: number;
   user_notes: string;
+  user_started_at?: string | null;
+  user_completed_at?: string | null;
   custom_folder: string | null;
   updated_at: number;
   // Local library state
   local_episode_count: number;
   available_episodes: number[];
+}
+
+export interface BatchAnimeUpdatePatch {
+  anime_ids: number[];
+  user_status?: string | null;
+  user_progress?: number | null;
+  progress_delta?: number | null;
+  mark_completed_progress?: boolean | null;
+  user_score?: number | null;
+  user_repeats?: number | null;
+  user_notes?: string | null;
+  notes_mode?: "replace" | "append" | null;
+  user_started_at?: string | null;
+  user_completed_at?: string | null;
 }
 
 export interface LibraryFolder {

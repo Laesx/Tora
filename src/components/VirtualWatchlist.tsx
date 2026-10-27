@@ -1,74 +1,212 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { createPortal } from "react-dom";
 import {
   HardDrive,
   Clock,
-  MoreHorizontal,
   Plus,
   Minus,
   Star,
 } from "lucide-react";
-import { AnimeEntry } from "../types";
+import { AnimeEntry, BatchAnimeUpdatePatch } from "../types";
 import { formatCountdown, getOptimizedCoverUrl } from "../api";
 import { AnimeQuickMenu } from "./AnimeQuickMenu";
 
 interface VirtualWatchlistProps {
   items: AnimeEntry[];
+  allAnime: AnimeEntry[];
   viewMode: string;
   scrollContainerRef: React.RefObject<HTMLElement | null>;
+  selectedAnimeIds: number[];
+  onSetSelectedAnimeIds: React.Dispatch<React.SetStateAction<number[]>>;
   quickMenuAnimeId: number | null;
   onSetQuickMenuAnimeId: (id: number | null) => void;
-  onSelectAnime: (anime: AnimeEntry) => void;
+  onOpenAnimeModal: (anime: AnimeEntry) => void;
   onStepEpisode: (anime: AnimeEntry, delta: number) => void;
+  onBatchUpdate: (
+    patch: BatchAnimeUpdatePatch,
+    summaryToast: string
+  ) => Promise<void>;
+  onBatchDelete: (animeList: AnimeEntry[]) => Promise<void>;
   onSearchTorrents: (query: string) => void;
-  onSimulatePlayback: (filename: string) => void;
+  onDeleteAnime: (anime: AnimeEntry) => void;
+  showToast: (msg: string, type?: "success" | "info" | "error") => void;
 }
 
 export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
   items,
+  allAnime,
   viewMode,
   scrollContainerRef,
+  selectedAnimeIds,
+  onSetSelectedAnimeIds,
   quickMenuAnimeId,
   onSetQuickMenuAnimeId,
-  onSelectAnime,
+  onOpenAnimeModal,
   onStepEpisode,
+  onBatchUpdate,
+  onBatchDelete,
   onSearchTorrents,
-  onSimulatePlayback,
+  onDeleteAnime,
+  showToast,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const activeMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const [menuPosition, setMenuPosition] = useState<{ top: number; left: number } | null>(null);
+  const menuWrapperRef = useRef<HTMLDivElement | null>(null);
+  const lastClickedIdRef = useRef<number | null>(null);
+
+  const [menuAnchor, setMenuAnchor] = useState<{ x: number; y: number } | null>(
+    null
+  );
+  const [menuPosition, setMenuPosition] = useState<{
+    top: number;
+    left: number;
+  } | null>(null);
   const [containerWidth, setContainerWidth] = useState<number>(1080);
   const [viewportHeight, setViewportHeight] = useState<number>(800);
   const [scrollTop, setScrollTop] = useState<number>(0);
   const [listOffsetTop, setListOffsetTop] = useState<number>(0);
 
-  const computeMenuPosition = useCallback((btn: HTMLElement | null) => {
-    if (!btn) {
-      setMenuPosition(null);
-      return;
-    }
-    const rect = btn.getBoundingClientRect();
-    const menuWidth = 320; // w-80
-    const menuApproxHeight = 300;
-    const left = Math.max(
-      12,
-      Math.min(window.innerWidth - menuWidth - 12, rect.right - menuWidth)
-    );
-    const top = Math.max(
-      12,
-      Math.min(window.innerHeight - menuApproxHeight - 12, rect.bottom + 6)
-    );
-    setMenuPosition({ top, left });
-  }, []);
+  const selectedSet = useMemo(
+    () => new Set(selectedAnimeIds),
+    [selectedAnimeIds]
+  );
 
-  useLayoutEffect(() => {
+  const selectedAnimeEntries = useMemo(() => {
+    if (selectedAnimeIds.length === 0) return [];
+    const byId = new Map<number, AnimeEntry>();
+    for (const a of allAnime) {
+      byId.set(a.id, a);
+    }
+    return selectedAnimeIds
+      .map((id) => byId.get(id))
+      .filter((a): a is AnimeEntry => Boolean(a));
+  }, [allAnime, selectedAnimeIds]);
+
+  const handleItemClick = useCallback(
+    (e: React.MouseEvent, anime: AnimeEntry) => {
+      e.stopPropagation();
+      if (quickMenuAnimeId !== null) {
+        onSetQuickMenuAnimeId(null);
+      }
+
+      const isCtrlOrCmd = e.ctrlKey || e.metaKey;
+      const isShift = e.shiftKey;
+
+      if (isShift && lastClickedIdRef.current !== null) {
+        const startIdx = items.findIndex(
+          (a) => a.id === lastClickedIdRef.current
+        );
+        const endIdx = items.findIndex((a) => a.id === anime.id);
+        if (startIdx !== -1 && endIdx !== -1) {
+          const low = Math.min(startIdx, endIdx);
+          const high = Math.max(startIdx, endIdx);
+          const rangeIds = items.slice(low, high + 1).map((a) => a.id);
+          onSetSelectedAnimeIds((prev) => {
+            if (isCtrlOrCmd) {
+              return Array.from(new Set([...prev, ...rangeIds]));
+            }
+            return rangeIds;
+          });
+          return;
+        }
+      }
+
+      if (isCtrlOrCmd) {
+        onSetSelectedAnimeIds((prev) =>
+          prev.includes(anime.id)
+            ? prev.filter((id) => id !== anime.id)
+            : [...prev, anime.id]
+        );
+        lastClickedIdRef.current = anime.id;
+        return;
+      }
+
+      // First single click selects the item
+      onSetSelectedAnimeIds([anime.id]);
+      lastClickedIdRef.current = anime.id;
+    },
+    [items, quickMenuAnimeId, onSetQuickMenuAnimeId, onSetSelectedAnimeIds]
+  );
+
+  const handleItemDoubleClick = useCallback(
+    (e: React.MouseEvent, anime: AnimeEntry) => {
+      e.stopPropagation();
+      onSetQuickMenuAnimeId(null);
+      onOpenAnimeModal(anime);
+    },
+    [onOpenAnimeModal, onSetQuickMenuAnimeId]
+  );
+
+  const handleContextMenu = useCallback(
+    (e: React.MouseEvent, anime: AnimeEntry) => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      // If right-clicked item is not part of the current selection, select only it.
+      // If it is already selected, preserve the multi-selection so batch context menu opens.
+      if (!selectedSet.has(anime.id)) {
+        onSetSelectedAnimeIds([anime.id]);
+        lastClickedIdRef.current = anime.id;
+      }
+
+      const menuWidth = 256;
+      const menuApproxHeight = 360;
+      const left = Math.max(
+        8,
+        Math.min(window.innerWidth - menuWidth - 8, e.clientX)
+      );
+      const top = Math.max(
+        8,
+        Math.min(window.innerHeight - menuApproxHeight - 8, e.clientY)
+      );
+      setMenuAnchor({ x: e.clientX, y: e.clientY });
+      setMenuPosition({ top, left });
+      onSetQuickMenuAnimeId(anime.id);
+    },
+    [selectedSet, onSetSelectedAnimeIds, onSetQuickMenuAnimeId]
+  );
+
+  useEffect(() => {
     if (!quickMenuAnimeId) {
       setMenuPosition(null);
-      return;
+      setMenuAnchor(null);
     }
-    computeMenuPosition(activeMenuTriggerRef.current);
-  }, [quickMenuAnimeId, scrollTop, containerWidth, viewportHeight, computeMenuPosition]);
+  }, [quickMenuAnimeId]);
+
+  // Keep context menu clamped inside viewport even when inline panels expand
+  useLayoutEffect(() => {
+    const el = menuWrapperRef.current;
+    if (!el || !menuAnchor) return;
+
+    const clampToViewport = () => {
+      const rect = el.getBoundingClientRect();
+      const left = Math.max(
+        8,
+        Math.min(window.innerWidth - rect.width - 8, menuAnchor.x)
+      );
+      const top = Math.max(
+        8,
+        Math.min(window.innerHeight - rect.height - 8, menuAnchor.y)
+      );
+      setMenuPosition((prev) => {
+        if (prev && Math.abs(prev.top - top) < 1 && Math.abs(prev.left - left) < 1) {
+          return prev;
+        }
+        return { top, left };
+      });
+    };
+
+    clampToViewport();
+    const ro = new ResizeObserver(clampToViewport);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [menuAnchor, quickMenuAnimeId]);
 
   // Measure container width & scroll viewport height via ResizeObserver
   useLayoutEffect(() => {
@@ -103,6 +241,9 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
 
     let rafId: number | null = null;
     const onScroll = () => {
+      if (quickMenuAnimeId !== null) {
+        onSetQuickMenuAnimeId(null);
+      }
       if (rafId !== null) return;
       rafId = requestAnimationFrame(() => {
         rafId = null;
@@ -120,7 +261,7 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
       scrollEl.removeEventListener("scroll", onScroll);
       if (rafId !== null) cancelAnimationFrame(rafId);
     };
-  }, [scrollContainerRef]);
+  }, [scrollContainerRef, quickMenuAnimeId, onSetQuickMenuAnimeId]);
 
   // Compute grid columns & exact row heights based on viewMode and containerWidth
   const layout = useMemo(() => {
@@ -129,10 +270,10 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
         containerWidth >= 960
           ? 5
           : containerWidth >= 720
-          ? 4
-          : containerWidth >= 480
-          ? 3
-          : 2;
+            ? 4
+            : containerWidth >= 480
+              ? 3
+              : 2;
       const gap = 16;
       const cardWidth = Math.max(140, (containerWidth - (cols - 1) * gap) / cols);
       const imageHeight = Math.round(cardWidth * (4 / 3));
@@ -176,6 +317,48 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
   const topSpacerHeight = startRow * layout.rowHeight;
   const bottomSpacerHeight = Math.max(0, (totalRows - endRow) * layout.rowHeight);
 
+  const activeQuickMenuAnime =
+    quickMenuAnimeId !== null
+      ? items.find((a) => a.id === quickMenuAnimeId) ??
+      allAnime.find((a) => a.id === quickMenuAnimeId) ??
+      null
+      : null;
+
+  const contextMenuPortal =
+    activeQuickMenuAnime &&
+    menuPosition &&
+    createPortal(
+      <div
+        ref={menuWrapperRef}
+        style={{
+          position: "fixed",
+          top: menuPosition.top,
+          left: menuPosition.left,
+          zIndex: 100,
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <AnimeQuickMenu
+          anime={activeQuickMenuAnime}
+          selectedAnime={
+            selectedSet.has(activeQuickMenuAnime.id)
+              ? selectedAnimeEntries
+              : [activeQuickMenuAnime]
+          }
+          onClose={() => onSetQuickMenuAnimeId(null)}
+          onOpenFullModal={(a) => onOpenAnimeModal(a)}
+          onStepEpisode={onStepEpisode}
+          onBatchUpdate={onBatchUpdate}
+          onBatchDelete={onBatchDelete}
+          onClearSelection={() => onSetSelectedAnimeIds([])}
+          onSearchTorrents={onSearchTorrents}
+          onDeleteAnime={onDeleteAnime}
+          showToast={showToast}
+        />
+      </div>,
+      document.body
+    );
+
   if (items.length === 0) {
     return (
       <div
@@ -193,11 +376,6 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
   }
 
   if (viewMode === "grid") {
-    const activeQuickMenuAnime =
-      quickMenuAnimeId !== null
-        ? items.find((a) => a.id === quickMenuAnimeId) ?? null
-        : null;
-
     return (
       <div ref={containerRef} className="w-full">
         {topSpacerHeight > 0 && <div style={{ height: topSpacerHeight }} />}
@@ -210,19 +388,25 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
           {visibleItems.map((anime) => {
             const pct = anime.episodes
               ? Math.min(
-                  100,
-                  Math.round((anime.user_progress / anime.episodes) * 100)
-                )
+                100,
+                Math.round((anime.user_progress / anime.episodes) * 100)
+              )
               : 50;
             const cd = formatCountdown(anime.next_airing_at);
-            const isMenuOpen = quickMenuAnimeId === anime.id;
+            const isSelected = selectedSet.has(anime.id);
 
             return (
               <div
                 key={anime.id}
                 style={{ height: layout.cardHeight }}
-                onClick={() => onSelectAnime(anime)}
-                className="group relative bg-bg-secondary border border-border-subtle hover:border-accent/70 rounded-2xl overflow-visible flex flex-col cursor-pointer transition-colors shadow-sm hover:shadow-xl"
+                onClick={(e) => handleItemClick(e, anime)}
+                onDoubleClick={(e) => handleItemDoubleClick(e, anime)}
+                onContextMenu={(e) => handleContextMenu(e, anime)}
+                title="Click to select • Ctrl+Click to multi-select • Double-click to open details"
+                className={`group relative rounded-2xl overflow-visible flex flex-col cursor-pointer transition-[color,background-color,border-color,box-shadow] shadow-sm hover:shadow-xl ${isSelected
+                  ? "bg-accent/10 border border-accent ring-2 ring-accent/40 shadow-lg shadow-accent/10"
+                  : "bg-bg-secondary border border-border-subtle hover:border-accent/70"
+                  }`}
               >
                 <div className="relative flex-1 w-full rounded-t-2xl overflow-hidden bg-bg-tertiary">
                   <img
@@ -235,60 +419,51 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
                   <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/15 to-transparent" />
 
                   {/* Top Left Badges: Disk Episodes & Airing Countdown */}
-                  <div className="absolute top-2.5 left-2.5 flex flex-col gap-1">
+                  <div className="absolute top-2.5 left-2.5 flex flex-col gap-1 max-w-[calc(100%-20px)]">
                     {anime.local_episode_count > 0 && (
-                      <span className="px-2 py-0.5 rounded-md bg-emerald-500/90 text-black text-[10px] font-bold flex items-center gap-1 shadow">
-                        <HardDrive className="w-3 h-3" />
-                        {anime.local_episode_count} on disk
+                      <span className="px-2 py-0.5 rounded-md bg-emerald-500/90 text-black text-[10px] font-bold flex items-center gap-1 shadow truncate">
+                        <HardDrive className="w-3 h-3 shrink-0" />
+                        <span className="truncate">
+                          {formatEpisodeRanges(anime.available_episodes)} on disk
+                        </span>
                       </span>
                     )}
                     {cd && anime.next_airing_episode && (
-                      <span className="px-2 py-0.5 rounded-md bg-black/85 text-emerald-400 text-[10px] font-mono font-semibold flex items-center gap-1">
-                        <Clock className="w-2.5 h-2.5" />
-                        Ep {anime.next_airing_episode} in {cd}
+                      <span className="px-2 py-0.5 rounded-md bg-black/85 text-emerald-400 text-[10px] font-mono font-semibold flex items-center gap-1 truncate">
+                        <Clock className="w-2.5 h-2.5 shrink-0" />
+                        <span className="truncate">
+                          Ep {anime.next_airing_episode} in {cd}
+                        </span>
                       </span>
                     )}
                   </div>
 
-                  {/* Top Right Quick Menu Trigger */}
-                  <button
-                    ref={(el) => {
-                      if (isMenuOpen) {
-                        activeMenuTriggerRef.current = el;
-                      }
-                    }}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (isMenuOpen) {
-                        activeMenuTriggerRef.current = null;
-                        onSetQuickMenuAnimeId(null);
-                      } else {
-                        activeMenuTriggerRef.current = e.currentTarget;
-                        computeMenuPosition(e.currentTarget);
-                        onSetQuickMenuAnimeId(anime.id);
-                      }
-                    }}
-                    className="absolute top-2.5 right-2.5 p-1.5 rounded-lg bg-black/75 hover:bg-accent text-white transition"
-                    title="Quick Info Menu"
-                  >
-                    <MoreHorizontal className="w-4 h-4" />
-                  </button>
-
-                  {/* Bottom Overlay: Score & Progress +1 */}
+                  {/* Bottom Overlay: Progress & Stepper (-1 / +1) */}
                   <div className="absolute bottom-2.5 left-3 right-3 flex items-center justify-between text-white">
                     <span className="text-xs font-mono font-bold">
                       Ep {anime.user_progress} / {anime.episodes ?? "?"}
                     </span>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onStepEpisode(anime, 1);
-                      }}
-                      className="px-2 py-1 rounded-lg bg-accent hover:bg-accent-hover text-white text-[11px] font-bold flex items-center gap-0.5 shadow"
-                      title="Increment Episode (+1)"
+                    <div
+                      className="flex items-center gap-1"
+                      onClick={(e) => e.stopPropagation()}
+                      onDoubleClick={(e) => e.stopPropagation()}
                     >
-                      <Plus className="w-3 h-3" />1
-                    </button>
+                      <button
+                        onClick={() => onStepEpisode(anime, -1)}
+                        disabled={anime.user_progress <= 0}
+                        className="p-1 rounded-lg bg-black/75 hover:bg-white/20 disabled:opacity-40 disabled:pointer-events-none text-white border border-white/15 transition shadow"
+                        title="Decrement Episode (-1)"
+                      >
+                        <Minus className="w-3 h-3" />
+                      </button>
+                      <button
+                        onClick={() => onStepEpisode(anime, 1)}
+                        className="px-2 py-1 rounded-lg bg-accent hover:bg-accent-hover text-white text-[11px] font-bold flex items-center gap-0.5 shadow transition"
+                        title="Increment Episode (+1)"
+                      >
+                        <Plus className="w-3 h-3" />1
+                      </button>
+                    </div>
                   </div>
                 </div>
 
@@ -303,7 +478,10 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
                 {/* Card Footer (fixed 60px height) */}
                 <div className="p-3 h-[60px] shrink-0 flex flex-col justify-between">
                   <h3
-                    className="text-xs font-bold text-text-primary line-clamp-1 group-hover:text-accent transition-colors"
+                    className={`text-xs font-bold line-clamp-1 transition-colors ${isSelected
+                      ? "text-accent"
+                      : "text-text-primary group-hover:text-accent"
+                      }`}
                     title={anime.title_romaji}
                   >
                     {anime.title_romaji}
@@ -325,31 +503,7 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
           })}
         </div>
         {bottomSpacerHeight > 0 && <div style={{ height: bottomSpacerHeight }} />}
-
-        {/* Portaled Floating Quick Info Menu (renders on top of left sidebar & all cards) */}
-        {activeQuickMenuAnime &&
-          menuPosition &&
-          createPortal(
-            <div
-              style={{
-                position: "fixed",
-                top: menuPosition.top,
-                left: menuPosition.left,
-                zIndex: 100,
-              }}
-              onClick={(e) => e.stopPropagation()}
-            >
-              <AnimeQuickMenu
-                anime={activeQuickMenuAnime}
-                onClose={() => onSetQuickMenuAnimeId(null)}
-                onOpenFullModal={(a) => onSelectAnime(a)}
-                onStepEpisode={onStepEpisode}
-                onSearchTorrents={onSearchTorrents}
-                onSimulatePlayback={onSimulatePlayback}
-              />
-            </div>,
-            document.body
-          )}
+        {contextMenuPortal}
       </div>
     );
   }
@@ -364,70 +518,87 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
             gridTemplateColumns: `repeat(${layout.cols}, minmax(0, 1fr))`,
           }}
         >
-          {visibleItems.map((anime) => (
-            <div
-              key={anime.id}
-              style={{ height: layout.cardHeight }}
-              onClick={() => onSelectAnime(anime)}
-              className="flex gap-4 p-3.5 rounded-2xl bg-bg-secondary border border-border-subtle hover:border-accent/60 cursor-pointer transition-colors"
-            >
-              <img
-                src={getOptimizedCoverUrl(anime.cover_image, "medium")}
-                alt={anime.title_romaji}
-                loading="lazy"
-                decoding="async"
-                className="w-20 h-28 object-cover rounded-xl shrink-0"
-              />
-              <div className="flex-1 min-w-0 flex flex-col justify-between">
-                <div>
-                  <div className="flex items-center justify-between gap-2">
-                    <h3 className="text-sm font-bold text-text-primary truncate">
-                      {anime.title_romaji}
-                    </h3>
-                    <span className="px-2 py-0.5 rounded bg-bg-tertiary text-[10px] font-mono text-text-secondary shrink-0">
-                      {anime.format}
-                    </span>
-                  </div>
-                  <p className="text-[11px] text-text-muted line-clamp-2 mt-1">
-                    {anime.synopsis}
-                  </p>
+          {visibleItems.map((anime) => {
+            const isSelected = selectedSet.has(anime.id);
+            return (
+              <div
+                key={anime.id}
+                style={{ height: layout.cardHeight }}
+                onClick={(e) => handleItemClick(e, anime)}
+                onDoubleClick={(e) => handleItemDoubleClick(e, anime)}
+                onContextMenu={(e) => handleContextMenu(e, anime)}
+                title="Click to select • Ctrl+Click to multi-select • Double-click to open details"
+                className={`group flex gap-4 p-3.5 rounded-2xl cursor-pointer transition-[color,background-color,border-color,box-shadow] ${isSelected
+                  ? "bg-accent/10 border border-accent ring-2 ring-accent/30 shadow-md"
+                  : "bg-bg-secondary border border-border-subtle hover:border-accent/60"
+                  }`}
+              >
+                <div className="relative w-20 h-28 shrink-0">
+                  <img
+                    src={getOptimizedCoverUrl(anime.cover_image, "medium")}
+                    alt={anime.title_romaji}
+                    loading="lazy"
+                    decoding="async"
+                    className="w-20 h-28 object-cover rounded-xl"
+                  />
                 </div>
 
-                <div className="flex items-center justify-between gap-2 pt-2 border-t border-border-subtle text-xs">
-                  <div className="flex items-center gap-2">
-                    <span className="font-mono font-bold text-accent">
-                      Ep {anime.user_progress} / {anime.episodes ?? "?"}
-                    </span>
-                    {anime.local_episode_count > 0 && (
-                      <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 text-[10px] font-mono">
-                        {anime.local_episode_count} local
+                <div className="flex-1 min-w-0 flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center justify-between gap-2">
+                      <h3
+                        className={`text-sm font-bold truncate ${isSelected ? "text-accent" : "text-text-primary"
+                          }`}
+                      >
+                        {anime.title_romaji}
+                      </h3>
+                      <span className="px-2 py-0.5 rounded bg-bg-tertiary text-[10px] font-mono text-text-secondary shrink-0">
+                        {anime.format}
                       </span>
-                    )}
+                    </div>
+                    <p className="text-[11px] text-text-muted line-clamp-2 mt-1">
+                      {anime.synopsis}
+                    </p>
                   </div>
 
-                  <div
-                    className="flex items-center gap-1"
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    <button
-                      onClick={() => onStepEpisode(anime, -1)}
-                      className="p-1.5 rounded-lg bg-bg-primary hover:bg-bg-tertiary border border-border-subtle text-text-secondary"
+                  <div className="flex items-center justify-between gap-2 pt-2 border-t border-border-subtle text-xs">
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono font-bold text-accent">
+                        Ep {anime.user_progress} / {anime.episodes ?? "?"}
+                      </span>
+                      {anime.local_episode_count > 0 && (
+                        <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 text-[10px] font-mono">
+                          {formatEpisodeRanges(anime.available_episodes)} on disk
+                        </span>
+                      )}
+                    </div>
+
+                    <div
+                      className="flex items-center gap-1"
+                      onClick={(e) => e.stopPropagation()}
+                      onDoubleClick={(e) => e.stopPropagation()}
                     >
-                      <Minus className="w-3 h-3" />
-                    </button>
-                    <button
-                      onClick={() => onStepEpisode(anime, 1)}
-                      className="px-2.5 py-1 rounded-lg bg-accent hover:bg-accent-hover text-white font-semibold text-xs flex items-center gap-1"
-                    >
-                      <Plus className="w-3 h-3" />1
-                    </button>
+                      <button
+                        onClick={() => onStepEpisode(anime, -1)}
+                        className="p-1.5 rounded-lg bg-bg-primary hover:bg-bg-tertiary border border-border-subtle text-text-secondary"
+                      >
+                        <Minus className="w-3 h-3" />
+                      </button>
+                      <button
+                        onClick={() => onStepEpisode(anime, 1)}
+                        className="px-2.5 py-1 rounded-lg bg-accent hover:bg-accent-hover text-white font-semibold text-xs flex items-center gap-1"
+                      >
+                        <Plus className="w-3 h-3" />1
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
         {bottomSpacerHeight > 0 && <div style={{ height: bottomSpacerHeight }} />}
+        {contextMenuPortal}
       </div>
     );
   }
@@ -441,7 +612,7 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
       <table className="w-full text-left border-collapse text-xs">
         <thead className="bg-bg-tertiary text-text-muted uppercase text-[10px]">
           <tr>
-            <th className="py-2.5 px-4">Anime Title</th>
+            <th className="py-2.5 pl-4 pr-3">Anime Title</th>
             <th className="py-2.5 px-3">Type</th>
             <th className="py-2.5 px-3">Progress</th>
             <th className="py-2.5 px-3">On Disk</th>
@@ -459,18 +630,26 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
           {visibleItems.map((anime) => {
             const pct = anime.episodes
               ? Math.min(
-                  100,
-                  Math.round((anime.user_progress / anime.episodes) * 100)
-                )
+                100,
+                Math.round((anime.user_progress / anime.episodes) * 100)
+              )
               : 50;
+            const isSelected = selectedSet.has(anime.id);
+
             return (
               <tr
                 key={anime.id}
                 style={{ height: layout.rowHeight }}
-                onClick={() => onSelectAnime(anime)}
-                className="hover:bg-bg-tertiary/60 cursor-pointer transition-colors"
+                onClick={(e) => handleItemClick(e, anime)}
+                onDoubleClick={(e) => handleItemDoubleClick(e, anime)}
+                onContextMenu={(e) => handleContextMenu(e, anime)}
+                title="Click to select • Ctrl+Click to multi-select • Double-click to open details"
+                className={`cursor-pointer transition-colors ${isSelected
+                  ? "bg-accent/15 hover:bg-accent/20 shadow-[inset_3px_0_0_0_rgb(var(--accent-primary))]"
+                  : "hover:bg-bg-tertiary/60"
+                  }`}
               >
-                <td className="py-2 px-4 flex items-center gap-3">
+                <td className="py-2 pl-4 pr-3 flex items-center gap-3">
                   <img
                     src={getOptimizedCoverUrl(anime.cover_image, "medium")}
                     alt={anime.title_romaji}
@@ -479,11 +658,17 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
                     className="w-7 h-10 object-cover rounded shrink-0"
                   />
                   <div className="min-w-0">
-                    <div className="font-semibold text-text-primary truncate max-w-md">
+                    <div
+                      className={`font-semibold truncate max-w-md ${isSelected ? "text-accent" : "text-text-primary"
+                        }`}
+                    >
                       {anime.title_romaji}
                     </div>
                     <div className="text-[10px] text-text-muted truncate max-w-md">
                       {anime.studios.join(", ")}
+                      {anime.user_started_at
+                        ? ` • Started ${anime.user_started_at}`
+                        : ""}
                     </div>
                   </div>
                 </td>
@@ -507,7 +692,7 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
                 <td className="py-2 px-3 font-mono text-[11px]">
                   {anime.local_episode_count > 0 ? (
                     <span className="text-emerald-400 font-semibold">
-                      {anime.local_episode_count} files
+                      {formatEpisodeRanges(anime.available_episodes)} on disk
                     </span>
                   ) : (
                     <span className="text-text-muted">-</span>
@@ -522,6 +707,7 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
                 <td
                   className="py-2 px-4 text-right"
                   onClick={(e) => e.stopPropagation()}
+                  onDoubleClick={(e) => e.stopPropagation()}
                 >
                   <div className="flex items-center justify-end gap-1">
                     <button
@@ -548,6 +734,34 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
           )}
         </tbody>
       </table>
+      {contextMenuPortal}
     </div>
   );
 };
+
+/**
+ * Formats an array of episode numbers into compact ranges (e.g., [1, 2, 3, 5, 8] -> "Ep 1–3, 5, 8").
+ */
+function formatEpisodeRanges(episodes: number[]): string {
+  if (!episodes || episodes.length === 0) return "";
+  const sorted = Array.from(
+    new Set(episodes.filter((n) => typeof n === "number" && n > 0))
+  ).sort((a, b) => a - b);
+  if (sorted.length === 0) return "";
+  const ranges: string[] = [];
+  let start = sorted[0];
+  let prev = sorted[0];
+  for (let i = 1; i < sorted.length; i++) {
+    const curr = sorted[i];
+    if (curr === prev + 1) {
+      prev = curr;
+    } else {
+      ranges.push(start === prev ? `${start}` : `${start}–${prev}`);
+      start = curr;
+      prev = curr;
+    }
+  }
+  ranges.push(start === prev ? `${start}` : `${start}–${prev}`);
+  return `Ep ${ranges.join(", ")}`;
+}
+

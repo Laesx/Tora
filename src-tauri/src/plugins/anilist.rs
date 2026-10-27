@@ -177,33 +177,54 @@ impl AniListPlugin {
             .map(|s| s.to_string());
 
         let now = chrono::Utc::now().timestamp();
-        let (user_status, user_progress, user_score, user_repeats, user_notes, updated_at) =
-            if let Some(en) = entry_node {
-                (
-                    en.get("status")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("CURRENT")
-                        .to_string(),
-                    en.get("progress")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as u32,
-                    en.get("score")
-                        .and_then(|v| v.as_f64())
-                        .unwrap_or(0.0),
-                    en.get("repeat")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as u32,
-                    en.get("notes")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    en.get("updatedAt")
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(now),
-                )
-            } else {
-                ("PLANNING".to_string(), 0, 0.0, 0, String::new(), now)
-            };
+        let parse_fuzzy_date = |obj: Option<&Value>| -> Option<String> {
+            let d = obj?;
+            let y = d.get("year")?.as_i64()?;
+            if y <= 0 {
+                return None;
+            }
+            let m = d.get("month").and_then(|v| v.as_i64()).unwrap_or(1).clamp(1, 12);
+            let day = d.get("day").and_then(|v| v.as_i64()).unwrap_or(1).clamp(1, 31);
+            Some(format!("{:04}-{:02}-{:02}", y, m, day))
+        };
+
+        let (
+            user_status,
+            user_progress,
+            user_score,
+            user_repeats,
+            user_notes,
+            user_started_at,
+            user_completed_at,
+            updated_at,
+        ) = if let Some(en) = entry_node {
+            (
+                en.get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("CURRENT")
+                    .to_string(),
+                en.get("progress")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32,
+                en.get("score")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0),
+                en.get("repeat")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32,
+                en.get("notes")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                parse_fuzzy_date(en.get("startedAt")),
+                parse_fuzzy_date(en.get("completedAt")),
+                en.get("updatedAt")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(now),
+            )
+        } else {
+            ("PLANNING".to_string(), 0, 0.0, 0, String::new(), None, None, now)
+        };
 
         Some(AnimeEntry {
             id,
@@ -236,6 +257,8 @@ impl AniListPlugin {
             user_score,
             user_repeats,
             user_notes,
+            user_started_at,
+            user_completed_at,
             custom_folder: None,
             updated_at,
             local_episode_count: 0,
@@ -487,6 +510,16 @@ impl TrackerPlugin for AniListPlugin {
                                 progress
                                 repeat
                                 notes
+                                startedAt {{
+                                    year
+                                    month
+                                    day
+                                }}
+                                completedAt {{
+                                    year
+                                    month
+                                    day
+                                }}
                                 updatedAt
                                 media {{
                                     {MEDIA_FRAGMENT}

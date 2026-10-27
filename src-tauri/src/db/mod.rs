@@ -40,11 +40,30 @@ pub struct AnimeEntry {
     pub user_score: f64,
     pub user_repeats: u32,
     pub user_notes: String,
+    #[serde(default)]
+    pub user_started_at: Option<String>,
+    #[serde(default)]
+    pub user_completed_at: Option<String>,
     pub custom_folder: Option<String>,
     pub updated_at: i64,
     // Computed local library fields
     pub local_episode_count: u32,
     pub available_episodes: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchAnimeUpdatePatch {
+    pub anime_ids: Vec<i64>,
+    pub user_status: Option<String>,
+    pub user_progress: Option<u32>,
+    pub progress_delta: Option<i32>,
+    pub mark_completed_progress: Option<bool>,
+    pub user_score: Option<f64>,
+    pub user_repeats: Option<u32>,
+    pub user_notes: Option<String>,
+    pub notes_mode: Option<String>, // "replace" | "append"
+    pub user_started_at: Option<String>, // Some("") clears, Some("YYYY-MM-DD") sets, None leaves unchanged
+    pub user_completed_at: Option<String>, // Some("") clears, Some("YYYY-MM-DD") sets, None leaves unchanged
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -523,6 +542,8 @@ impl Database {
                 user_score REAL NOT NULL DEFAULT 0,
                 user_repeats INTEGER NOT NULL DEFAULT 0,
                 user_notes TEXT NOT NULL DEFAULT '',
+                user_started_at TEXT,
+                user_completed_at TEXT,
                 custom_folder TEXT,
                 updated_at INTEGER NOT NULL DEFAULT 0
             );
@@ -602,6 +623,17 @@ impl Database {
             );",
         )
         .map_err(|e| e.to_string())?;
+
+        // Safe schema migrations for existing databases
+        let _ = conn.execute(
+            "ALTER TABLE anime_entries ADD COLUMN user_started_at TEXT",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE anime_entries ADD COLUMN user_completed_at TEXT",
+            [],
+        );
+
         Ok(())
     }
 
@@ -658,6 +690,8 @@ impl Database {
             user_score: 0.0,
             user_repeats: 0,
             user_notes: "".into(),
+            user_started_at: Some("2026-10-04".into()),
+            user_completed_at: None,
             custom_folder: None,
             updated_at: now - 100000,
             local_episode_count: 0,
@@ -742,6 +776,8 @@ impl Database {
                 user_score: 95.0,
                 user_repeats: 0,
                 user_notes: "Masterpiece adaptation by Madhouse. Watching in 1080p FLAC.".into(),
+                user_started_at: Some("2023-09-29".into()),
+                user_completed_at: None,
                 custom_folder: None,
                 updated_at: now - 3600,
                 local_episode_count: 0,
@@ -778,6 +814,8 @@ impl Database {
                 user_score: 90.0,
                 user_repeats: 0,
                 user_notes: "Science SARU storyboarding and colors are incredible.".into(),
+                user_started_at: Some("2024-10-03".into()),
+                user_completed_at: None,
                 custom_folder: None,
                 updated_at: now - 7200,
                 local_episode_count: 0,
@@ -814,6 +852,8 @@ impl Database {
                 user_score: 88.0,
                 user_repeats: 0,
                 user_notes: "Studio Trigger worldbuilding at its finest.".into(),
+                user_started_at: Some("2024-01-04".into()),
+                user_completed_at: None,
                 custom_folder: None,
                 updated_at: now - 18000,
                 local_episode_count: 0,
@@ -850,6 +890,8 @@ impl Database {
                 user_score: 92.0,
                 user_repeats: 1,
                 user_notes: "Maomao is one of the best protagonists in recent memory.".into(),
+                user_started_at: Some("2023-10-22".into()),
+                user_completed_at: Some("2024-03-24".into()),
                 custom_folder: None,
                 updated_at: now - 86400,
                 local_episode_count: 0,
@@ -886,6 +928,8 @@ impl Database {
                 user_score: 94.0,
                 user_repeats: 2,
                 user_notes: "Kessoku Band forever!".into(),
+                user_started_at: Some("2022-10-09".into()),
+                user_completed_at: Some("2022-12-25".into()),
                 custom_folder: None,
                 updated_at: now - 172800,
                 local_episode_count: 0,
@@ -922,6 +966,8 @@ impl Database {
                 user_score: 90.0,
                 user_repeats: 3,
                 user_notes: "The namesake of Taiga & Tora!".into(),
+                user_started_at: Some("2008-10-02".into()),
+                user_completed_at: Some("2009-03-26".into()),
                 custom_folder: None,
                 updated_at: now - 250000,
                 local_episode_count: 0,
@@ -958,6 +1004,8 @@ impl Database {
                 user_score: 0.0,
                 user_repeats: 0,
                 user_notes: "Queued for seasonal watch.".into(),
+                user_started_at: None,
+                user_completed_at: None,
                 custom_folder: None,
                 updated_at: now - 300000,
                 local_episode_count: 0,
@@ -1011,11 +1059,12 @@ impl Database {
                         duration, season, season_year, average_score, cover_image, banner_image,
                         cover_color, synopsis, genres_json, studios_json, next_airing_episode,
                         next_airing_at, trailer_url, site_url, source_material, user_status,
-                        user_progress, user_score, user_repeats, user_notes, custom_folder, updated_at
+                        user_progress, user_score, user_repeats, user_notes, user_started_at,
+                        user_completed_at, custom_folder, updated_at
                     ) VALUES (
                         ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
                         ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
-                        ?31, ?32, ?33
+                        ?31, ?32, ?33, ?34, ?35
                     )
                     ON CONFLICT(id) DO UPDATE SET
                         anilist_id = excluded.anilist_id,
@@ -1048,6 +1097,8 @@ impl Database {
                         user_score = excluded.user_score,
                         user_repeats = excluded.user_repeats,
                         user_notes = excluded.user_notes,
+                        user_started_at = COALESCE(excluded.user_started_at, anime_entries.user_started_at),
+                        user_completed_at = COALESCE(excluded.user_completed_at, anime_entries.user_completed_at),
                         custom_folder = COALESCE(excluded.custom_folder, anime_entries.custom_folder),
                         updated_at = excluded.updated_at",
                 )
@@ -1119,6 +1170,8 @@ impl Database {
                     entry.user_score,
                     entry.user_repeats,
                     entry.user_notes,
+                    entry.user_started_at,
+                    entry.user_completed_at,
                     entry.custom_folder,
                     entry.updated_at,
                 ])
@@ -1157,7 +1210,8 @@ impl Database {
                 season_year, average_score, cover_image, banner_image, cover_color,
                 synopsis, genres_json, studios_json, next_airing_episode, next_airing_at,
                 trailer_url, site_url, source_material, user_status, user_progress,
-                user_score, user_repeats, user_notes, custom_folder, updated_at
+                user_score, user_repeats, user_notes, custom_folder, updated_at,
+                user_started_at, user_completed_at
              FROM anime_entries
              WHERE id = ?1",
             params![anime_id],
@@ -1199,6 +1253,8 @@ impl Database {
                     user_notes: row.get(29)?,
                     custom_folder: row.get(30)?,
                     updated_at: row.get(31)?,
+                    user_started_at: row.get(32)?,
+                    user_completed_at: row.get(33)?,
                     local_episode_count: avail.len() as u32,
                     available_episodes: avail,
                 })
@@ -1244,7 +1300,8 @@ impl Database {
                     season_year, average_score, cover_image, banner_image, cover_color,
                     synopsis, genres_json, studios_json, next_airing_episode, next_airing_at,
                     trailer_url, site_url, source_material, user_status, user_progress,
-                    user_score, user_repeats, user_notes, custom_folder, updated_at
+                    user_score, user_repeats, user_notes, custom_folder, updated_at,
+                    user_started_at, user_completed_at
                  FROM anime_entries
                  ORDER BY updated_at DESC, title_romaji ASC",
             )
@@ -1290,6 +1347,8 @@ impl Database {
                     user_notes: row.get(29)?,
                     custom_folder: row.get(30)?,
                     updated_at: row.get(31)?,
+                    user_started_at: row.get(32)?,
+                    user_completed_at: row.get(33)?,
                     local_episode_count: avail.len() as u32,
                     available_episodes: avail,
                 })
@@ -1313,6 +1372,8 @@ impl Database {
         user_notes: &str,
         custom_folder: Option<String>,
         synonyms: Option<Vec<String>>,
+        user_started_at: Option<String>,
+        user_completed_at: Option<String>,
     ) -> Result<(AnimeEntry, bool), String> {
         let now = chrono::Utc::now().timestamp();
         let mut needs_full_rematch = false;
@@ -1320,15 +1381,20 @@ impl Database {
         {
             let conn = self.conn.lock().map_err(|e| e.to_string())?;
 
-            let (old_folder, old_syns_json): (Option<String>, String) = conn
+            let (old_folder, old_syns_json, old_started, old_completed): (
+                Option<String>,
+                String,
+                Option<String>,
+                Option<String>,
+            ) = conn
                 .query_row(
-                    "SELECT custom_folder, synonyms_json FROM anime_entries WHERE id = ?1",
+                    "SELECT custom_folder, synonyms_json, user_started_at, user_completed_at FROM anime_entries WHERE id = ?1",
                     params![anime_id],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                 )
                 .optional()
                 .map_err(|e| e.to_string())?
-                .unwrap_or((None, "[]".to_string()));
+                .unwrap_or((None, "[]".to_string(), None, None));
 
             let norm_old_folder = old_folder
                 .as_deref()
@@ -1369,6 +1435,30 @@ impl Database {
                 }
             }
 
+            let resolved_started = match user_started_at {
+                Some(s) => {
+                    let trimmed = s.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    }
+                }
+                None => old_started,
+            };
+
+            let resolved_completed = match user_completed_at {
+                Some(s) => {
+                    let trimmed = s.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    }
+                }
+                None => old_completed,
+            };
+
             conn.execute(
                 "UPDATE anime_entries SET
                     user_status = ?1,
@@ -1377,8 +1467,10 @@ impl Database {
                     user_repeats = ?4,
                     user_notes = ?5,
                     custom_folder = ?6,
-                    updated_at = ?7
-                 WHERE id = ?8",
+                    user_started_at = ?7,
+                    user_completed_at = ?8,
+                    updated_at = ?9
+                 WHERE id = ?10",
                 params![
                     user_status,
                     user_progress,
@@ -1386,6 +1478,8 @@ impl Database {
                     user_repeats,
                     user_notes,
                     custom_folder,
+                    resolved_started,
+                    resolved_completed,
                     now,
                     anime_id
                 ],
@@ -1406,15 +1500,162 @@ impl Database {
         Ok((entry, needs_full_rematch))
     }
 
+    pub fn batch_update_anime_entries(
+        &self,
+        patch: &BatchAnimeUpdatePatch,
+    ) -> Result<Vec<AnimeEntry>, String> {
+        if patch.anime_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let now = chrono::Utc::now().timestamp();
+        {
+            let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            for &aid in &patch.anime_ids {
+                let existing: Option<(String, u32, Option<u32>, f64, u32, String, Option<String>, Option<String>)> = tx
+                    .query_row(
+                        "SELECT user_status, user_progress, episodes, user_score, user_repeats, user_notes, user_started_at, user_completed_at
+                         FROM anime_entries WHERE id = ?1",
+                        params![aid],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)),
+                    )
+                    .optional()
+                    .map_err(|e| e.to_string())?;
+
+                let Some((cur_status, cur_prog, total_eps, cur_score, cur_repeats, cur_notes, cur_started, cur_completed)) = existing else {
+                    continue;
+                };
+
+                let mut next_prog = cur_prog;
+                if let Some(explicit_prog) = patch.user_progress {
+                    let max_ep = total_eps.unwrap_or(9999);
+                    next_prog = explicit_prog.min(max_ep);
+                } else if let Some(delta) = patch.progress_delta {
+                    let max_ep = total_eps.unwrap_or(9999) as i64;
+                    let computed = (cur_prog as i64 + delta as i64).clamp(0, max_ep);
+                    next_prog = computed as u32;
+                }
+                if patch.mark_completed_progress == Some(true) {
+                    if let Some(tot) = total_eps.filter(|&e| e > 0) {
+                        next_prog = tot;
+                    }
+                }
+
+                let mut next_status = patch.user_status.clone().unwrap_or_else(|| cur_status.clone());
+                if patch.user_status.is_none() && (patch.user_progress.is_some() || patch.progress_delta.is_some()) {
+                    if let Some(tot) = total_eps.filter(|&e| e > 0) {
+                        if next_prog >= tot {
+                            next_status = "COMPLETED".to_string();
+                        } else if next_prog > 0 && cur_status == "PLANNING" {
+                            next_status = "CURRENT".to_string();
+                        }
+                    } else if next_prog > 0 && cur_status == "PLANNING" {
+                        next_status = "CURRENT".to_string();
+                    }
+                }
+
+                let next_score = patch.user_score.unwrap_or(cur_score).clamp(0.0, 100.0);
+                let next_repeats = patch.user_repeats.unwrap_or(cur_repeats);
+
+                let next_notes = match &patch.user_notes {
+                    Some(new_text) => {
+                        if patch.notes_mode.as_deref() == Some("append") {
+                            let trimmed_new = new_text.trim();
+                            if trimmed_new.is_empty() {
+                                cur_notes
+                            } else if cur_notes.trim().is_empty() {
+                                trimmed_new.to_string()
+                            } else {
+                                format!("{}\n{}", cur_notes.trim(), trimmed_new)
+                            }
+                        } else {
+                            new_text.clone()
+                        }
+                    }
+                    None => cur_notes,
+                };
+
+                let next_started = match &patch.user_started_at {
+                    Some(s) => {
+                        let t = s.trim();
+                        if t.is_empty() { None } else { Some(t.to_string()) }
+                    }
+                    None => cur_started,
+                };
+
+                let next_completed = match &patch.user_completed_at {
+                    Some(s) => {
+                        let t = s.trim();
+                        if t.is_empty() { None } else { Some(t.to_string()) }
+                    }
+                    None => cur_completed,
+                };
+
+                tx.execute(
+                    "UPDATE anime_entries SET
+                        user_status = ?1,
+                        user_progress = ?2,
+                        user_score = ?3,
+                        user_repeats = ?4,
+                        user_notes = ?5,
+                        user_started_at = ?6,
+                        user_completed_at = ?7,
+                        updated_at = ?8
+                     WHERE id = ?9",
+                    params![
+                        next_status,
+                        next_prog,
+                        next_score,
+                        next_repeats,
+                        next_notes,
+                        next_started,
+                        next_completed,
+                        now,
+                        aid
+                    ],
+                )
+                .map_err(|e| e.to_string())?;
+
+                tx.execute(
+                    "UPDATE local_episodes
+                     SET watched = CASE WHEN episode_number IS NOT NULL AND episode_number <= ?1 THEN 1 ELSE 0 END
+                     WHERE matched_anime_id = ?2",
+                    params![next_prog, aid],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            tx.commit().map_err(|e| e.to_string())?;
+        }
+
+        let mut updated_entries = Vec::with_capacity(patch.anime_ids.len());
+        for &aid in &patch.anime_ids {
+            if let Ok(entry) = self.get_anime_entry_by_id(aid) {
+                updated_entries.push(entry);
+            }
+        }
+        Ok(updated_entries)
+    }
+
     pub fn delete_anime_entry(&self, anime_id: i64) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "UPDATE local_episodes SET matched_anime_id = NULL WHERE matched_anime_id = ?1",
-            params![anime_id],
-        )
-        .map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM anime_entries WHERE id = ?1", params![anime_id])
+        self.batch_delete_anime_entries(&[anime_id])
+    }
+
+    pub fn batch_delete_anime_entries(&self, anime_ids: &[i64]) -> Result<(), String> {
+        if anime_ids.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        for &aid in anime_ids {
+            tx.execute(
+                "UPDATE local_episodes SET matched_anime_id = NULL WHERE matched_anime_id = ?1",
+                params![aid],
+            )
             .map_err(|e| e.to_string())?;
+            tx.execute("DELETE FROM anime_entries WHERE id = ?1", params![aid])
+                .map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -1855,6 +2096,71 @@ mod tests {
             .expect("subsequent episode should match after linking");
         assert_eq!(matched_ep2.0, 154587);
         assert_eq!(matched_ep2.1, "Sousou no Frieren");
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_batch_update_and_delete_anime_entries() {
+        let tmp_dir = std::env::temp_dir().join("tora_test_db_batch");
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        let db_path = tmp_dir.join("test.db");
+        let db = Database::open(&db_path).expect("open test db");
+
+        let target_ids = vec![176301, 195516];
+        let patch = BatchAnimeUpdatePatch {
+            anime_ids: target_ids.clone(),
+            user_status: Some("CURRENT".into()),
+            user_progress: None,
+            progress_delta: Some(2),
+            mark_completed_progress: None,
+            user_score: Some(88.0),
+            user_repeats: None,
+            user_notes: Some("Watching seasonal".into()),
+            notes_mode: Some("append".into()),
+            user_started_at: Some("2026-01-15".into()),
+            user_completed_at: None,
+        };
+
+        let updated = db
+            .batch_update_anime_entries(&patch)
+            .expect("batch update should succeed");
+        assert_eq!(updated.len(), 2);
+
+        let s2 = db.get_anime_entry_by_id(176301).expect("get s2");
+        assert_eq!(s2.user_status, "CURRENT");
+        assert_eq!(s2.user_progress, 2);
+        assert_eq!(s2.user_score, 88.0);
+        assert!(s2.user_notes.contains("Queued for seasonal watch."));
+        assert!(s2.user_notes.contains("Watching seasonal"));
+        assert_eq!(s2.user_started_at.as_deref(), Some("2026-01-15"));
+
+        // Clear date started via empty string
+        let clear_patch = BatchAnimeUpdatePatch {
+            anime_ids: vec![176301],
+            user_status: None,
+            user_progress: None,
+            progress_delta: None,
+            mark_completed_progress: Some(true),
+            user_score: None,
+            user_repeats: None,
+            user_notes: None,
+            notes_mode: None,
+            user_started_at: Some("".into()),
+            user_completed_at: Some("2026-03-30".into()),
+        };
+        db.batch_update_anime_entries(&clear_patch)
+            .expect("clear date patch");
+        let s2_after = db.get_anime_entry_by_id(176301).expect("get s2 after");
+        assert_eq!(s2_after.user_started_at, None);
+        assert_eq!(s2_after.user_completed_at.as_deref(), Some("2026-03-30"));
+        assert_eq!(s2_after.user_progress, 24);
+
+        // Batch delete
+        db.batch_delete_anime_entries(&target_ids)
+            .expect("batch delete");
+        assert!(db.get_anime_entry_by_id(176301).is_err());
+        assert!(db.get_anime_entry_by_id(195516).is_err());
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
