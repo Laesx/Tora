@@ -67,11 +67,11 @@ export const RecognitionView: React.FC<RecognitionViewProps> = ({
     const list = !q
       ? animeList
       : animeList.filter(
-          (a) =>
-            a.title_romaji.toLowerCase().includes(q) ||
-            (a.title_english && a.title_english.toLowerCase().includes(q)) ||
-            a.synonyms.some((s) => s.toLowerCase().includes(q))
-        );
+        (a) =>
+          a.title_romaji.toLowerCase().includes(q) ||
+          (a.title_english && a.title_english.toLowerCase().includes(q)) ||
+          a.synonyms.some((s) => s.toLowerCase().includes(q))
+      );
     return list.slice(0, 48);
   }, [animeList, animeSearch]);
 
@@ -171,11 +171,10 @@ export const RecognitionView: React.FC<RecognitionViewProps> = ({
         {activeSession ? (
           <div className="space-y-4">
             <div
-              className={`flex flex-wrap items-center gap-5 p-4 rounded-xl bg-bg-primary border ${
-                activeSession.matched_anime_id
+              className={`flex flex-wrap items-center gap-5 p-4 rounded-xl bg-bg-primary border ${activeSession.matched_anime_id
                   ? "border-accent/40"
                   : "border-amber-500/50"
-              }`}
+                }`}
             >
               {activeSession.matched_cover_image && (
                 <img
@@ -200,14 +199,17 @@ export const RecognitionView: React.FC<RecognitionViewProps> = ({
                         <CheckCircle2 className="w-3.5 h-3.5" />
                         Progress Updated!
                       </span>
-                    ) : (
+                    ) : activeSession.parsed.episode_number !== null &&
+                      activeSession.matched_current_progress !== null &&
+                      activeSession.parsed.episode_number <=
+                      activeSession.matched_current_progress ? null : (
                       <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[11px] font-mono flex items-center gap-1">
                         <Clock className="w-3.5 h-3.5" />
                         Updating in{" "}
                         {Math.max(
                           0,
                           settings.recognition_delay_seconds -
-                            activeSession.elapsed_seconds
+                          activeSession.elapsed_seconds
                         )}
                         s
                       </span>
@@ -215,7 +217,7 @@ export const RecognitionView: React.FC<RecognitionViewProps> = ({
                   ) : (
                     <span className="px-2.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[11px] font-semibold flex items-center gap-1.5">
                       <AlertTriangle className="w-3.5 h-3.5" />
-                      Unmatched Anime — Auto-Update Paused
+                      Unmatched Anime
                     </span>
                   )}
                 </div>
@@ -283,11 +285,10 @@ export const RecognitionView: React.FC<RecognitionViewProps> = ({
                         key={anime.id}
                         type="button"
                         onClick={() => setSelectedAnimeId(anime.id)}
-                        className={`flex items-center gap-3 p-2.5 rounded-xl border text-left transition ${
-                          isSelected
+                        className={`flex items-center gap-3 p-2.5 rounded-xl border text-left transition ${isSelected
                             ? "bg-accent/20 border-accent text-text-primary"
                             : "bg-bg-secondary border-border-subtle text-text-secondary hover:text-text-primary hover:border-border-subtle/80"
-                        }`}
+                          }`}
                       >
                         <img
                           src={getOptimizedCoverUrl(anime.cover_image, "medium")}

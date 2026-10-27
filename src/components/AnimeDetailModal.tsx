@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   X,
   Play,
@@ -48,6 +48,15 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
   const [synonymsInput, setSynonymsInput] = useState(anime.synonyms.join(", "));
   const [localFiles, setLocalFiles] = useState<LocalEpisodeFile[]>([]);
   const [saving, setSaving] = useState(false);
+  const stepSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (stepSaveTimerRef.current) {
+        clearTimeout(stepSaveTimerRef.current);
+      }
+    };
+  }, []);
 
   // Sync lightweight user fields when anime prop updates
   useEffect(() => {
@@ -126,7 +135,7 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
     }
   };
 
-  const handleQuickEpisodeStep = async (delta: number) => {
+  const handleQuickEpisodeStep = (delta: number) => {
     const maxEp = anime.episodes || 9999;
     const nextProg = Math.max(0, Math.min(maxEp, progress + delta));
     let nextStat = status;
@@ -135,15 +144,24 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
     } else if (nextProg > 0 && status === "PLANNING") {
       nextStat = "CURRENT";
     }
-    // Instant optimistic UI update
+    // Instant optimistic UI update in modal
     setProgress(nextProg);
     setStatus(nextStat);
-    onUpdated({
-      ...anime,
-      user_progress: nextProg,
-      user_status: nextStat,
-    });
-    await handleSave(nextStat, nextProg, score, repeats, false);
+    setLocalFiles((prev) =>
+      prev.map((f) => ({
+        ...f,
+        watched:
+          f.episode_number !== null && f.episode_number <= nextProg,
+      }))
+    );
+
+    if (stepSaveTimerRef.current) {
+      clearTimeout(stepSaveTimerRef.current);
+    }
+    stepSaveTimerRef.current = setTimeout(() => {
+      stepSaveTimerRef.current = null;
+      handleSave(nextStat, nextProg, score, repeats, false);
+    }, 1200);
   };
 
   const handlePlayEpisodeNumber = async (epNum: number) => {
@@ -201,15 +219,21 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
           <div className="absolute inset-0 bg-gradient-to-t from-bg-secondary via-bg-secondary/60 to-transparent" />
 
           <button
+            type="button"
             onClick={onClose}
-            className="absolute top-4 right-4 p-2 rounded-full bg-black/50 text-white hover:bg-accent transition"
+            className="
+              z-30 absolute top-3.5 right-3.5 w-10 h-10
+              flex items-center justify-center rounded-xl
+              bg-black/65 hover:bg-accent text-white
+              border border-white/15 shadow-lg transition cursor-pointer
+            "
             title="Close (Esc)"
           >
             <X className="w-5 h-5" />
           </button>
 
           {/* Cover & Title Header */}
-          <div className="absolute bottom-3 left-6 right-6 flex items-end gap-5">
+          <div className="absolute bottom-3 left-6 right-16 flex items-end gap-5 pointer-events-none">
             <img
               src={getOptimizedCoverUrl(anime.cover_image, "medium")}
               alt={anime.title_romaji}

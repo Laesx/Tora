@@ -1,4 +1,5 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   HardDrive,
   Clock,
@@ -35,10 +36,39 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
   onSimulatePlayback,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const activeMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const [menuPosition, setMenuPosition] = useState<{ top: number; left: number } | null>(null);
   const [containerWidth, setContainerWidth] = useState<number>(1080);
   const [viewportHeight, setViewportHeight] = useState<number>(800);
   const [scrollTop, setScrollTop] = useState<number>(0);
   const [listOffsetTop, setListOffsetTop] = useState<number>(0);
+
+  const computeMenuPosition = useCallback((btn: HTMLElement | null) => {
+    if (!btn) {
+      setMenuPosition(null);
+      return;
+    }
+    const rect = btn.getBoundingClientRect();
+    const menuWidth = 320; // w-80
+    const menuApproxHeight = 300;
+    const left = Math.max(
+      12,
+      Math.min(window.innerWidth - menuWidth - 12, rect.right - menuWidth)
+    );
+    const top = Math.max(
+      12,
+      Math.min(window.innerHeight - menuApproxHeight - 12, rect.bottom + 6)
+    );
+    setMenuPosition({ top, left });
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!quickMenuAnimeId) {
+      setMenuPosition(null);
+      return;
+    }
+    computeMenuPosition(activeMenuTriggerRef.current);
+  }, [quickMenuAnimeId, scrollTop, containerWidth, viewportHeight, computeMenuPosition]);
 
   // Measure container width & scroll viewport height via ResizeObserver
   useLayoutEffect(() => {
@@ -163,6 +193,11 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
   }
 
   if (viewMode === "grid") {
+    const activeQuickMenuAnime =
+      quickMenuAnimeId !== null
+        ? items.find((a) => a.id === quickMenuAnimeId) ?? null
+        : null;
+
     return (
       <div ref={containerRef} className="w-full">
         {topSpacerHeight > 0 && <div style={{ height: topSpacerHeight }} />}
@@ -217,9 +252,21 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
 
                   {/* Top Right Quick Menu Trigger */}
                   <button
+                    ref={(el) => {
+                      if (isMenuOpen) {
+                        activeMenuTriggerRef.current = el;
+                      }
+                    }}
                     onClick={(e) => {
                       e.stopPropagation();
-                      onSetQuickMenuAnimeId(isMenuOpen ? null : anime.id);
+                      if (isMenuOpen) {
+                        activeMenuTriggerRef.current = null;
+                        onSetQuickMenuAnimeId(null);
+                      } else {
+                        activeMenuTriggerRef.current = e.currentTarget;
+                        computeMenuPosition(e.currentTarget);
+                        onSetQuickMenuAnimeId(anime.id);
+                      }
                     }}
                     className="absolute top-2.5 right-2.5 p-1.5 rounded-lg bg-black/75 hover:bg-accent text-white transition"
                     title="Quick Info Menu"
@@ -273,25 +320,36 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
                     )}
                   </div>
                 </div>
-
-                {/* Floating Small Quick Info Menu */}
-                {isMenuOpen && (
-                  <div className="absolute top-11 right-2 z-40">
-                    <AnimeQuickMenu
-                      anime={anime}
-                      onClose={() => onSetQuickMenuAnimeId(null)}
-                      onOpenFullModal={(a) => onSelectAnime(a)}
-                      onStepEpisode={onStepEpisode}
-                      onSearchTorrents={onSearchTorrents}
-                      onSimulatePlayback={onSimulatePlayback}
-                    />
-                  </div>
-                )}
               </div>
             );
           })}
         </div>
         {bottomSpacerHeight > 0 && <div style={{ height: bottomSpacerHeight }} />}
+
+        {/* Portaled Floating Quick Info Menu (renders on top of left sidebar & all cards) */}
+        {activeQuickMenuAnime &&
+          menuPosition &&
+          createPortal(
+            <div
+              style={{
+                position: "fixed",
+                top: menuPosition.top,
+                left: menuPosition.left,
+                zIndex: 100,
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <AnimeQuickMenu
+                anime={activeQuickMenuAnime}
+                onClose={() => onSetQuickMenuAnimeId(null)}
+                onOpenFullModal={(a) => onSelectAnime(a)}
+                onStepEpisode={onStepEpisode}
+                onSearchTorrents={onSearchTorrents}
+                onSimulatePlayback={onSimulatePlayback}
+              />
+            </div>,
+            document.body
+          )}
       </div>
     );
   }

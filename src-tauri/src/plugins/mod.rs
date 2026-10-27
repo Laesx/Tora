@@ -139,7 +139,7 @@ impl PluginManager {
             desc: TrackerPluginDescriptor {
                 id: "myanimelist".into(),
                 name: "MyAnimeList (MAL)".into(),
-                description: "Internal plugin slot for MyAnimeList REST API v2. Implements the TrackerPlugin trait.".into(),
+                description: "Internal plugin slot for MyAnimeList REST API v2.".into(),
                 website_url: "https://myanimelist.net".into(),
                 oauth_authorize_url: "https://myanimelist.net/v1/oauth2/authorize".into(),
                 supports_public_username_sync: true,
@@ -154,7 +154,7 @@ impl PluginManager {
             desc: TrackerPluginDescriptor {
                 id: "kitsu".into(),
                 name: "Kitsu".into(),
-                description: "Internal plugin slot for Kitsu JSON:API tracker sync. Implements the TrackerPlugin trait.".into(),
+                description: "Internal plugin slot for Kitsu JSON:API tracker sync.".into(),
                 website_url: "https://kitsu.app".into(),
                 oauth_authorize_url: "https://kitsu.app/api/oauth/token".into(),
                 supports_public_username_sync: true,

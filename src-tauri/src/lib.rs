@@ -79,6 +79,15 @@ async fn update_anime_entry(
     .await
     .map_err(|e| e.to_string())??;
 
+    // Keep active media recognition session's current progress in sync if it matches this anime
+    if let Ok(mut active_guard) = state.active_session.lock() {
+        if let Some(existing) = active_guard.as_mut() {
+            if existing.matched_anime_id == Some(updated.id) {
+                existing.matched_current_progress = Some(updated.user_progress);
+            }
+        }
+    }
+
     // Push update to tracker plugin asynchronously in the background so UI returns in <1ms
     if settings.auto_sync_tracker && !settings.anilist_token.trim().is_empty() {
         if let Some(plugin) = state.plugins.get(&settings.active_tracker_plugin) {
@@ -557,57 +566,78 @@ async fn poll_media_recognition(
     // Check if it's the same session continuing
     if let Some(existing) = active_guard.as_mut() {
         if existing.cleaned_media_title == cleaned_title && existing.player_name == player_name {
-            if existing.matched_anime_id.is_some() {
-                existing.elapsed_seconds = (now - existing.detected_at_unix).max(0) as u64;
+            if let Some(aid) = existing.matched_anime_id {
+                if let Ok(entry) = state.db.get_anime_entry_by_id(aid) {
+                    existing.matched_current_progress = Some(entry.user_progress);
+                    existing.matched_total_episodes = entry.episodes;
+                }
 
-                // Only auto-update when matched to an anime entry and delay threshold is met
-                if !existing.auto_synced
-                    && existing.elapsed_seconds >= settings.recognition_delay_seconds
-                {
-                    existing.auto_synced = true;
-                    if let (Some(aid), Some(ep)) =
-                        (existing.matched_anime_id, existing.parsed.episode_number)
+                let is_already_seen = match (
+                    existing.parsed.episode_number,
+                    existing.matched_current_progress,
+                ) {
+                    (Some(ep), Some(cur_prog)) => ep <= cur_prog,
+                    _ => false,
+                };
+
+                if !existing.auto_synced && is_already_seen {
+                    // If the currently detected episode is the last one seen (or earlier),
+                    // do not count down or auto-update progress.
+                    existing.elapsed_seconds = 0;
+                } else {
+                    existing.elapsed_seconds = (now - existing.detected_at_unix).max(0) as u64;
+
+                    // Only auto-update when matched to an anime entry and delay threshold is met
+                    if !existing.auto_synced
+                        && existing.elapsed_seconds >= settings.recognition_delay_seconds
                     {
-                        if let Ok(entry) = state.db.get_anime_entry_by_id(aid) {
-                            let new_prog = ep.max(entry.user_progress);
-                            let new_status = if let Some(total) = entry.episodes {
-                                if new_prog >= total && total > 0 {
-                                    "COMPLETED".to_string()
-                                } else if entry.user_status == "PLANNING" {
-                                    "CURRENT".to_string()
-                                } else {
-                                    entry.user_status.clone()
-                                }
-                            } else if entry.user_status == "PLANNING" {
-                                "CURRENT".to_string()
-                            } else {
-                                entry.user_status.clone()
-                            };
+                        existing.auto_synced = true;
+                        if let Some(ep) = existing.parsed.episode_number {
+                            if let Ok(entry) = state.db.get_anime_entry_by_id(aid) {
+                                if ep > entry.user_progress {
+                                    let new_prog = ep;
+                                    let new_status = if let Some(total) = entry.episodes {
+                                        if new_prog >= total && total > 0 {
+                                            "COMPLETED".to_string()
+                                        } else if entry.user_status == "PLANNING" {
+                                            "CURRENT".to_string()
+                                        } else {
+                                            entry.user_status.clone()
+                                        }
+                                    } else if entry.user_status == "PLANNING" {
+                                        "CURRENT".to_string()
+                                    } else {
+                                        entry.user_status.clone()
+                                    };
 
-                            if let Ok((updated, _)) = state.db.update_anime_user_state(
-                                aid,
-                                &new_status,
-                                new_prog,
-                                entry.user_score,
-                                entry.user_repeats,
-                                &entry.user_notes,
-                                entry.custom_folder,
-                                None,
-                            ) {
-                                existing.matched_current_progress = Some(updated.user_progress);
+                                    if let Ok((updated, _)) = state.db.update_anime_user_state(
+                                        aid,
+                                        &new_status,
+                                        new_prog,
+                                        entry.user_score,
+                                        entry.user_repeats,
+                                        &entry.user_notes,
+                                        entry.custom_folder,
+                                        None,
+                                    ) {
+                                        existing.matched_current_progress =
+                                            Some(updated.user_progress);
+                                    }
+
+                                    let _ = state.db.record_watch_history(
+                                        Some(aid),
+                                        existing
+                                            .matched_anime_title
+                                            .as_deref()
+                                            .unwrap_or(&existing.parsed.anime_title),
+                                        ep,
+                                        &existing.player_name,
+                                        &existing.cleaned_media_title,
+                                        true,
+                                    );
+                                }
                             }
                         }
-                        let _ = state.db.record_watch_history(
-                            Some(aid),
-                            existing
-                                .matched_anime_title
-                                .as_deref()
-                                .unwrap_or(&existing.parsed.anime_title),
-                            ep,
-                            &existing.player_name,
-                            &existing.cleaned_media_title,
-                            true,
-                        );
                     }
                 }
             } else {

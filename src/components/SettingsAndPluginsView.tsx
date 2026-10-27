@@ -153,11 +153,10 @@ export const SettingsAndPluginsView: React.FC<SettingsAndPluginsViewProps> = ({
                 onClick={() =>
                   handleSelectTheme(preset.id, preset.defaultAccent)
                 }
-                className={`text-left p-3.5 rounded-xl border transition flex items-start gap-3 ${
-                  active
-                    ? "border-accent bg-accent/10 shadow-sm"
-                    : "border-border-subtle bg-bg-primary hover:border-text-muted"
-                }`}
+                className={`text-left p-3.5 rounded-xl border transition flex items-start gap-3 ${active
+                  ? "border-accent bg-accent/10 shadow-sm"
+                  : "border-border-subtle bg-bg-primary hover:border-text-muted"
+                  }`}
               >
                 <div
                   className="w-10 h-10 rounded-lg border border-white/15 shrink-0 flex items-center justify-center shadow-inner"
@@ -194,11 +193,10 @@ export const SettingsAndPluginsView: React.FC<SettingsAndPluginsViewProps> = ({
               <button
                 key={sw.hex}
                 onClick={() => handleSelectAccent(sw.hex)}
-                className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs border transition ${
-                  settings.accent_color.toLowerCase() === sw.hex.toLowerCase()
-                    ? "border-text-primary bg-bg-tertiary font-semibold text-text-primary"
-                    : "border-border-subtle bg-bg-primary text-text-secondary"
-                }`}
+                className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs border transition ${settings.accent_color.toLowerCase() === sw.hex.toLowerCase()
+                  ? "border-text-primary bg-bg-tertiary font-semibold text-text-primary"
+                  : "border-border-subtle bg-bg-primary text-text-secondary"
+                  }`}
               >
                 <span
                   className="w-3 h-3 rounded-full"
@@ -237,19 +235,23 @@ export const SettingsAndPluginsView: React.FC<SettingsAndPluginsViewProps> = ({
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           {plugins.map((plug) => {
             const isSelected = settings.active_tracker_plugin === plug.id;
+            const isDisabled = plug.status !== "active";
             return (
               <div
                 key={plug.id}
-                onClick={() =>
+                onClick={() => {
+                  if (isDisabled) return;
                   onUpdateSettings({
                     ...settings,
                     active_tracker_plugin: plug.id,
-                  })
-                }
-                className={`p-4 rounded-xl border cursor-pointer transition space-y-2 ${
-                  isSelected
-                    ? "border-accent bg-accent/10"
-                    : "border-border-subtle bg-bg-primary hover:border-text-muted"
+                  });
+                }}
+                className={`p-4 rounded-xl border transition space-y-2 ${
+                  isDisabled
+                    ? "opacity-50 cursor-not-allowed border-border-subtle bg-bg-primary select-none"
+                    : isSelected
+                    ? "border-accent bg-accent/10 cursor-pointer"
+                    : "border-border-subtle bg-bg-primary hover:border-text-muted cursor-pointer"
                 }`}
               >
                 <div className="flex items-center justify-between">
@@ -263,7 +265,7 @@ export const SettingsAndPluginsView: React.FC<SettingsAndPluginsViewProps> = ({
                         : "bg-bg-tertiary text-text-muted"
                     }`}
                   >
-                    {plug.status}
+                    {plug.status === "active" ? "active" : "coming soon"}
                   </span>
                 </div>
                 <p className="text-[11px] text-text-muted leading-relaxed">
@@ -279,7 +281,7 @@ export const SettingsAndPluginsView: React.FC<SettingsAndPluginsViewProps> = ({
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label className="block text-[11px] font-semibold text-text-secondary uppercase mb-1">
-                AniList Username (Public List Import & Sync)
+                AniList Username
               </label>
               <input
                 type="text"
@@ -299,7 +301,7 @@ export const SettingsAndPluginsView: React.FC<SettingsAndPluginsViewProps> = ({
             <div>
               <div className="flex items-center justify-between mb-1">
                 <label className="text-[11px] font-semibold text-text-secondary uppercase">
-                  AniList OAuth Access Token (Optional — Required for Write Sync)
+                  OAuth Access Token
                 </label>
                 <a
                   href="https://anilist.co/api/v2/oauth/authorize?client_id=14954&response_type=token"

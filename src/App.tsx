@@ -154,8 +154,7 @@ export const App: React.FC = () => {
           ) {
             refreshAnimeList();
             showToast(
-              `Scrobbled: ${
-                session.matched_anime_title || session.parsed.anime_title
+              `Scrobbled: ${session.matched_anime_title || session.parsed.anime_title
               } Episode ${session.parsed.episode_number ?? ""}!`,
               "success"
             );
@@ -167,6 +166,7 @@ export const App: React.FC = () => {
             prev.cleaned_media_title === session.cleaned_media_title &&
             prev.player_name === session.player_name &&
             prev.matched_anime_id === session.matched_anime_id &&
+            prev.matched_current_progress === session.matched_current_progress &&
             prev.auto_synced === session.auto_synced &&
             (session.auto_synced ||
               !session.matched_anime_id ||
@@ -184,6 +184,31 @@ export const App: React.FC = () => {
     }, 2500);
     return () => clearInterval(interval);
   }, []);
+
+  // Track pending +1/-1 episode steps so rapid clicks update the counter in 0ms
+  // without causing the anime card to jump or leave the current filter tab until the user finishes clicking
+  const pendingStepRef = useRef<
+    Record<
+      number,
+      {
+        initialStatus: string;
+        initialProgress: number;
+        initialUpdatedAt: number;
+        latestAnime: AnimeEntry;
+        timer: ReturnType<typeof setTimeout>;
+      }
+    >
+  >({});
+  const [pendingStepSnapshots, setPendingStepSnapshots] = useState<
+    Record<
+      number,
+      {
+        initialStatus: string;
+        initialProgress: number;
+        initialUpdatedAt: number;
+      }
+    >
+  >({});
 
   // Keyboard shortcuts: Ctrl+K for Command Palette, Escape to close modals/menus
   useEffect(() => {
@@ -207,49 +232,105 @@ export const App: React.FC = () => {
     setSettings(saved);
   };
 
-  const handleStepEpisode = async (anime: AnimeEntry, delta: number) => {
-    const maxEp = anime.episodes || 9999;
-    const nextProg = Math.max(0, Math.min(maxEp, anime.user_progress + delta));
-    let nextStatus = anime.user_status;
-    if (anime.episodes && nextProg >= anime.episodes) {
-      nextStatus = "COMPLETED";
-    } else if (nextProg > 0 && anime.user_status === "PLANNING") {
-      nextStatus = "CURRENT";
+  const handleStepEpisode = (anime: AnimeEntry, delta: number) => {
+    const existing = pendingStepRef.current[anime.id];
+    const baseAnime = existing ? existing.latestAnime : anime;
+    const maxEp = baseAnime.episodes || 9999;
+    const nextProg = Math.max(
+      0,
+      Math.min(maxEp, baseAnime.user_progress + delta)
+    );
+
+    if (existing) {
+      clearTimeout(existing.timer);
     }
 
-    // Instant 0ms optimistic UI update
+    const initialStatus = existing ? existing.initialStatus : anime.user_status;
+    const initialProgress = existing
+      ? existing.initialProgress
+      : anime.user_progress;
+    const initialUpdatedAt = existing
+      ? existing.initialUpdatedAt
+      : anime.updated_at;
+
+    // Instant 0ms optimistic UI update on the card's episode counter while preserving list position
     const optimisticEntry: AnimeEntry = {
-      ...anime,
+      ...baseAnime,
       user_progress: nextProg,
-      user_status: nextStatus,
+      user_status: initialStatus,
+      updated_at: initialUpdatedAt,
     };
+
     setAnimeList((prev) =>
       prev.map((a) => (a.id === anime.id ? optimisticEntry : a))
     );
-    if (selectedAnime?.id === anime.id) {
-      setSelectedAnime(optimisticEntry);
-    }
-    showToast(`${anime.title_romaji} → Episode ${nextProg}`, "success");
+    setSelectedAnime((prev) =>
+      prev?.id === anime.id ? optimisticEntry : prev
+    );
 
-    try {
-      const updated = await toraApi.updateAnimeEntry({
-        animeId: anime.id,
-        userStatus: nextStatus,
-        userProgress: nextProg,
-        userScore: anime.user_score,
-        userRepeats: anime.user_repeats,
-        userNotes: anime.user_notes,
-        customFolder: anime.custom_folder,
-      });
-      setAnimeList((prev) =>
-        prev.map((a) => (a.id === updated.id ? updated : a))
-      );
-      if (selectedAnime?.id === updated.id) {
-        setSelectedAnime(updated);
-      }
-    } catch (err: any) {
-      showToast(String(err), "error");
+    if (!existing) {
+      setPendingStepSnapshots((prev) => ({
+        ...prev,
+        [anime.id]: {
+          initialStatus,
+          initialProgress,
+          initialUpdatedAt,
+        },
+      }));
     }
+
+    const timer = setTimeout(async () => {
+      const current = pendingStepRef.current[anime.id];
+      delete pendingStepRef.current[anime.id];
+      setPendingStepSnapshots((prev) => {
+        const next = { ...prev };
+        delete next[anime.id];
+        return next;
+      });
+
+      if (!current) return;
+      const finalAnime = current.latestAnime;
+      const finalProg = finalAnime.user_progress;
+      let nextStatus = current.initialStatus;
+      if (finalAnime.episodes && finalProg >= finalAnime.episodes) {
+        nextStatus = "COMPLETED";
+      } else if (finalProg > 0 && current.initialStatus === "PLANNING") {
+        nextStatus = "CURRENT";
+      }
+
+      showToast(
+        `${finalAnime.title_romaji} → Episode ${finalProg}`,
+        "success"
+      );
+
+      try {
+        const updated = await toraApi.updateAnimeEntry({
+          animeId: finalAnime.id,
+          userStatus: nextStatus,
+          userProgress: finalProg,
+          userScore: finalAnime.user_score,
+          userRepeats: finalAnime.user_repeats,
+          userNotes: finalAnime.user_notes,
+          customFolder: finalAnime.custom_folder,
+        });
+        setAnimeList((prev) =>
+          prev.map((a) => (a.id === updated.id ? updated : a))
+        );
+        setSelectedAnime((prev) =>
+          prev?.id === updated.id ? updated : prev
+        );
+      } catch (err: any) {
+        showToast(String(err), "error");
+      }
+    }, 1400);
+
+    pendingStepRef.current[anime.id] = {
+      initialStatus,
+      initialProgress,
+      initialUpdatedAt,
+      latestAnime: optimisticEntry,
+      timer,
+    };
   };
 
   const handleSimulatePlayback = async (
@@ -305,7 +386,9 @@ export const App: React.FC = () => {
     const q = searchQuery.trim().toLowerCase();
     return animeList
       .filter((a) => {
-        if (statusFilter !== "ALL" && a.user_status !== statusFilter) {
+        const effectiveStatus =
+          pendingStepSnapshots[a.id]?.initialStatus ?? a.user_status;
+        if (statusFilter !== "ALL" && effectiveStatus !== statusFilter) {
           return false;
         }
         if (q) {
@@ -323,10 +406,20 @@ export const App: React.FC = () => {
         if (sortBy === "title")
           return a.title_romaji.localeCompare(b.title_romaji);
         if (sortBy === "score") return b.user_score - a.user_score;
-        if (sortBy === "progress") return b.user_progress - a.user_progress;
-        return b.updated_at - a.updated_at;
+        if (sortBy === "progress") {
+          const progA =
+            pendingStepSnapshots[a.id]?.initialProgress ?? a.user_progress;
+          const progB =
+            pendingStepSnapshots[b.id]?.initialProgress ?? b.user_progress;
+          return progB - progA;
+        }
+        const updA =
+          pendingStepSnapshots[a.id]?.initialUpdatedAt ?? a.updated_at;
+        const updB =
+          pendingStepSnapshots[b.id]?.initialUpdatedAt ?? b.updated_at;
+        return updB - updA;
       });
-  }, [animeList, statusFilter, searchQuery, sortBy]);
+  }, [animeList, statusFilter, searchQuery, sortBy, pendingStepSnapshots]);
 
   const totalEpisodesWatched = useMemo(
     () => animeList.reduce((acc, a) => acc + a.user_progress, 0),
@@ -394,11 +487,10 @@ export const App: React.FC = () => {
           <nav className="space-y-1">
             <button
               onClick={() => setActiveTab("watchlist")}
-              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${
-                activeTab === "watchlist"
+              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${activeTab === "watchlist"
                   ? "bg-accent text-white shadow-sm"
                   : "text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
-              }`}
+                }`}
             >
               <span className="flex items-center gap-2.5">
                 <Tv className="w-4 h-4" />
@@ -411,11 +503,10 @@ export const App: React.FC = () => {
 
             <button
               onClick={() => setActiveTab("library")}
-              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${
-                activeTab === "library"
+              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${activeTab === "library"
                   ? "bg-accent text-white shadow-sm"
                   : "text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
-              }`}
+                }`}
             >
               <span className="flex items-center gap-2.5">
                 <HardDrive className="w-4 h-4" />
@@ -430,11 +521,10 @@ export const App: React.FC = () => {
 
             <button
               onClick={() => setActiveTab("torrents")}
-              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${
-                activeTab === "torrents"
+              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${activeTab === "torrents"
                   ? "bg-accent text-white shadow-sm"
                   : "text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
-              }`}
+                }`}
             >
               <span className="flex items-center gap-2.5">
                 <Magnet className="w-4 h-4" />
@@ -444,11 +534,10 @@ export const App: React.FC = () => {
 
             <button
               onClick={() => setActiveTab("discover")}
-              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${
-                activeTab === "discover"
+              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${activeTab === "discover"
                   ? "bg-accent text-white shadow-sm"
                   : "text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
-              }`}
+                }`}
             >
               <span className="flex items-center gap-2.5">
                 <Compass className="w-4 h-4" />
@@ -458,11 +547,10 @@ export const App: React.FC = () => {
 
             <button
               onClick={() => setActiveTab("recognition")}
-              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${
-                activeTab === "recognition"
+              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${activeTab === "recognition"
                   ? "bg-accent text-white shadow-sm"
                   : "text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
-              }`}
+                }`}
             >
               <span className="flex items-center gap-2.5">
                 <Activity className="w-4 h-4" />
@@ -475,11 +563,10 @@ export const App: React.FC = () => {
 
             <button
               onClick={() => setActiveTab("testing")}
-              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${
-                activeTab === "testing"
+              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${activeTab === "testing"
                   ? "bg-accent text-white shadow-sm"
                   : "text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
-              }`}
+                }`}
             >
               <span className="flex items-center gap-2.5">
                 <FlaskConical className="w-4 h-4" />
@@ -489,11 +576,10 @@ export const App: React.FC = () => {
 
             <button
               onClick={() => setActiveTab("settings")}
-              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${
-                activeTab === "settings"
+              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${activeTab === "settings"
                   ? "bg-accent text-white shadow-sm"
                   : "text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
-              }`}
+                }`}
             >
               <span className="flex items-center gap-2.5">
                 <Settings className="w-4 h-4" />
@@ -570,13 +656,16 @@ export const App: React.FC = () => {
                     <CheckCircle2 className="w-4 h-4" />
                     Progress Scrobbled!
                   </span>
-                ) : (
+                ) : activeSession.parsed.episode_number !== null &&
+                  activeSession.matched_current_progress !== null &&
+                  activeSession.parsed.episode_number <=
+                  activeSession.matched_current_progress ? null : (
                   <span className="text-amber-300 font-mono text-[11px]">
                     Auto-updating in{" "}
                     {Math.max(
                       0,
                       (settings?.recognition_delay_seconds || 10) -
-                        activeSession.elapsed_seconds
+                      activeSession.elapsed_seconds
                     )}
                     s...
                   </span>
@@ -615,19 +704,17 @@ export const App: React.FC = () => {
                       <button
                         key={tab.id}
                         onClick={() => setStatusFilter(tab.id)}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 ${
-                          active
+                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 ${active
                             ? "bg-accent text-white shadow-sm"
                             : "text-text-secondary hover:text-text-primary"
-                        }`}
+                          }`}
                       >
                         <span>{tab.label}</span>
                         <span
-                          className={`text-[10px] font-mono px-1.5 py-0.2 rounded-full ${
-                            active
+                          className={`text-[10px] font-mono px-1.5 py-0.2 rounded-full ${active
                               ? "bg-black/25 text-white"
                               : "bg-bg-tertiary text-text-muted"
-                          }`}
+                            }`}
                         >
                           {count}
                         </span>
@@ -665,7 +752,7 @@ export const App: React.FC = () => {
                       if (filteredAnime.length > 0) {
                         const rand =
                           filteredAnime[
-                            Math.floor(Math.random() * filteredAnime.length)
+                          Math.floor(Math.random() * filteredAnime.length)
                           ];
                         setSelectedAnime(rand);
                       }
@@ -685,11 +772,10 @@ export const App: React.FC = () => {
                             view_mode: "grid",
                           })
                         }
-                        className={`p-1.5 rounded-lg transition ${
-                          viewMode === "grid"
+                        className={`p-1.5 rounded-lg transition ${viewMode === "grid"
                             ? "bg-accent text-white"
                             : "text-text-muted hover:text-text-primary"
-                        }`}
+                          }`}
                         title="Poster Grid View"
                       >
                         <LayoutGrid className="w-3.5 h-3.5" />
@@ -701,11 +787,10 @@ export const App: React.FC = () => {
                             view_mode: "compact",
                           })
                         }
-                        className={`p-1.5 rounded-lg transition ${
-                          viewMode === "compact"
+                        className={`p-1.5 rounded-lg transition ${viewMode === "compact"
                             ? "bg-accent text-white"
                             : "text-text-muted hover:text-text-primary"
-                        }`}
+                          }`}
                         title="Detailed Cards View"
                       >
                         <Rows className="w-3.5 h-3.5" />
@@ -717,11 +802,10 @@ export const App: React.FC = () => {
                             view_mode: "table",
                           })
                         }
-                        className={`p-1.5 rounded-lg transition ${
-                          viewMode === "table"
+                        className={`p-1.5 rounded-lg transition ${viewMode === "table"
                             ? "bg-accent text-white"
                             : "text-text-muted hover:text-text-primary"
-                        }`}
+                          }`}
                         title="Taiga Classic Dense Table View"
                       >
                         <List className="w-3.5 h-3.5" />
@@ -870,13 +954,12 @@ export const App: React.FC = () => {
       {/* Toast Notification */}
       {toast && (
         <div
-          className={`fixed bottom-5 right-5 z-50 px-4 py-3 rounded-xl shadow-2xl border text-xs font-semibold flex items-center gap-2.5 transition-all ${
-            toast.type === "error"
+          className={`fixed bottom-5 right-5 z-50 px-4 py-3 rounded-xl shadow-2xl border text-xs font-semibold flex items-center gap-2.5 transition-all ${toast.type === "error"
               ? "bg-red-950/95 border-red-500 text-red-200"
               : toast.type === "success"
-              ? "bg-emerald-950/95 border-emerald-500 text-emerald-200"
-              : "bg-bg-elevated border-accent text-text-primary"
-          }`}
+                ? "bg-emerald-950/95 border-emerald-500 text-emerald-200"
+                : "bg-bg-elevated border-accent text-text-primary"
+            }`}
         >
           <Sparkles className="w-4 h-4 text-accent shrink-0" />
           <span>{toast.msg}</span>

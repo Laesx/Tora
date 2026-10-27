@@ -11,7 +11,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import { AnimeEntry } from "../types";
-import { formatCountdown } from "../api";
+import { formatCountdown, getOptimizedCoverUrl } from "../api";
 
 interface AnimeQuickMenuProps {
   anime: AnimeEntry;
@@ -35,14 +35,15 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
 
   return (
     <div
-      className="w-80 rounded-2xl bg-bg-secondary border border-border-subtle shadow-2xl p-4 space-y-3 text-xs z-40"
+      className="w-80 rounded-2xl bg-bg-secondary border border-border-subtle shadow-2xl p-4 space-y-3 text-xs z-[100]"
       onClick={(e) => e.stopPropagation()}
     >
       {/* Header with Mini Cover & Info */}
       <div className="flex items-start gap-3">
         <img
-          src={anime.cover_image}
+          src={getOptimizedCoverUrl(anime.cover_image, "medium")}
           alt={anime.title_romaji}
+          decoding="async"
           className="w-14 h-20 object-cover rounded-lg border border-border-subtle shrink-0"
         />
         <div className="min-w-0 flex-1 space-y-1">
