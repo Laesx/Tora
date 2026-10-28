@@ -477,7 +477,6 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
         onClick={(e) => handleItemClick(e, anime)}
         onDoubleClick={(e) => handleItemDoubleClick(e, anime)}
         onContextMenu={(e) => handleContextMenu(e, anime)}
-        title="Click to select • Ctrl+Click to multi-select • Double-click to open details"
         className={`group relative rounded-2xl overflow-visible flex flex-col cursor-pointer transition-[color,background-color,border-color,box-shadow] shadow-sm hover:shadow-xl ${isSelected
           ? "bg-accent/10 border border-accent ring-2 ring-accent/40 shadow-lg shadow-accent/10"
           : "bg-bg-secondary border border-border-subtle hover:border-accent/70"
@@ -585,7 +584,6 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
         onClick={(e) => handleItemClick(e, anime)}
         onDoubleClick={(e) => handleItemDoubleClick(e, anime)}
         onContextMenu={(e) => handleContextMenu(e, anime)}
-        title="Click to select • Ctrl+Click to multi-select • Double-click to open details"
         className={`group flex gap-4 p-3.5 rounded-2xl cursor-pointer transition-[color,background-color,border-color,box-shadow] ${isSelected
           ? "bg-accent/10 border border-accent ring-2 ring-accent/30 shadow-md"
           : "bg-bg-secondary border border-border-subtle hover:border-accent/60"
@@ -671,7 +669,6 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
         onClick={(e) => handleItemClick(e, anime)}
         onDoubleClick={(e) => handleItemDoubleClick(e, anime)}
         onContextMenu={(e) => handleContextMenu(e, anime)}
-        title="Click to select • Ctrl+Click to multi-select • Double-click to open details"
         className={`cursor-pointer transition-colors ${isSelected
           ? "bg-accent/15 hover:bg-accent/20 shadow-[inset_3px_0_0_0_rgb(var(--accent-primary))]"
           : "hover:bg-bg-tertiary/60"
