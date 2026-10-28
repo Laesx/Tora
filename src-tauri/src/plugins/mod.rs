@@ -125,6 +125,24 @@ pub struct RemoteListSnapshot {
     pub entries: Vec<AnimeEntry>,
 }
 
+/// One media of a seasonal listing: full metadata plus the fields only the Seasons view sorts by.
+/// A response / cache type only — never written to `anime_entries`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SeasonalAnime {
+    #[serde(flatten)]
+    pub entry: AnimeEntry,
+    pub popularity: Option<u32>,
+    /// `YYYY`, `YYYY-MM` or `YYYY-MM-DD` (AniList fuzzy start date), so it sorts lexicographically.
+    pub start_date: Option<String>,
+}
+
+/// One page of [`TrackerPlugin::fetch_season_page`].
+#[derive(Debug, Clone)]
+pub struct SeasonPage {
+    pub items: Vec<SeasonalAnime>,
+    pub has_next_page: bool,
+}
+
 /// Core internal trait for all anime tracker plugins (AniList, MyAnimeList, Kitsu, Shikimori, etc.)
 pub trait TrackerPlugin: Send + Sync {
     fn descriptor(&self) -> TrackerPluginDescriptor;
@@ -158,6 +176,14 @@ pub trait TrackerPlugin: Send + Sync {
         season: Option<&'a str>,
         year: Option<u32>,
     ) -> BoxFuture<'a, Result<Vec<AnimeEntry>, String>>;
+
+    /// Fetch one page (1-based) of every anime in `season` (`WINTER`..`FALL`) of `year`, most popular first.
+    fn fetch_season_page<'a>(
+        &'a self,
+        season: &'a str,
+        year: u32,
+        page: u32,
+    ) -> BoxFuture<'a, Result<SeasonPage, TrackerError>>;
 
     /// Create or update the viewer's list entry for `update.media_id`.
     fn save_list_entry<'a>(
@@ -229,6 +255,16 @@ impl TrackerPlugin for StubTrackerPlugin {
     ) -> BoxFuture<'a, Result<Vec<AnimeEntry>, String>> {
         let name = self.desc.name.clone();
         Box::pin(async move { Err(format!("{} plugin is not yet configured.", name)) })
+    }
+
+    fn fetch_season_page<'a>(
+        &'a self,
+        _season: &'a str,
+        _year: u32,
+        _page: u32,
+    ) -> BoxFuture<'a, Result<SeasonPage, TrackerError>> {
+        let err = self.not_configured();
+        Box::pin(async move { Err(err) })
     }
 
     fn save_list_entry<'a>(

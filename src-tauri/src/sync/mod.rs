@@ -21,7 +21,8 @@ use crate::db::{AnimeEntry, AppSettings, BatchAnimeUpdatePatch, Database};
 use crate::detection::anisthesia::DetectedMediaSession;
 use crate::library::scanner::ScanSummary;
 use crate::plugins::{
-    PluginManager, TrackerEntryUpdate, TrackerError, TrackerPlugin, MEDIA_DETAILS_CHUNK,
+    PluginManager, SeasonalAnime, TrackerEntryUpdate, TrackerError, TrackerPlugin,
+    MEDIA_DETAILS_CHUNK,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -1253,6 +1254,136 @@ impl TrackerSyncService {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Seasonal browsing (public data, snapshot per season in `seasonal_cache`)
+// ---------------------------------------------------------------------------------------------
+
+pub const SEASON_NAMES: [&str; 4] = ["WINTER", "SPRING", "SUMMER", "FALL"];
+/// Current / upcoming seasons are refetched after this long; past seasons only on demand.
+const SEASON_STALE_AFTER_SECS: i64 = 24 * 60 * 60;
+/// Safety cap on pages per season (50 media each).
+const MAX_SEASON_PAGES: u32 = 20;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SeasonResult {
+    pub season: String,
+    pub year: u32,
+    pub fetched_at: i64,
+    pub items: Vec<SeasonalAnime>,
+    pub from_cache: bool,
+    /// Served from cache, but old enough that the caller should refresh in the background.
+    pub stale: bool,
+}
+
+/// Monotonic index (`year * 4 + quarter`) used to compare seasons. `None` for unknown names.
+pub fn season_index(season: &str, year: u32) -> Option<u32> {
+    let quarter = SEASON_NAMES
+        .iter()
+        .position(|s| s.eq_ignore_ascii_case(season))?;
+    Some(year * 4 + quarter as u32)
+}
+
+/// Broadcast season containing `month` (1–12): Jan–Mar Winter, Apr–Jun Spring, Jul–Sep Summer, Oct–Dec Fall.
+pub fn current_season(year: u32, month: u32) -> (&'static str, u32) {
+    (SEASON_NAMES[((month.clamp(1, 12) - 1) / 3) as usize], year)
+}
+
+/// `true` when `season`/`year` ended before the season containing `today_year`/`today_month` started.
+pub fn season_is_past(season: &str, year: u32, today_year: u32, today_month: u32) -> bool {
+    let (cur, cur_year) = current_season(today_year, today_month);
+    match (season_index(season, year), season_index(cur, cur_year)) {
+        (Some(s), Some(c)) => s < c,
+        _ => false,
+    }
+}
+
+pub fn season_cache_is_stale(past: bool, fetched_at: i64, now: i64) -> bool {
+    !past && now - fetched_at > SEASON_STALE_AFTER_SECS
+}
+
+impl TrackerSyncService {
+    /// Every anime of a season. Serves the cached snapshot unless `force_refresh` or none exists;
+    /// otherwise fetches all pages (through the shared rate limiter) and replaces the snapshot.
+    /// Never touches `anime_entries`.
+    pub async fn fetch_season(
+        &self,
+        season: &str,
+        year: u32,
+        force_refresh: bool,
+    ) -> Result<SeasonResult, String> {
+        use chrono::Datelike;
+
+        let season = season.trim().to_uppercase();
+        if season_index(&season, year).is_none() {
+            return Err(format!("Unknown season '{}'", season));
+        }
+        let today = chrono::Local::now();
+        let past = season_is_past(&season, year, today.year() as u32, today.month());
+        let now = chrono::Utc::now().timestamp();
+
+        if !force_refresh {
+            let key = season.clone();
+            if let Some((fetched_at, items)) = self
+                .blocking(move |db| db.get_season_cache(&key, year))
+                .await?
+            {
+                return Ok(SeasonResult {
+                    season,
+                    year,
+                    fetched_at,
+                    items,
+                    from_cache: true,
+                    stale: season_cache_is_stale(past, fetched_at, now),
+                });
+            }
+        }
+
+        let plugin = self.plugin()?;
+        let phase = Instant::now();
+        let mut items: Vec<SeasonalAnime> = Vec::new();
+        let mut seen = HashSet::new();
+        let mut page = 1;
+        loop {
+            let result = self
+                .limiter
+                .run(|| plugin.fetch_season_page(&season, year, page))
+                .await?;
+            items.extend(
+                result
+                    .items
+                    .into_iter()
+                    .filter(|m| seen.insert(m.entry.id)),
+            );
+            if !result.has_next_page || page >= MAX_SEASON_PAGES {
+                break;
+            }
+            page += 1;
+        }
+        eprintln!(
+            "[seasons] fetched {} {}: {} media in {} page(s), {}ms",
+            season,
+            year,
+            items.len(),
+            page,
+            phase.elapsed().as_millis()
+        );
+
+        let fetched_at = chrono::Utc::now().timestamp();
+        let (key, to_store) = (season.clone(), items.clone());
+        self.blocking(move |db| db.put_season_cache(&key, year, fetched_at, &to_store))
+            .await?;
+
+        Ok(SeasonResult {
+            season,
+            year,
+            fetched_at,
+            items,
+            from_cache: false,
+            stale: false,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------------------------
 
@@ -1534,6 +1665,10 @@ mod tests {
         fetch_error: Mutex<Option<TrackerError>>,
         /// Ids passed to every `fetch_media_details` call.
         details_calls: Mutex<Vec<Vec<i64>>>,
+        /// Media returned by `fetch_season_page`, 2 per page.
+        season_media: Mutex<Vec<AnimeEntry>>,
+        /// `(season, year, page)` of every `fetch_season_page` call.
+        season_calls: Mutex<Vec<(String, u32, u32)>>,
     }
 
     impl TrackerPlugin for MockTracker {
@@ -1590,6 +1725,35 @@ mod tests {
             _year: Option<u32>,
         ) -> BoxFuture<'a, Result<Vec<AnimeEntry>, String>> {
             Box::pin(async { Ok(vec![]) })
+        }
+        fn fetch_season_page<'a>(
+            &'a self,
+            season: &'a str,
+            year: u32,
+            page: u32,
+        ) -> BoxFuture<'a, Result<crate::plugins::SeasonPage, TrackerError>> {
+            Box::pin(async move {
+                self.season_calls
+                    .lock()
+                    .unwrap()
+                    .push((season.to_string(), year, page));
+                let all = self.season_media.lock().unwrap().clone();
+                let start = ((page - 1) * 2) as usize;
+                let items = all
+                    .iter()
+                    .skip(start)
+                    .take(2)
+                    .map(|e| SeasonalAnime {
+                        entry: e.clone(),
+                        popularity: Some(1000 - e.id as u32),
+                        start_date: Some("2026-10".into()),
+                    })
+                    .collect();
+                Ok(crate::plugins::SeasonPage {
+                    items,
+                    has_next_page: start + 2 < all.len(),
+                })
+            })
         }
         fn save_list_entry<'a>(
             &'a self,
@@ -1656,6 +1820,74 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("condition not reached");
+    }
+
+    #[test]
+    fn season_helpers_follow_broadcast_quarters() {
+        assert_eq!(current_season(2026, 1), ("WINTER", 2026));
+        assert_eq!(current_season(2026, 6), ("SPRING", 2026));
+        assert_eq!(current_season(2026, 9), ("SUMMER", 2026));
+        assert_eq!(current_season(2026, 10), ("FALL", 2026));
+        assert_eq!(current_season(2026, 12), ("FALL", 2026));
+
+        assert!(season_index("fall", 2026) > season_index("SUMMER", 2026));
+        assert!(season_index("WINTER", 2027) > season_index("FALL", 2026));
+        assert_eq!(season_index("AUTUMN", 2026), None);
+
+        // Today: 2026-10-28 → Fall 2026
+        assert!(season_is_past("SUMMER", 2026, 2026, 10));
+        assert!(season_is_past("FALL", 2025, 2026, 10));
+        assert!(!season_is_past("FALL", 2026, 2026, 10));
+        assert!(!season_is_past("WINTER", 2027, 2026, 10));
+
+        let day = 24 * 60 * 60;
+        assert!(!season_cache_is_stale(false, 1_000, 1_000 + day - 1));
+        assert!(season_cache_is_stale(false, 1_000, 1_000 + day + 1));
+        assert!(!season_cache_is_stale(true, 1_000, 1_000 + 100 * day));
+    }
+
+    #[tokio::test]
+    async fn fetch_season_pages_through_and_caches() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let mock = Arc::new(MockTracker::default());
+        *mock.season_media.lock().unwrap() = (1..=5)
+            .map(|id| test_entry(id, &format!("Show {}", id)))
+            .collect();
+        let (svc, _events) = service(db.clone(), mock.clone());
+
+        let first = svc.fetch_season("summer", 2025, false).await.unwrap();
+        assert!(!first.from_cache);
+        assert_eq!(first.season, "SUMMER");
+        assert_eq!(first.items.len(), 5);
+        assert_eq!(first.items[0].popularity, Some(999));
+        assert_eq!(mock.season_calls.lock().unwrap().len(), 3);
+        // Browsing never creates list entries
+        assert!(db.list_anime_entries().unwrap().is_empty());
+
+        // Second call is served from the cache without touching the tracker (past season → never stale)
+        let cached = svc.fetch_season("SUMMER", 2025, false).await.unwrap();
+        assert!(cached.from_cache);
+        assert!(!cached.stale);
+        assert_eq!(cached.items.len(), 5);
+        assert_eq!(cached.items[2].entry.title_romaji, "Show 3");
+        assert_eq!(mock.season_calls.lock().unwrap().len(), 3);
+
+        // Forced refresh refetches and replaces the snapshot
+        mock.season_media.lock().unwrap().truncate(1);
+        let refreshed = svc.fetch_season("SUMMER", 2025, true).await.unwrap();
+        assert!(!refreshed.from_cache);
+        assert_eq!(refreshed.items.len(), 1);
+        assert_eq!(db.get_season_cache("SUMMER", 2025).unwrap().unwrap().1.len(), 1);
+        assert_eq!(
+            db.list_cached_seasons().unwrap(),
+            vec![crate::db::CachedSeason {
+                season: "SUMMER".into(),
+                year: 2025,
+                fetched_at: refreshed.fetched_at,
+            }]
+        );
+
+        assert!(svc.fetch_season("AUTUMN", 2025, false).await.is_err());
     }
 
     #[tokio::test]

@@ -1,7 +1,8 @@
 use crate::db::AnimeEntry;
 use crate::plugins::{
-    BoxFuture, RemoteEntryState, RemoteListSnapshot, TrackerEntryUpdate, TrackerError,
-    TrackerPlugin, TrackerPluginDescriptor, TrackerUserProfile, MEDIA_DETAILS_CHUNK,
+    BoxFuture, RemoteEntryState, RemoteListSnapshot, SeasonPage, SeasonalAnime,
+    TrackerEntryUpdate, TrackerError, TrackerPlugin, TrackerPluginDescriptor, TrackerUserProfile,
+    MEDIA_DETAILS_CHUNK,
 };
 use reqwest::Client;
 use serde_json::{json, Value};
@@ -492,6 +493,32 @@ const MEDIA_FRAGMENT: &str = r#"
     }
 "#;
 
+/// Per-season page size (AniList `Page.perPage` maximum).
+const SEASON_PAGE_SIZE: usize = 50;
+
+/// Extra fields the Seasons view sorts by, appended to `MEDIA_FRAGMENT`.
+const SEASON_EXTRA_FIELDS: &str = r#"
+    popularity
+    startDate {
+        year
+        month
+        day
+    }
+"#;
+
+/// AniList fuzzy date → `YYYY`, `YYYY-MM` or `YYYY-MM-DD` (only the known parts).
+fn parse_start_date(obj: Option<&Value>) -> Option<String> {
+    let d = obj?;
+    let y = d.get("year").and_then(|v| v.as_i64()).filter(|&y| y > 0)?;
+    let Some(m) = d.get("month").and_then(|v| v.as_i64()).filter(|m| (1..=12).contains(m)) else {
+        return Some(format!("{:04}", y));
+    };
+    match d.get("day").and_then(|v| v.as_i64()).filter(|d| (1..=31).contains(d)) {
+        Some(day) => Some(format!("{:04}-{:02}-{:02}", y, m, day)),
+        None => Some(format!("{:04}-{:02}", y, m)),
+    }
+}
+
 /// Light media fields for the list fetch: only what a sync compares / what can change between syncs.
 /// Heavy metadata (`MEDIA_FRAGMENT`) is fetched separately for newly added entries only.
 const MEDIA_LIST_FRAGMENT: &str = r#"
@@ -832,6 +859,72 @@ impl TrackerPlugin for AniListPlugin {
         })
     }
 
+    fn fetch_season_page<'a>(
+        &'a self,
+        season: &'a str,
+        year: u32,
+        page: u32,
+    ) -> BoxFuture<'a, Result<SeasonPage, TrackerError>> {
+        Box::pin(async move {
+            let gql = format!(
+                r#"
+                query ($season: MediaSeason, $seasonYear: Int, $page: Int) {{
+                    Page(page: $page, perPage: {SEASON_PAGE_SIZE}) {{
+                        pageInfo {{
+                            hasNextPage
+                        }}
+                        media(
+                            type: ANIME,
+                            season: $season,
+                            seasonYear: $seasonYear,
+                            sort: [POPULARITY_DESC],
+                            isAdult: false
+                        ) {{
+                            {MEDIA_FRAGMENT}
+                            {SEASON_EXTRA_FIELDS}
+                        }}
+                    }}
+                }}
+                "#
+            );
+            let vars = json!({
+                "season": season.to_uppercase(),
+                "seasonYear": year,
+                "page": page.max(1),
+            });
+            let data = self.graphql_request(&gql, vars, None).await?;
+            let page_obj = data.get("Page");
+            let has_next_page = page_obj
+                .and_then(|p| p.get("pageInfo"))
+                .and_then(|p| p.get("hasNextPage"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let items = page_obj
+                .and_then(|p| p.get("media"))
+                .and_then(|m| m.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|m| {
+                            let entry = Self::parse_media_node(m, None)?;
+                            Some(SeasonalAnime {
+                                entry,
+                                popularity: m
+                                    .get("popularity")
+                                    .and_then(|v| v.as_u64())
+                                    .map(|n| n as u32),
+                                start_date: parse_start_date(m.get("startDate")),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok(SeasonPage {
+                items,
+                has_next_page,
+            })
+        })
+    }
+
     fn save_list_entry<'a>(
         &'a self,
         token: &'a str,
@@ -1042,6 +1135,19 @@ mod tests {
         // Heavy metadata is absent in the light fetch (the merge never writes these for existing rows)
         assert!(e.synopsis.is_empty() && e.genres.is_empty() && e.studios.is_empty());
         assert_eq!((e.mal_id, e.banner_image, e.trailer_url), (None, None, None));
+    }
+
+    #[test]
+    fn start_dates_keep_only_known_parts() {
+        let full = json!({ "year": 2026, "month": 10, "day": 3 });
+        let month = json!({ "year": 2026, "month": 10, "day": null });
+        let year = json!({ "year": 2027, "month": null, "day": null });
+        let none = json!({ "year": null, "month": null, "day": null });
+        assert_eq!(parse_start_date(Some(&full)).as_deref(), Some("2026-10-03"));
+        assert_eq!(parse_start_date(Some(&month)).as_deref(), Some("2026-10"));
+        assert_eq!(parse_start_date(Some(&year)).as_deref(), Some("2027"));
+        assert_eq!(parse_start_date(Some(&none)), None);
+        assert_eq!(parse_start_date(None), None);
     }
 
     #[test]

@@ -369,7 +369,7 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
           No anime in this list view
         </p>
         <p className="text-xs text-text-muted">
-          Use the Discover tab to add shows or sync your AniList account in Settings.
+          Use the Seasons or Search tab to add shows or sync your AniList account in Settings.
         </p>
       </div>
     );

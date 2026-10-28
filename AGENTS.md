@@ -58,6 +58,7 @@ Tora/
 │   ├── App.tsx                           # Main shell, sidebar navigation, live playback scrobble polling & optimistic stepping
 │   ├── api.ts                            # Typed Tauri invoke wrappers (`toraApi`), theme presets & image downscaling helpers
 │   ├── types.ts                          # Shared TypeScript interfaces mirroring Rust database and detection models
+│   ├── seasons.ts                        # Season helpers (current season, shift, labels; broadcast quarters)
 │   ├── main.tsx                          # React 19 entrypoint & root provider
 │   ├── styles/
 │   │   └── index.css                     # Tailwind CSS v4 stylesheets, custom theme variables & scrollbars
@@ -66,7 +67,9 @@ Tora/
 │       ├── AnimeDetailModal.tsx          # Slide-over drawer for editing progress, score, notes, custom folder & synonyms
 │       ├── AnimeQuickMenu.tsx            # Context menu for anime cards (+1 episode, mark status, open folder, copy title)
 │       ├── CommandPalette.tsx            # Ctrl+K fuzzy command palette & global search
-│       ├── DiscoverAndScheduleView.tsx   # Remote AniList seasonal anime browser & weekly airing schedule countdowns
+│       ├── AnimePosterCard.tsx           # Poster card for remote anime (Seasons / Search): opens drawer, quick-add
+│       ├── SeasonsView.tsx               # Cached seasonal browser (chips, ‹ ›, picker, sort/group/format filters, virtualized grid) & airing countdown
+│       ├── SearchView.tsx                # Global AniList search (Enter in the Seasons filter lands here)
 │       ├── LibraryManagerView.tsx        # Multi-drive folder manager, disk usage & virtualized episode table (Settings → Library)
 │       ├── RecognitionView.tsx           # Live player detection, unmatched episode linking prompt & watch history log
 │       ├── SettingsView.tsx              # Sectioned settings: Appearance, Tracker, Library, Playback & Detection (Anisthesia players), Torrents, Diagnostics
@@ -185,3 +188,4 @@ When a filename or media player window title is parsed (`parse_filename` in `src
 - **Pull**: serialized by `op_lock`; flushes tombstones and pending pushes first, then fetches the viewer's list with the light `MEDIA_LIST_FRAGMENT` and calls `Database::merge_remote_list` (newest `updated_at` wins per entry, pending entries keep local state, `custom_folder` preserved, remote-missing entries deleted locally unless pending — skipped on viewer mismatch or empty remote list). Emits `tracker-sync-started` / `tracker-list-synced` (`SyncSummary` delta: `changed` + `removed_ids`) / `tracker-sync-failed`. No background polling. Each pull logs one `[sync] pull(...)` timing line.
 - **Pulls must stay diff-only and must never rematch the library**: `merge_remote_list` writes nothing for unchanged entries, uses targeted UPDATEs for changed ones, rewrites `normalized_titles_json` only when titles/synonyms change, and only touches `local_episodes.watched` for entries whose progress changed. Heavy metadata (`fetch_media_details`) is fetched only for new entries. Episode matching after a pull is limited to `rematch_ids` (new or retitled entries) via `match_unmatched_episodes_for_ids` in a background task that emits `library-changed`. **Never** call `rematch_all_local_episodes()` from a pull.
 - **Invariants**: every `anime_entries` row has an `anilist_id`; there is no seed data. A signed-in AniList OAuth token is required for any push/pull.
+- **Seasons** (`TrackerSyncService::fetch_season`): public data, no token. All pages of `Page.media(season, seasonYear)` (50/page, `hasNextPage`) go through the shared rate limiter and are stored as one JSON snapshot per season in `seasonal_cache`. Browsing never writes `anime_entries`; list status in the Seasons view comes from the local list by id. Cached past seasons are only refetched on demand; current/upcoming ones are flagged `stale` after 24h and refreshed in the background by the frontend.

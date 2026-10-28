@@ -20,6 +20,7 @@ import {
   ExternalLink,
   User,
   RefreshCw,
+  CalendarDays,
 } from "lucide-react";
 import {
   AnimeEntry,
@@ -41,14 +42,16 @@ import { AnimeDetailModal } from "./components/AnimeDetailModal";
 import { VirtualWatchlist } from "./components/VirtualWatchlist";
 import { TorrentsView } from "./components/TorrentsView";
 import { RecognitionView } from "./components/RecognitionView";
-import { DiscoverAndScheduleView } from "./components/DiscoverAndScheduleView";
+import { SeasonsView } from "./components/SeasonsView";
+import { SearchView } from "./components/SearchView";
 import { SettingsView } from "./components/SettingsView";
 import { CommandPalette } from "./components/CommandPalette";
 
 type NavTab =
   | "watchlist"
   | "torrents"
-  | "discover"
+  | "seasons"
+  | "search"
   | "recognition"
   | "settings";
 
@@ -106,6 +109,8 @@ export const App: React.FC = () => {
   const [selectedAnimeIds, setSelectedAnimeIds] = useState<number[]>([]);
   const [quickMenuAnimeId, setQuickMenuAnimeId] = useState<number | null>(null);
   const [torrentSearchQuery, setTorrentSearchQuery] = useState("");
+  // Query handed to the Search tab (e.g. Enter in the Seasons filter)
+  const [globalSearchQuery, setGlobalSearchQuery] = useState("");
   const [activeSession, setActiveSession] =
     useState<DetectedMediaSession | null>(null);
   const [cmdOpen, setCmdOpen] = useState(false);
@@ -768,6 +773,39 @@ export const App: React.FC = () => {
     }
   };
 
+  // Open the drawer; anime already in the list open with their local entry (user state included)
+  const openAnime = (anime: AnimeEntry) => {
+    setSelectedAnime(animeList.find((a) => a.id === anime.id) ?? anime);
+  };
+
+  // Add a remote (Seasons / Search) anime to the list with an instant optimistic update
+  const handleAddRemoteAnime = async (
+    entry: AnimeEntry,
+    status: "CURRENT" | "PLANNING"
+  ) => {
+    const optimisticEntry: AnimeEntry = {
+      ...entry,
+      user_status: status,
+      updated_at: Math.floor(Date.now() / 1000),
+    };
+    await refreshAnimeList([
+      ...animeList.filter((a) => a.id !== entry.id),
+      optimisticEntry,
+    ]);
+    showToast(
+      `Added "${entry.title_romaji}" to ${status === "CURRENT" ? "Watching" : "Planning"}`,
+      "success"
+    );
+
+    try {
+      const updated = await toraApi.addOrUpsertAnime(optimisticEntry);
+      await refreshAnimeList(updated);
+    } catch (err: any) {
+      setAnimeList((prev) => prev.filter((a) => a.id !== entry.id));
+      showToast(String(err), "error");
+    }
+  };
+
   const handleBatchUpdate = async (
     patch: BatchAnimeUpdatePatch,
     summaryToast: string
@@ -895,15 +933,28 @@ export const App: React.FC = () => {
             </button>
 
             <button
-              onClick={() => setActiveTab("discover")}
-              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${activeTab === "discover"
+              onClick={() => setActiveTab("seasons")}
+              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${activeTab === "seasons"
+                ? "bg-accent text-white shadow-sm"
+                : "text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
+                }`}
+            >
+              <span className="flex items-center gap-2.5">
+                <CalendarDays className="w-4 h-4" />
+                Seasons
+              </span>
+            </button>
+
+            <button
+              onClick={() => setActiveTab("search")}
+              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${activeTab === "search"
                 ? "bg-accent text-white shadow-sm"
                 : "text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
                 }`}
             >
               <span className="flex items-center gap-2.5">
                 <Compass className="w-4 h-4" />
-                Seasonal & Airing
+                Search
               </span>
             </button>
 
@@ -1061,7 +1112,8 @@ export const App: React.FC = () => {
         {/* Active View Content */}
         <main
           ref={mainScrollRef}
-          className="flex-1 overflow-y-auto"
+          // Reserve the scrollbar's space so content doesn't shift sideways when it appears/disappears
+          className="flex-1 overflow-y-auto [scrollbar-gutter:stable]"
           onClick={() => {
             if (selectedAnimeIds.length > 0) {
               setSelectedAnimeIds([]);
@@ -1246,11 +1298,27 @@ export const App: React.FC = () => {
             />
           )}
 
-          {activeTab === "discover" && (
-            <DiscoverAndScheduleView
+          {activeTab === "seasons" && (
+            <SeasonsView
               animeList={animeList}
-              onRefreshAnimeList={refreshAnimeList}
-              onSelectAnime={(a) => setSelectedAnime(a)}
+              scrollContainerRef={mainScrollRef}
+              keyboardEnabled={!selectedAnime && !cmdOpen && !signOutModalOpen}
+              onOpenAnime={openAnime}
+              onAddAnime={handleAddRemoteAnime}
+              onGlobalSearch={(q) => {
+                setGlobalSearchQuery(q);
+                setActiveTab("search");
+              }}
+              showToast={showToast}
+            />
+          )}
+
+          {activeTab === "search" && (
+            <SearchView
+              animeList={animeList}
+              initialQuery={globalSearchQuery}
+              onOpenAnime={openAnime}
+              onAddAnime={handleAddRemoteAnime}
               showToast={showToast}
             />
           )}
@@ -1284,6 +1352,8 @@ export const App: React.FC = () => {
       {selectedAnime && (
         <AnimeDetailModal
           anime={selectedAnime}
+          inList={animeList.some((a) => a.id === selectedAnime.id)}
+          onAddToList={(status) => handleAddRemoteAnime(selectedAnime, status)}
           onClose={() => setSelectedAnime(null)}
           onUpdated={(updated) => {
             setAnimeList((prev) =>

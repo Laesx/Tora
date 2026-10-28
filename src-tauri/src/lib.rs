@@ -6,15 +6,16 @@ pub mod sync;
 pub mod torrents;
 
 use crate::db::{
-    AnimeEntry, AppSettings, BatchAnimeUpdatePatch, Database, LibraryFolder, LocalEpisodeFile, TorrentRule,
-    WatchHistoryEntry,
+    AnimeEntry, AppSettings, BatchAnimeUpdatePatch, CachedSeason, Database, LibraryFolder,
+    LocalEpisodeFile, TorrentRule, WatchHistoryEntry,
 };
 use crate::detection::anisthesia::{detect_active_media_player, DetectedMediaSession};
 use crate::detection::anitomy::{parse_filename, AnitomyElements};
 use crate::library::scanner::{DriveStorageSummary, LibraryMonitorHandle, ScanSummary};
 use crate::plugins::{PluginManager, TrackerPluginDescriptor, TrackerUserProfile};
 use crate::sync::{
-    ChangeSource, SyncEmitter, SyncStatus, SyncSummary, TrackerSyncService, UserStateChange,
+    ChangeSource, SeasonResult, SyncEmitter, SyncStatus, SyncSummary, TrackerSyncService,
+    UserStateChange,
 };
 use crate::torrents::{
     search_torrents, send_to_qbittorrent, test_qbittorrent_connection, TorrentItem,
@@ -174,7 +175,10 @@ async fn search_remote_anime(
     season: Option<String>,
     year: Option<u32>,
 ) -> Result<Vec<AnimeEntry>, String> {
-    let settings = state.db.get_settings()?;
+    let db = state.db.clone();
+    let settings = tokio::task::spawn_blocking(move || db.get_settings())
+        .await
+        .map_err(|e| e.to_string())??;
     let plugin = state
         .plugins
         .get(&settings.active_tracker_plugin)
@@ -182,6 +186,24 @@ async fn search_remote_anime(
     plugin
         .search_anime(&query, season.as_deref(), year)
         .await
+}
+
+#[tauri::command]
+async fn get_season(
+    state: State<'_, AppState>,
+    season: String,
+    year: u32,
+    force_refresh: bool,
+) -> Result<SeasonResult, String> {
+    state.sync.fetch_season(&season, year, force_refresh).await
+}
+
+#[tauri::command]
+async fn list_cached_seasons(state: State<'_, AppState>) -> Result<Vec<CachedSeason>, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || db.list_cached_seasons())
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1289,6 +1311,8 @@ pub fn run() {
             sync_tracker_list,
             get_sync_status,
             search_remote_anime,
+            get_season,
+            list_cached_seasons,
             get_library_folders,
             add_library_folder,
             remove_library_folder,

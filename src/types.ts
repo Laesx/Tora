@@ -64,6 +64,29 @@ export interface AnimeEntry {
   available_episodes: number[];
 }
 
+/** One anime of a seasonal listing (browse/cache data only, never a list entry by itself). */
+export type SeasonalAnime = AnimeEntry & {
+  popularity: number | null;
+  /** `YYYY`, `YYYY-MM` or `YYYY-MM-DD` */
+  start_date: string | null;
+};
+
+export interface SeasonResult {
+  season: string;
+  year: number;
+  fetched_at: number;
+  items: SeasonalAnime[];
+  from_cache: boolean;
+  /** Served from cache but due for a background refresh */
+  stale: boolean;
+}
+
+export interface CachedSeason {
+  season: string;
+  year: number;
+  fetched_at: number;
+}
+
 export interface BatchAnimeUpdatePatch {
   anime_ids: number[];
   user_status?: string | null;

@@ -21,6 +21,9 @@ import { formatBytes, formatCountdown, getOptimizedCoverUrl, toraApi } from "../
 
 interface AnimeDetailModalProps {
   anime: AnimeEntry;
+  /** false for anime opened from Seasons/Search that aren't in the user's list: tracking controls are hidden */
+  inList: boolean;
+  onAddToList: (status: "CURRENT" | "PLANNING") => Promise<void>;
   onClose: () => void;
   onUpdated: (updated: AnimeEntry) => void;
   onDeleted: (animeId: number) => void;
@@ -30,6 +33,8 @@ interface AnimeDetailModalProps {
 
 export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
   anime,
+  inList,
+  onAddToList,
   onClose,
   onUpdated,
   onDeleted,
@@ -47,6 +52,7 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
   const [synonymsInput, setSynonymsInput] = useState(anime.synonyms.join(", "));
   const [localFiles, setLocalFiles] = useState<LocalEpisodeFile[]>([]);
   const [saving, setSaving] = useState(false);
+  const [adding, setAdding] = useState(false);
   const stepSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -82,10 +88,23 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
     setSynonymsInput(anime.synonyms.join(", "));
   }, [anime.id]);
 
-  // Reload local files when anime ID or matched episode count changes
+  // Reload local files when anime ID or matched episode count changes (only list entries have local files)
   useEffect(() => {
-    loadLocalFiles(anime.id);
-  }, [anime.id, anime.local_episode_count]);
+    if (inList) {
+      loadLocalFiles(anime.id);
+    } else {
+      setLocalFiles([]);
+    }
+  }, [anime.id, anime.local_episode_count, inList]);
+
+  const handleAddToList = async (nextStatus: "CURRENT" | "PLANNING") => {
+    setAdding(true);
+    try {
+      await onAddToList(nextStatus);
+    } finally {
+      setAdding(false);
+    }
+  };
 
   const loadLocalFiles = async (animeId: number) => {
     try {
@@ -288,25 +307,34 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
           {/* Quick Action Bar */}
           <div className="flex flex-wrap items-center gap-2.5 bg-bg-tertiary/70 p-3 rounded-xl border border-border-subtle">
-            <button
-              onClick={handlePlayNextUnwatched}
-              className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-accent hover:bg-accent-hover text-white text-xs font-semibold transition shadow-sm"
-            >
-              <Play className="w-3.5 h-3.5 fill-current" />
-              Play Next (Ep {progress + 1})
-            </button>
+            {inList ? (
+              <>
+                <button
+                  onClick={handlePlayNextUnwatched}
+                  className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-accent hover:bg-accent-hover text-white text-xs font-semibold transition shadow-sm"
+                >
+                  <Play className="w-3.5 h-3.5 fill-current" />
+                  Play Next (Ep {progress + 1})
+                </button>
 
-            <button
-              onClick={() =>
-                onSearchTorrents(
-                  `${anime.title_romaji} ${String(progress + 1).padStart(2, "0")}`
-                )
-              }
-              className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-bg-elevated hover:bg-bg-primary text-text-primary text-xs font-medium border border-border-subtle transition"
-            >
-              <Search className="w-3.5 h-3.5 text-accent" />
-              Find Ep {progress + 1} Torrent
-            </button>
+                <button
+                  onClick={() =>
+                    onSearchTorrents(
+                      `${anime.title_romaji} ${String(progress + 1).padStart(2, "0")}`
+                    )
+                  }
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-bg-elevated hover:bg-bg-primary text-text-primary text-xs font-medium border border-border-subtle transition"
+                >
+                  <Search className="w-3.5 h-3.5 text-accent" />
+                  Find Ep {progress + 1} Torrent
+                </button>
+              </>
+            ) : (
+              <span className="text-xs text-text-muted">
+                {anime.episodes ? `${anime.episodes} episodes` : "Episode count unknown"}
+                {anime.studios.length > 0 ? ` • ${anime.studios.join(", ")}` : ""}
+              </span>
+            )}
 
             {anime.site_url && (
               <a
@@ -321,6 +349,39 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
             )}
           </div>
 
+          {!inList && (
+            <div className="flex flex-wrap items-center justify-between gap-3 bg-bg-tertiary/40 p-4 rounded-xl border border-border-subtle">
+              <div>
+                <div className="text-xs font-semibold text-text-primary">
+                  Not in your list
+                </div>
+                <div className="text-[11px] text-text-muted mt-0.5">
+                  Add it to track progress, score and dates.
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => handleAddToList("PLANNING")}
+                  disabled={adding}
+                  className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-bg-elevated hover:bg-bg-primary text-text-primary text-xs font-medium border border-border-subtle transition disabled:opacity-60"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  Add to Planning
+                </button>
+                <button
+                  onClick={() => handleAddToList("CURRENT")}
+                  disabled={adding}
+                  className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-accent hover:bg-accent-hover text-white text-xs font-semibold transition shadow-sm disabled:opacity-60"
+                >
+                  <Play className="w-3.5 h-3.5 fill-current" />
+                  Add to Watching
+                </button>
+              </div>
+            </div>
+          )}
+
+          {inList && (
+          <>
           {/* Tracker & Watchlist Controls */}
           <div className="grid grid-cols-1 md:grid-cols-4 gap-3 bg-bg-tertiary/40 p-4 rounded-xl border border-border-subtle">
             <div>
@@ -581,6 +642,8 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
               </div>
             </div>
           )}
+          </>
+          )}
 
           {/* Synopsis & Metadata */}
           <div className="space-y-3">
@@ -624,6 +687,7 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
           </div>
 
           {/* Notes, Custom Folder & Recognition Aliases */}
+          {inList && (
           <div className="space-y-3 bg-bg-tertiary/30 p-4 rounded-xl border border-border-subtle">
             <h3 className="text-xs font-semibold uppercase tracking-wider text-text-secondary flex items-center gap-1.5">
               <Tag className="w-3.5 h-3.5 text-accent" />
@@ -693,6 +757,7 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
               </button>
             </div>
           </div>
+          )}
         </div>
       </div>
     </div>

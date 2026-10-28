@@ -3,12 +3,14 @@ import {
   AnimeEntry,
   AppSettings,
   BatchAnimeUpdatePatch,
+  CachedSeason,
   DetectedMediaSession,
   DriveStorageSummary,
   FilenameTestResult,
   LibraryFolder,
   LocalEpisodeFile,
   ScanSummary,
+  SeasonResult,
   SyncStatus,
   SyncSummary,
   ThemePreset,
@@ -212,6 +214,16 @@ export const toraApi = {
     season?: string | null;
     year?: number | null;
   }) => invoke<AnimeEntry[]>("search_remote_anime", params),
+
+  // Every anime of a season; cached in SQLite, refetched only when forced (or stale, by the caller)
+  getSeason: (params: { season: string; year: number; forceRefresh?: boolean }) =>
+    invoke<SeasonResult>("get_season", {
+      season: params.season,
+      year: params.year,
+      forceRefresh: params.forceRefresh ?? false,
+    }),
+
+  listCachedSeasons: () => invoke<CachedSeason[]>("list_cached_seasons"),
 
   getLibraryFolders: () => invoke<LibraryFolder[]>("get_library_folders"),
 

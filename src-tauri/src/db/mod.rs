@@ -1,6 +1,7 @@
 use crate::detection::anisthesia::{default_players, PlayerDefinition};
 use crate::detection::anitomy::{extract_effective_season, normalize_anime_title, AnitomyElements};
 use crate::detection::relations::relations_db;
+use crate::plugins::SeasonalAnime;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use once_cell::sync::Lazy;
@@ -120,6 +121,14 @@ pub struct PendingDeletion {
     pub media_id: i64,
     pub list_entry_id: Option<i64>,
     pub title: String,
+}
+
+/// A season stored in `seasonal_cache` (without its payload).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CachedSeason {
+    pub season: String,
+    pub year: u32,
+    pub fetched_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1500,6 +1509,14 @@ impl Database {
                 list_entry_id INTEGER,
                 title TEXT NOT NULL DEFAULT '',
                 created_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS seasonal_cache (
+                season TEXT NOT NULL,
+                year INTEGER NOT NULL,
+                fetched_at INTEGER NOT NULL,
+                payload_json TEXT NOT NULL,
+                PRIMARY KEY (season, year)
             );",
         )
         .map_err(|e| e.to_string())?;
@@ -2160,6 +2177,67 @@ impl Database {
         })
         .map(|n| n as usize)
         .map_err(|e| e.to_string())
+    }
+
+    /// Cached snapshot of one season: `(fetched_at, items)`. A corrupt payload counts as a miss.
+    pub fn get_season_cache(
+        &self,
+        season: &str,
+        year: u32,
+    ) -> Result<Option<(i64, Vec<SeasonalAnime>)>, String> {
+        let conn = self.reader()?;
+        let row: Option<(i64, String)> = conn
+            .query_row(
+                "SELECT fetched_at, payload_json FROM seasonal_cache WHERE season = ?1 AND year = ?2",
+                params![season, year],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        Ok(row.and_then(|(fetched_at, json)| {
+            serde_json::from_str::<Vec<SeasonalAnime>>(&json)
+                .ok()
+                .map(|items| (fetched_at, items))
+        }))
+    }
+
+    pub fn put_season_cache(
+        &self,
+        season: &str,
+        year: u32,
+        fetched_at: i64,
+        items: &[SeasonalAnime],
+    ) -> Result<(), String> {
+        let json = serde_json::to_string(items).map_err(|e| e.to_string())?;
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO seasonal_cache (season, year, fetched_at, payload_json) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(season, year) DO UPDATE SET fetched_at = excluded.fetched_at, payload_json = excluded.payload_json",
+            params![season, year, fetched_at, json],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn list_cached_seasons(&self) -> Result<Vec<CachedSeason>, String> {
+        let conn = self.reader()?;
+        let mut stmt = conn
+            .prepare("SELECT season, year, fetched_at FROM seasonal_cache ORDER BY year DESC, season")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(CachedSeason {
+                    season: r.get(0)?,
+                    year: r.get(1)?,
+                    fetched_at: r.get(2)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
     }
 
     /// Set the sync bookkeeping of an entry. `updated_at` / `list_entry_id` are only written when `Some`.
