@@ -70,6 +70,7 @@ import { ScheduleView } from "./components/ScheduleView";
 import { SearchView } from "./components/SearchView";
 import { SettingsView } from "./components/SettingsView";
 import { CommandPalette, PaletteCommand } from "./components/CommandPalette";
+import { CLOSE_MENUS_EVENT } from "./components/FloatingQuickMenu";
 import { CustomListsChip } from "./components/CustomListsChip";
 import {
   applyCustomListChangeLocally,
@@ -171,6 +172,12 @@ export const App: React.FC = () => {
   const [activeSession, setActiveSession] =
     useState<DetectedMediaSession | null>(null);
   const [cmdOpen, setCmdOpen] = useState(false);
+  // Opening the palette closes any right-click menu (they render above it)
+  useEffect(() => {
+    if (!cmdOpen) return;
+    setQuickMenuAnimeId(null);
+    window.dispatchEvent(new Event(CLOSE_MENUS_EVENT));
+  }, [cmdOpen]);
   const [signOutModalOpen, setSignOutModalOpen] = useState(false);
   const [isAuthorizingAnilist, setIsAuthorizingAnilist] = useState(false);
   const [libraryRefreshTick, setLibraryRefreshTick] = useState(0);

@@ -1,6 +1,9 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
+/** Window event that closes every open right-click menu (e.g. when the command palette opens). */
+export const CLOSE_MENUS_EVENT = "tora:close-menus";
+
 /** Portal that keeps a context menu inside the viewport and closes it on outside click / Escape / scroll. */
 export const FloatingQuickMenu: React.FC<{
   anchor: { x: number; y: number };
@@ -41,11 +44,13 @@ export const FloatingQuickMenu: React.FC<{
     window.addEventListener("keydown", onKey);
     document.addEventListener("scroll", onScroll, true);
     window.addEventListener("resize", onClose);
+    window.addEventListener(CLOSE_MENUS_EVENT, onClose);
     return () => {
       document.removeEventListener("mousedown", onDown);
       window.removeEventListener("keydown", onKey);
       document.removeEventListener("scroll", onScroll, true);
       window.removeEventListener("resize", onClose);
+      window.removeEventListener(CLOSE_MENUS_EVENT, onClose);
     };
   }, [onClose]);
 

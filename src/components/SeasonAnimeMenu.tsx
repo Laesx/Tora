@@ -1,5 +1,6 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { CLOSE_MENUS_EVENT } from "./FloatingQuickMenu";
 import {
   ChevronDown,
   ChevronRight,
@@ -86,11 +87,13 @@ export const SeasonAnimeMenu: React.FC<SeasonAnimeMenuProps> = ({
     window.addEventListener("keydown", onKey, true);
     document.addEventListener("scroll", onScroll, true);
     window.addEventListener("resize", onClose);
+    window.addEventListener(CLOSE_MENUS_EVENT, onClose);
     return () => {
       document.removeEventListener("mousedown", onDown);
       window.removeEventListener("keydown", onKey, true);
       document.removeEventListener("scroll", onScroll, true);
       window.removeEventListener("resize", onClose);
+      window.removeEventListener(CLOSE_MENUS_EVENT, onClose);
     };
   }, [onClose]);
 
