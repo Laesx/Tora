@@ -909,6 +909,26 @@ export const App: React.FC = () => {
           {/* Primary Navigation Links */}
           <nav className="space-y-1">
             <button
+              onClick={() => setActiveTab("nowplaying")}
+              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${activeTab === "nowplaying"
+                ? "bg-accent text-white shadow-sm"
+                : "text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
+                }`}
+            >
+              <span className="flex items-center gap-2.5">
+                <Activity className="w-4 h-4" />
+                Now Playing
+              </span>
+              {activeSession && (
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+              )}
+            </button>
+
+            <div className="py-1.5 px-1">
+              <div className="border-t border-border-subtle" />
+            </div>
+
+            <button
               onClick={() => setActiveTab("watchlist")}
               className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${activeTab === "watchlist"
                 ? "bg-accent text-white shadow-sm"
@@ -974,22 +994,6 @@ export const App: React.FC = () => {
                 <Compass className="w-4 h-4" />
                 Search
               </span>
-            </button>
-
-            <button
-              onClick={() => setActiveTab("nowplaying")}
-              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${activeTab === "nowplaying"
-                ? "bg-accent text-white shadow-sm"
-                : "text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
-                }`}
-            >
-              <span className="flex items-center gap-2.5">
-                <Activity className="w-4 h-4" />
-                Now Playing
-              </span>
-              {activeSession && (
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-              )}
             </button>
 
             <button
