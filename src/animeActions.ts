@@ -24,6 +24,7 @@ import {
   playLocalEpisode,
 } from "./nowPlaying";
 import { STATUS_OPTIONS } from "./components/AnimeQuickMenu";
+import { displayTitle } from "./titles";
 
 type ShowToast = (msg: string, type?: "success" | "info" | "error") => void;
 
@@ -101,14 +102,15 @@ function customListsAction(anime: AnimeEntry, h: AnimeActionHandlers): AnimeActi
 
 export async function copyAnimeTitle(anime: AnimeEntry, showToast: ShowToast) {
   try {
-    await navigator.clipboard.writeText(anime.title_romaji);
-    showToast(`Copied "${anime.title_romaji}"`, "info");
+    const title = displayTitle(anime);
+    await navigator.clipboard.writeText(title);
+    showToast(`Copied "${title}"`, "info");
   } catch {
     showToast("Failed to copy title", "error");
   }
 }
 
-/** Torrent search query for the next episode, e.g. "Sousou no Frieren 05". */
+/** Torrent search query for the next episode, e.g. "Sousou no Frieren 05" (always Romaji, like release names). */
 export const nextEpisodeTorrentQuery = (anime: AnimeEntry) =>
   `${anime.title_romaji} ${String(anime.user_progress + 1).padStart(2, "0")}`;
 
@@ -201,7 +203,7 @@ export function buildAnimeActions(
         run: () =>
           void h.onBatchUpdate(
             { anime_ids: [anime.id], user_status: st.id },
-            `Moved "${anime.title_romaji}" to ${st.label}`
+            `Moved "${displayTitle(anime)}" to ${st.label}`
           ),
       })),
     },

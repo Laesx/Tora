@@ -32,6 +32,7 @@ import { AnimeQuickMenu } from "./AnimeQuickMenu";
 import { FloatingQuickMenu } from "./FloatingQuickMenu";
 import { LIST_STATUS_META } from "./AnimePosterCard";
 import { SeasonAnimeMenu } from "./SeasonAnimeMenu";
+import { useAnimeTitle } from "../titles";
 
 interface ScheduleViewProps {
   animeList: AnimeEntry[];
@@ -686,6 +687,7 @@ const ScheduleCard: React.FC<{
   aired: boolean;
   handlers: CardHandlers;
 }> = ({ item, entry, aired, handlers }) => {
+  const titleOf = useAnimeTitle();
   const anime = entry ?? item.media;
   const status = entry ? LIST_STATUS_META[entry.user_status] : undefined;
   const watched = !!entry && entry.user_progress >= item.episode;
@@ -703,13 +705,13 @@ const ScheduleCard: React.FC<{
         if (e.key === "Enter") handlers.onOpen(item.media);
       }}
       onContextMenu={(e) => handlers.onContextMenu(item.media, e)}
-      title={anime.title_romaji}
+      title={titleOf(anime)}
       className="group w-full flex gap-2.5 p-1.5 -ml-1.5 rounded-xl hover:bg-bg-tertiary text-left transition cursor-pointer focus:outline-none"
     >
       <div className="relative w-12 h-[68px] shrink-0 rounded-lg overflow-hidden bg-bg-tertiary">
         <img
           src={getOptimizedCoverUrl(anime.cover_image, "medium")}
-          alt={anime.title_romaji}
+          alt={titleOf(anime)}
           loading="lazy"
           decoding="async"
           className="w-full h-full object-cover"
@@ -729,7 +731,7 @@ const ScheduleCard: React.FC<{
       </div>
       <div className="min-w-0 flex-1">
         <div className="text-xs font-bold text-text-primary leading-snug line-clamp-2 group-hover:text-accent transition">
-          {anime.title_romaji}
+          {titleOf(anime)}
         </div>
         <div className="text-[10px] text-text-muted mt-0.5">
           EP {item.episode}
@@ -761,6 +763,7 @@ const ScheduleCard: React.FC<{
 };
 
 const BreakCard: React.FC<{ brk: InferredBreak; handlers: CardHandlers }> = ({ brk, handlers }) => {
+  const titleOf = useAnimeTitle();
   const next = new Date(brk.nextAt * 1000);
   const nextLabel = next.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
   return (
@@ -772,12 +775,12 @@ const BreakCard: React.FC<{ brk: InferredBreak; handlers: CardHandlers }> = ({ b
         if (e.key === "Enter") handlers.onOpen(brk.entry);
       }}
       onContextMenu={(e) => handlers.onContextMenu(brk.entry, e)}
-      title={brk.entry.title_romaji}
+      title={titleOf(brk.entry)}
       className="w-full flex gap-2.5 p-2.5 rounded-xl bg-amber-500/5 border border-amber-500/25 hover:border-amber-500/50 text-left transition cursor-pointer focus:outline-none"
     >
       <CircleAlert className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
       <div className="min-w-0 flex-1">
-        <div className="text-xs font-bold text-text-primary leading-snug line-clamp-2">{brk.entry.title_romaji}</div>
+        <div className="text-xs font-bold text-text-primary leading-snug line-clamp-2">{titleOf(brk.entry)}</div>
         <div className="text-[10px] text-text-secondary mt-0.5">No episode this week</div>
         <div className="text-[10px] text-text-muted">
           Next: Ep {brk.nextEpisode}, {nextLabel} {formatSlotTime(brk.nextAt)}

@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   AiringScheduleResult,
   AnimeEntry,
+  AppInfo,
   AppSettings,
   BatchAnimeUpdatePatch,
   CachedSeason,
@@ -11,6 +12,7 @@ import {
   DriveStorageSummary,
   FilenameTestResult,
   LibraryFolder,
+  ListStats,
   LocalEpisodeFile,
   ScanSummary,
   SeasonalAnime,
@@ -179,6 +181,7 @@ export const toraApi = {
     userRepeats: number;
     userNotes: string;
     customFolder?: string | null;
+    /** Replaces the user's custom aliases (AniList synonyms are kept) */
     synonyms?: string[] | null;
     userStartedAt?: string | null;
     userCompletedAt?: string | null;
@@ -294,6 +297,10 @@ export const toraApi = {
     invoke<WatchHistoryEntry[]>("get_watch_history", { limit, offset }),
 
   getWatchStats: () => invoke<WatchStats>("get_watch_stats"),
+
+  getStats: () => invoke<ListStats>("get_stats"),
+
+  getAppInfo: () => invoke<AppInfo>("get_app_info"),
 
   /** Stored metadata (tags, studios, rankings…); fetched from AniList only if none is stored yet. */
   getMediaMetadata: (anilistId: number) =>

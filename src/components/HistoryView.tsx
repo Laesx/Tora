@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { History, Search } from "lucide-react";
+import { History, Search, Undo2 } from "lucide-react";
 import { AnimeEntry, MANUAL_HISTORY_PLAYER, WatchHistoryEntry } from "../types";
 import { getOptimizedCoverUrl, toraApi } from "../api";
+import { useAnimeTitle } from "../titles";
 
 interface HistoryViewProps {
   animeList: AnimeEntry[];
@@ -26,8 +27,19 @@ function dayLabel(ts: number): string {
   return d.toLocaleDateString(undefined, { weekday: "long", year: "numeric", month: "long", day: "numeric" });
 }
 
-/** Every logged episode (media player scrobbles and manual progress changes), newest first. */
+/** "3 episodes · 1 correction" for a day group (corrections are not counted as episodes). */
+function dayCountLabel(items: WatchHistoryEntry[]): string {
+  const corrections = items.filter((h) => h.progress_from !== null).length;
+  const episodes = items.length - corrections;
+  const parts = [`${episodes} episode${episodes === 1 ? "" : "s"}`];
+  if (corrections > 0) parts.push(`${corrections} correction${corrections === 1 ? "" : "s"}`);
+  return parts.join(" · ");
+}
+
+/** Every logged episode (media player scrobbles and manual progress changes), newest first.
+ *  Manual progress decreases show as correction rows ("Ep 5 → 3"), which are not watched episodes. */
 export const HistoryView: React.FC<HistoryViewProps> = ({ animeList, refreshKey, onOpenAnime }) => {
+  const titleOf = useAnimeTitle();
   const [rows, setRows] = useState<WatchHistoryEntry[]>([]);
   const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -53,6 +65,15 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ animeList, refreshKey,
 
   const byId = useMemo(() => new Map(animeList.map((a) => [a.id, a])), [animeList]);
 
+  // Live entries show in the chosen title language; rows of removed anime keep the logged title
+  const rowTitle = useCallback(
+    (h: WatchHistoryEntry) => {
+      const anime = h.anime_id !== null ? byId.get(h.anime_id) : undefined;
+      return anime ? titleOf(anime) : h.anime_title;
+    },
+    [byId, titleOf]
+  );
+
   const groups = useMemo(() => {
     const needle = filter.trim().toLowerCase();
     const out: { label: string; items: WatchHistoryEntry[] }[] = [];
@@ -60,14 +81,19 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ animeList, refreshKey,
       const manual = h.player_name === MANUAL_HISTORY_PLAYER;
       if (source === "manual" && !manual) continue;
       if (source === "player" && manual) continue;
-      if (needle && !h.anime_title.toLowerCase().includes(needle)) continue;
+      if (
+        needle &&
+        !h.anime_title.toLowerCase().includes(needle) &&
+        !rowTitle(h).toLowerCase().includes(needle)
+      )
+        continue;
       const label = dayLabel(h.timestamp_unix);
       const last = out[out.length - 1];
       if (last && last.label === label) last.items.push(h);
       else out.push({ label, items: [h] });
     }
     return out;
-  }, [rows, filter, source]);
+  }, [rows, filter, source, rowTitle]);
 
   return (
     <div className="p-6 space-y-5 max-w-5xl mx-auto">
@@ -125,12 +151,13 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ animeList, refreshKey,
               <h2 className="text-xs font-bold text-text-secondary pb-1">
                 {g.label}
                 <span className="ml-2 font-medium text-text-muted">
-                  {g.items.length} episode{g.items.length === 1 ? "" : "s"}
+                  {dayCountLabel(g.items)}
                 </span>
               </h2>
               {g.items.map((h) => {
                 const anime = h.anime_id !== null ? byId.get(h.anime_id) : undefined;
                 const manual = h.player_name === MANUAL_HISTORY_PLAYER;
+                const correction = h.progress_from !== null;
                 return (
                   <button
                     key={h.id}
@@ -141,7 +168,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ animeList, refreshKey,
                     {anime ? (
                       <img
                         src={getOptimizedCoverUrl(anime.cover_image, "medium")}
-                        alt={anime.title_romaji}
+                        alt={titleOf(anime)}
                         loading="lazy"
                         decoding="async"
                         className="w-8 h-11 object-cover rounded-md shrink-0"
@@ -151,10 +178,26 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ animeList, refreshKey,
                     )}
                     <div className="min-w-0 flex-1">
                       <div className="text-xs font-semibold text-text-primary truncate">
-                        {h.anime_title} <span className="text-accent font-mono">Ep {h.episode_number}</span>
+                        {rowTitle(h)}{" "}
+                        {correction ? (
+                          <span className="text-text-muted font-mono">
+                            Ep {h.progress_from} → {h.episode_number}
+                          </span>
+                        ) : (
+                          <span className="text-accent font-mono">Ep {h.episode_number}</span>
+                        )}
                       </div>
-                      <div className="text-[11px] text-text-muted font-mono truncate">
-                        {manual ? "Manual update" : `${h.player_name}${h.file_name ? ` • ${h.file_name}` : ""}`}
+                      <div className="text-[11px] text-text-muted font-mono truncate flex items-center gap-1">
+                        {correction ? (
+                          <>
+                            <Undo2 className="w-3 h-3 shrink-0" />
+                            Progress corrected
+                          </>
+                        ) : manual ? (
+                          "Manual update"
+                        ) : (
+                          `${h.player_name}${h.file_name ? ` • ${h.file_name}` : ""}`
+                        )}
                       </div>
                     </div>
                     <div className="text-right shrink-0">

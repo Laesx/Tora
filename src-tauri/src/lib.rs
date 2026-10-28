@@ -7,7 +7,7 @@ pub mod torrents;
 
 use crate::db::{
     AnimeEntry, AppSettings, BatchAnimeUpdatePatch, CachedSeason, CustomListChange,
-    CustomListsState, Database, LibraryFolder,
+    CustomListsState, Database, LibraryFolder, ListStats,
     LocalEpisodeFile, TorrentRule, WatchHistoryEntry,
 };
 use crate::detection::anisthesia::{detect_active_media_player, DetectedMediaSession};
@@ -828,6 +828,43 @@ async fn get_watch_stats(state: State<'_, AppState>) -> Result<WatchStats, Strin
     .map_err(|e| e.to_string())?
 }
 
+/// List, activity and backlog numbers for the Stats tab (activity covers the last 366 days).
+#[tauri::command]
+async fn get_stats(state: State<'_, AppState>) -> Result<ListStats, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let since = chrono::Utc::now().timestamp() - 366 * 24 * 60 * 60;
+        db.list_stats(since)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AppInfo {
+    data_dir: String,
+    db_path: String,
+    /// Database file plus its WAL.
+    db_size_bytes: u64,
+}
+
+/// Where Tora keeps its data (Settings → About).
+#[tauri::command]
+async fn get_app_info(app: tauri::AppHandle) -> Result<AppInfo, String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    tokio::task::spawn_blocking(move || {
+        let db_path = data_dir.join("tora_library.db");
+        let size = |p: std::path::PathBuf| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+        Ok(AppInfo {
+            data_dir: data_dir.to_string_lossy().into_owned(),
+            db_path: db_path.to_string_lossy().into_owned(),
+            db_size_bytes: size(db_path.clone()) + size(data_dir.join("tora_library.db-wal")),
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Tags, studios, rankings etc. of one media. Served from `media_metadata`; fetched once if missing.
 #[tauri::command]
 async fn get_media_metadata(
@@ -1388,6 +1425,8 @@ pub fn run() {
             link_detected_episode_to_anime,
             get_watch_history,
             get_watch_stats,
+            get_stats,
+            get_app_info,
             get_media_metadata,
             search_torrents_cmd,
             get_torrent_rules,

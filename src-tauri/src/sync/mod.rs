@@ -443,7 +443,7 @@ pub fn write_batch_change(
         };
         let change = UserStateChange::from_batch_patch(patch, id);
         let st = normalize_change(&current, &change, today)?;
-        if st.user_progress > current.user_progress {
+        if st.user_progress != current.user_progress {
             progressed.push((id, current.title_romaji.clone(), current.user_progress, st.user_progress));
         }
         states.push((id, st));
@@ -2937,9 +2937,14 @@ mod tests {
         assert_eq!(eps, vec![4, 5]);
         assert!(hist.iter().all(|h| h.player_name == crate::db::MANUAL_HISTORY_PLAYER));
 
-        // A decrease logs nothing
+        assert!(hist.iter().all(|h| h.progress_from.is_none()));
+
+        // A decrease logs one correction row (5 → 2)
         write_local_change(&db, &UserStateChange { anime_id: 1, ..step(2) }, TODAY, false).unwrap();
-        assert_eq!(db.list_watch_history(10, 0).unwrap().len(), 2);
+        let hist = db.list_watch_history(10, 0).unwrap();
+        assert_eq!(hist.len(), 3);
+        let correction = hist.iter().find(|h| h.progress_from.is_some()).unwrap();
+        assert_eq!((correction.progress_from, correction.episode_number), (Some(5), 2));
 
         // Scrobbles record their own row; the change itself is not logged again
         let scrobble = UserStateChange {
@@ -2949,7 +2954,7 @@ mod tests {
             ..Default::default()
         };
         write_local_change(&db, &scrobble, TODAY, false).unwrap();
-        assert_eq!(db.list_watch_history(10, 0).unwrap().len(), 2);
+        assert_eq!(db.list_watch_history(10, 0).unwrap().len(), 3);
 
         // Batch +2 logs per entry
         let patch = BatchAnimeUpdatePatch {
@@ -2966,7 +2971,14 @@ mod tests {
             user_completed_at: None,
         };
         write_batch_change(&db, &patch, TODAY, false).unwrap();
-        assert_eq!(db.list_watch_history(10, 0).unwrap().len(), 4);
+        assert_eq!(db.list_watch_history(10, 0).unwrap().len(), 5);
+
+        // Batch -1 logs a correction too
+        let patch = BatchAnimeUpdatePatch { progress_delta: Some(-1), ..patch };
+        write_batch_change(&db, &patch, TODAY, false).unwrap();
+        assert_eq!(db.list_watch_history(10, 0).unwrap().len(), 6);
+
+        // Corrections are not watched episodes
         let now = chrono::Utc::now().timestamp();
         assert_eq!(db.watch_history_totals(now - 60, now + 1).unwrap().0, 4);
     }

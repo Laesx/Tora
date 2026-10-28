@@ -2,6 +2,16 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Stats status bar colors (dark themes; adjacent pairs validated for color-vision deficiency) */
+:root {
+  --stat-current: #3987e5;
+  --stat-repeating: #d95926;
+  --stat-completed: #199e70;
+  --stat-paused: #c98500;
+  --stat-dropped: #d55181;
+  --stat-planning: #9085e9;
+}
+
 :root,
 [data-theme="tora-midnight"] {
   --bg-primary: 12 14 20;
@@ -27,6 +37,13 @@
   --border-subtle: 203 213 225;
   --accent-primary: 37 99 235;
   --accent-hover: 29 78 216;
+  /* Stats status bar, light steps of the same hues (validated against white) */
+  --stat-current: #2a78d6;
+  --stat-repeating: #eb6834;
+  --stat-completed: #1baf7a;
+  --stat-paused: #eda100;
+  --stat-dropped: #e87ba4;
+  --stat-planning: #6250d6;
 }
 
 [data-theme="catppuccin-mocha"] {

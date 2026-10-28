@@ -280,6 +280,7 @@ impl AniListPlugin {
             available_episodes: vec![],
             sync_pending: false,
             anilist_list_entry_id: list_entry_id,
+            custom_synonyms: vec![],
         })
     }
 

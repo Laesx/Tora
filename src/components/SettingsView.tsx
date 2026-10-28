@@ -1,5 +1,10 @@
 import React, { useEffect, useState } from "react";
+import { getTauriVersion, getVersion } from "@tauri-apps/api/app";
 import {
+  Info,
+  ExternalLink,
+  FolderOpen,
+  Languages,
   Palette,
   Plug,
   Download,
@@ -11,6 +16,7 @@ import {
 } from "lucide-react";
 import {
   AnimeEntry,
+  AppInfo,
   AppSettings,
   TrackerPluginDescriptor,
 } from "../types";
@@ -18,8 +24,10 @@ import {
   ACCENT_SWATCHES,
   THEME_PRESETS,
   applyThemeToDocument,
+  formatBytes,
   toraApi,
 } from "../api";
+import { TITLE_LANGUAGES } from "../titles";
 import { LibraryManagerView } from "./LibraryManagerView";
 import { AnitomyParserPanel } from "./AnitomyParserPanel";
 
@@ -29,7 +37,8 @@ type SettingsSection =
   | "library"
   | "playback"
   | "torrents"
-  | "diagnostics";
+  | "diagnostics"
+  | "about";
 
 const SECTIONS: { id: SettingsSection; label: string; icon: React.ElementType }[] = [
   { id: "appearance", label: "Appearance", icon: Palette },
@@ -38,6 +47,19 @@ const SECTIONS: { id: SettingsSection; label: string; icon: React.ElementType }[
   { id: "playback", label: "Playback & Detection", icon: Tv },
   { id: "torrents", label: "Torrents", icon: Download },
   { id: "diagnostics", label: "Diagnostics", icon: FlaskConical },
+  { id: "about", label: "About", icon: Info },
+];
+
+// Settings -> About: what Tora is built on (links open in the browser)
+const CREDITS: { name: string; role: string; license?: string; url: string }[] = [
+  { name: "Taiga", role: "The anime tracker Tora is inspired by", url: "https://taiga.moe" },
+  { name: "Anitomy", role: "Anime filename parsing", license: "MPL-2.0", url: "https://github.com/erengy/anitomy" },
+  { name: "Anisthesia", role: "Media player detection", license: "MIT", url: "https://github.com/erengy/anisthesia" },
+  { name: "anime-relations", role: "Sequel episode redirection", license: "CC0-1.0", url: "https://github.com/erengy/anime-relations" },
+  { name: "AniList", role: "List sync, metadata, seasons & schedule", url: "https://anilist.co" },
+  { name: "Nyaa & AnimeTosho", role: "Torrent RSS feeds", url: "https://nyaa.si" },
+  { name: "Tauri", role: "Desktop app framework", license: "MIT / Apache-2.0", url: "https://tauri.app" },
+  { name: "React & Tailwind CSS", role: "User interface", license: "MIT", url: "https://react.dev" },
 ];
 
 interface SettingsViewProps {
@@ -178,6 +200,34 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     </button>
                   );
                 })}
+              </div>
+
+              {/* Title Language */}
+              <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-border-subtle">
+                <div>
+                  <div className="text-xs font-semibold text-text-secondary flex items-center gap-1.5">
+                    <Languages className="w-3.5 h-3.5 text-accent" />
+                    Title language
+                  </div>
+                  <p className="text-[11px] text-text-muted mt-0.5">
+                    Used everywhere in Tora. Anime without an English or Native title show Romaji; torrent searches always use Romaji.
+                  </p>
+                </div>
+                <div className="flex items-center bg-bg-primary p-1 rounded-xl border border-border-subtle">
+                  {TITLE_LANGUAGES.map((l) => (
+                    <button
+                      key={l.id}
+                      onClick={() => onUpdateSettings({ ...settings, title_language: l.id })}
+                      className={`px-3 py-1 rounded-lg text-xs font-semibold transition ${
+                        (settings.title_language ?? "romaji") === l.id
+                          ? "bg-accent text-white"
+                          : "text-text-secondary hover:text-text-primary"
+                      }`}
+                    >
+                      {l.label}
+                    </button>
+                  ))}
+                </div>
               </div>
 
               {/* Accent Swatches */}
@@ -514,7 +564,95 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <AnitomyParserPanel />
           </>
         )}
+
+        {section === "about" && <AboutSection showToast={showToast} />}
       </div>
     </div>
   );
 };
+
+const AboutSection: React.FC<{
+  showToast: (msg: string, type?: "success" | "info" | "error") => void;
+}> = ({ showToast }) => {
+  const [version, setVersion] = useState<string | null>(null);
+  const [tauriVersion, setTauriVersion] = useState<string | null>(null);
+  const [info, setInfo] = useState<AppInfo | null>(null);
+
+  useEffect(() => {
+    getVersion().then(setVersion).catch(console.error);
+    getTauriVersion().then(setTauriVersion).catch(console.error);
+    toraApi.getAppInfo().then(setInfo).catch(console.error);
+  }, []);
+
+  const openUrl = (url: string) => toraApi.openExternalUrl(url).catch((e) => showToast(String(e), "error"));
+
+  return (
+    <>
+      <div className="bg-bg-secondary border border-border-subtle rounded-2xl p-5 flex items-center gap-4">
+        <div className="w-16 h-16 rounded-2xl bg-accent/15 border border-accent/30 flex items-center justify-center text-3xl font-black text-accent shrink-0">
+          \u864e
+        </div>
+        <div className="min-w-0">
+          <h2 className="text-lg font-bold text-text-primary">
+            Tora <span className="text-sm font-mono font-semibold text-text-muted">v{version ?? "..."}</span>
+          </h2>
+          <p className="text-xs text-text-secondary mt-0.5">
+            A fast anime library manager and episode tracker for Windows.
+          </p>
+          {tauriVersion && <p className="text-[11px] text-text-muted mt-1">Tauri {tauriVersion}</p>}
+        </div>
+      </div>
+
+      <div className="bg-bg-secondary border border-border-subtle rounded-2xl p-5 space-y-3">
+        <h3 className="text-sm font-bold text-text-primary">Data</h3>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-[11px] text-text-muted">Data folder</div>
+            <div className="text-xs font-mono text-text-primary break-all">{info?.data_dir ?? "..."}</div>
+            {info && (
+              <div className="text-[11px] text-text-muted mt-1">
+                Database {formatBytes(info.db_size_bytes)}
+              </div>
+            )}
+          </div>
+          <button
+            onClick={() =>
+              info && toraApi.revealInExplorer(info.data_dir).catch((e) => showToast(String(e), "error"))
+            }
+            disabled={!info}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-bg-tertiary hover:bg-bg-elevated border border-border-subtle text-text-primary text-xs font-semibold transition disabled:opacity-50 shrink-0"
+          >
+            <FolderOpen className="w-3.5 h-3.5" />
+            Open data folder
+          </button>
+        </div>
+      </div>
+
+      <div className="bg-bg-secondary border border-border-subtle rounded-2xl p-5 space-y-3">
+        <h3 className="text-sm font-bold text-text-primary">Credits & licenses</h3>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+          {CREDITS.map((c) => (
+            <button
+              key={c.name}
+              onClick={() => openUrl(c.url)}
+              className="group text-left p-3 rounded-xl bg-bg-primary border border-border-subtle hover:border-accent/60 transition"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-bold text-text-primary">{c.name}</span>
+                <span className="flex items-center gap-1.5 shrink-0">
+                  {c.license && <span className="text-[10px] font-mono text-text-muted">{c.license}</span>}
+                  <ExternalLink className="w-3 h-3 text-text-muted group-hover:text-accent" />
+                </span>
+              </div>
+              <div className="text-[11px] text-text-secondary mt-0.5">{c.role}</div>
+            </button>
+          ))}
+        </div>
+        <p className="text-[11px] text-text-muted">
+          Tora is not affiliated with AniList, Taiga or any torrent site.
+        </p>
+      </div>
+    </>
+  );
+};
+

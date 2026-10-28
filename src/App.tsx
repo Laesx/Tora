@@ -1,4 +1,5 @@
 import React, {
+  useCallback,
   useDeferredValue,
   useEffect,
   useMemo,
@@ -33,6 +34,7 @@ import {
   HardDrive,
   Palette,
   ListChecks,
+  BarChart3,
 } from "lucide-react";
 import {
   AnimeEntry,
@@ -65,6 +67,8 @@ import { buildAnimeActions } from "./animeActions";
 import { TorrentsView } from "./components/TorrentsView";
 import { NowPlayingView } from "./components/NowPlayingView";
 import { HistoryView } from "./components/HistoryView";
+import { StatsView } from "./components/StatsView";
+import { animeTitle, setCurrentTitleLanguage, TitleLanguageContext } from "./titles";
 import { SeasonsView } from "./components/SeasonsView";
 import { ScheduleView } from "./components/ScheduleView";
 import { SearchView } from "./components/SearchView";
@@ -87,6 +91,7 @@ type NavTab =
   | "search"
   | "nowplaying"
   | "history"
+  | "stats"
   | "settings";
 
 // Unix timestamp (seconds or milliseconds) -> short relative label for the sync button tooltip
@@ -159,6 +164,9 @@ export const App: React.FC = () => {
   const animeListRef = useRef<AnimeEntry[]>(animeList);
   animeListRef.current = animeList;
   const [settings, setSettings] = useState<AppSettings | null>(null);
+  const titleLanguage = settings?.title_language ?? "romaji";
+  setCurrentTitleLanguage(titleLanguage);
+  const titleOf = useCallback((a: AnimeEntry) => animeTitle(a, titleLanguage), [titleLanguage]);
   const [selectedAnime, setSelectedAnime] = useState<AnimeEntry | null>(null);
   const [selectedAnimeIds, setSelectedAnimeIds] = useState<number[]>([]);
   const [quickMenuAnimeId, setQuickMenuAnimeId] = useState<number | null>(null);
@@ -630,7 +638,7 @@ export const App: React.FC = () => {
       }
 
       showToast(
-        `${finalAnime.title_romaji} → Episode ${finalProg}`,
+        `${titleOf(finalAnime)} → Episode ${finalProg}`,
         "success"
       );
 
@@ -753,7 +761,7 @@ export const App: React.FC = () => {
 
   const compareBySort = useMemo(() => {
     return (a: AnimeEntry, b: AnimeEntry) => {
-      if (sortBy === "title") return a.title_romaji.localeCompare(b.title_romaji);
+      if (sortBy === "title") return titleOf(a).localeCompare(titleOf(b));
       if (sortBy === "score") return b.user_score - a.user_score;
       if (sortBy === "progress") {
         const progA = pendingStepSnapshots[a.id]?.initialProgress ?? a.user_progress;
@@ -764,7 +772,7 @@ export const App: React.FC = () => {
       const updB = pendingStepSnapshots[b.id]?.initialUpdatedAt ?? b.updated_at;
       return updB - updA;
     };
-  }, [sortBy, pendingStepSnapshots]);
+  }, [sortBy, pendingStepSnapshots, titleOf]);
 
   // With a search: matches from every list, grouped by status (stepping keeps a card in its
   // original group), best match first and the sort dropdown as the tie-break
@@ -938,6 +946,14 @@ export const App: React.FC = () => {
     setSelectedAnime(entry);
   };
 
+  // Stats → status bar: that status list in the watchlist
+  const openStatusList = (status: string) => {
+    setActiveTab("watchlist");
+    setSearchQuery("");
+    setCustomListFilter(null);
+    setStatusFilter(status);
+  };
+
   const openCustomList = (name: string) => {
     setActiveTab("watchlist");
     setSearchQuery("");
@@ -959,6 +975,7 @@ export const App: React.FC = () => {
     { id: "go-schedule", label: "Go to Schedule", keywords: ["airing", "calendar", "timetable"], icon: CalendarClock, run: () => setActiveTab("schedule") },
     { id: "go-search", label: "Go to Search", keywords: ["anilist", "find"], icon: Compass, run: () => setActiveTab("search") },
     { id: "go-history", label: "Go to History", keywords: ["watched", "scrobbles"], icon: History, run: () => setActiveTab("history") },
+    { id: "go-stats", label: "Go to Stats", keywords: ["statistics", "activity", "backlog"], icon: BarChart3, run: () => setActiveTab("stats") },
     { id: "go-settings", label: "Go to Settings", keywords: ["preferences", "options"], icon: Settings, run: () => setActiveTab("settings") },
     { id: "rescan-library", label: "Rescan All Library Folders", keywords: ["scan", "refresh", "files", "disk"], icon: HardDrive, shortcut: "F5", run: () => void handleRescanLibrary() },
     {
@@ -1083,7 +1100,7 @@ export const App: React.FC = () => {
       setAnimeList((prev) => prev.filter((a) => a.id !== anime.id));
       setSelectedAnime((prev) => (prev?.id === anime.id ? null : prev));
       setSelectedAnimeIds((prev) => prev.filter((id) => id !== anime.id));
-      showToast(`Removed "${anime.title_romaji}" from list`, "info");
+      showToast(`Removed "${titleOf(anime)}" from list`, "info");
     } catch (e: any) {
       showToast(String(e), "error");
     }
@@ -1109,7 +1126,7 @@ export const App: React.FC = () => {
       optimisticEntry,
     ]);
     showToast(
-      `Added "${entry.title_romaji}" to ${status === "CURRENT" ? "Watching" : "Planning"}`,
+      `Added "${titleOf(entry)}" to ${status === "CURRENT" ? "Watching" : "Planning"}`,
       "success"
     );
 
@@ -1163,6 +1180,7 @@ export const App: React.FC = () => {
   };
 
   return (
+    <TitleLanguageContext.Provider value={titleLanguage}>
     <CustomListsContext.Provider value={customListsApi}>
     <div
       className="flex h-screen w-screen overflow-hidden bg-bg-primary text-text-primary select-none"
@@ -1317,6 +1335,19 @@ export const App: React.FC = () => {
               <span className="flex items-center gap-2.5">
                 <History className="w-4 h-4" />
                 History
+              </span>
+            </button>
+
+            <button
+              onClick={() => setActiveTab("stats")}
+              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${activeTab === "stats"
+                ? "bg-accent text-white shadow-sm"
+                : "text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
+                }`}
+            >
+              <span className="flex items-center gap-2.5">
+                <BarChart3 className="w-4 h-4" />
+                Stats
               </span>
             </button>
 
@@ -1694,7 +1725,7 @@ export const App: React.FC = () => {
               onChangeStatus={(anime, status, label) =>
                 handleBatchUpdate(
                   { anime_ids: [anime.id], user_status: status },
-                  `Moved "${anime.title_romaji}" to ${label}`
+                  `Moved "${titleOf(anime)}" to ${label}`
                 )
               }
               onRemoveAnime={handleDeleteAnime}
@@ -1710,7 +1741,7 @@ export const App: React.FC = () => {
               onChangeStatus={(anime, status, label) =>
                 handleBatchUpdate(
                   { anime_ids: [anime.id], user_status: status },
-                  `Moved "${anime.title_romaji}" to ${label}`
+                  `Moved "${titleOf(anime)}" to ${label}`
                 )
               }
               onRemoveAnime={handleDeleteAnime}
@@ -1766,6 +1797,15 @@ export const App: React.FC = () => {
             />
           )}
 
+          {activeTab === "stats" && (
+            <StatsView
+              animeList={animeList}
+              refreshKey={animeList}
+              onOpenAnime={openAnime}
+              onOpenStatus={openStatusList}
+            />
+          )}
+
           {activeTab === "settings" && settings && (
             <SettingsView
               settings={settings}
@@ -1793,6 +1833,9 @@ export const App: React.FC = () => {
             );
             setSelectedAnime(updated);
           }}
+          onSavedInBackground={(updated) =>
+            setAnimeList((prev) => prev.map((a) => (a.id === updated.id ? updated : a)))
+          }
           onDeleted={(deletedId) => {
             setAnimeList((prev) => prev.filter((a) => a.id !== deletedId));
             setSelectedAnime(null);
@@ -1896,5 +1939,6 @@ export const App: React.FC = () => {
       )}
     </div>
     </CustomListsContext.Provider>
+    </TitleLanguageContext.Provider>
   );
 };

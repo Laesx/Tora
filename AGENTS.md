@@ -64,6 +64,7 @@ Tora/
 │   ├── fuzzy.ts                          # Shared fuzzy search (normalized index, char-mask prefilter, subsequence scoring, match ranges)
 │   ├── animeActions.ts                   # Keyboard action list for one anime (palette → Right arrow), built on nowPlaying helpers
 │   ├── customLists.ts                    # AniList custom lists context (`useCustomLists`), optimistic membership edit, coverage helper
+│   ├── titles.ts                         # Display title language (`useAnimeTitle`, `altTitles`, `displayTitle` for plain helpers)
 │   ├── main.tsx                          # React 19 entrypoint & root provider
 │   ├── styles/
 │   │   └── index.css                     # Tailwind CSS v4 stylesheets, custom theme variables & scrollbars
@@ -83,8 +84,9 @@ Tora/
 │       ├── NowPlayingHero.tsx            # Playing anime hero (cover → AniList, metadata, studios/genres/tags links, episodes, link prompt)
 │       ├── NowPlayingDashboard.tsx       # Idle: watch stats, continue watching (next ep on disk), recently started/finished airing
 │       ├── FloatingQuickMenu.tsx         # Viewport-clamped portal for right-click quick menus (dashboard, schedule)
-│       ├── HistoryView.tsx               # History tab: scrobbles + manual progress changes, grouped by day
-│       ├── SettingsView.tsx              # Sectioned settings: Appearance, Tracker, Library, Playback & Detection (Anisthesia players), Torrents, Diagnostics
+│       ├── HistoryView.tsx               # History tab: scrobbles + manual progress changes (decreases as correction rows), grouped by day
+│       ├── StatsView.tsx                 # Stats tab: overview tiles, status bar, activity heatmap/streaks/monthly bars, backlog & ready-to-watch
+│       ├── SettingsView.tsx              # Sectioned settings: Appearance, Tracker, Library, Playback & Detection (Anisthesia players), Torrents, Diagnostics, About
 │       ├── TorrentsView.tsx              # Nyaa/AnimeTosho RSS search, feed preview & automated torrent rule editor
 │       └── VirtualWatchlist.tsx          # Viewport-windowed virtual grid/list for Grid, Compact & Table modes (row model with optional status group headers, scroll-to-anime)
 └── src-tauri/                            # Tauri v2 Rust Backend & Native C++ Bindings
@@ -143,7 +145,7 @@ When a filename or media player window title is parsed (`parse_filename` in `src
    - Priority sequence: Custom folder path prefix $\rightarrow$ user-linked aliases (`title_aliases`) $\rightarrow$ exact normalized titles $\rightarrow$ season-isolated fuzzy core-title matching (`entry_season == query_season`).
    - **Never** allow a Season 2/3 episode to fall back to a Season 1 library entry.
 6. **Unmatched Media Behavior**:
-   - If `matched_anime_id` is `None`, **never** auto-update or run the scrobble countdown. Focus the `Now Playing` tab and prompt the user to link the episode to an anime entry via `link_detected_episode_to_anime` (`Database::link_alias_to_anime`), which persists the relation in `title_aliases` and the anime's `synonyms` for all subsequent episodes.
+   - If `matched_anime_id` is `None`, **never** auto-update or run the scrobble countdown. Focus the `Now Playing` tab and prompt the user to link the episode to an anime entry via `link_detected_episode_to_anime` (`Database::link_alias_to_anime`), which persists the relation in `title_aliases` and the anime's `synonyms` / `custom_synonyms` for all subsequent episodes.
 
 ### 4. Zero-Polling Win32 IOCP Directory Monitoring & Incremental Scanning
 - **Native Win32 IOCP Monitor (`LibraryMonitorHandle`)**:
@@ -179,12 +181,14 @@ When a filename or media player window title is parsed (`parse_filename` in `src
 ### 6. Database Performance & In-Memory Matching (`src-tauri/src/db/mod.rs`)
 - Use the cached `AnimeMatcherIndex` (`db.matcher_index()`) for any matching (library scans, torrent RSS evaluation, playback recognition). It is built from the stored `normalized_titles_json` (keep that column correct on every title/synonym write) and cached until `matcher_generation` changes; an SQLite `update_hook` bumps the generation on any write to `anime_entries` or `title_aliases`, so writers never invalidate manually. Do not call the uncached `build_matcher_index()` in hot paths. The recognition poll only re-matches an unmatched session when the generation changed.
 - UI read paths (`list_anime_entries`, `get_anime_entry_by_id`, `get_anime_entries_by_ids`, `list_local_episodes`, `get_settings`) use the query-only `Database::reader()` connection so they don't queue behind writes; never call a write method while holding it.
+- **Aliases**: `synonyms_json` is the matchable union (AniList synonyms + the user's own); `custom_synonyms_json` holds only the user's own aliases (`AnimeEntry.custom_synonyms`), the only ones shown and edited in the drawer. `UserStateChange.synonyms` / `ResolvedState.synonyms` replace the *custom* list (`replace_custom_synonyms` rebuilds the union). NULL `custom_synonyms_json` marks a legacy row: the next pull splits it once (`backfill_custom_synonyms`: stored − remote).
 - Single-entry mutations (`update_anime_user_state`) must query only the target `anime_id` (`get_anime_entry_by_id`) and only trigger `rematch_all_local_episodes()` if `custom_folder` or `synonyms` actually changed.
 - Adding anime (`add_or_upsert_anime` → `TrackerSyncService::add_entry`) must never block on `rematch_all_local_episodes()`. Instead, run targeted background matching for unmatched episodes via `match_unmatched_episodes_for_anime(anime_id)` and provide instant 0ms optimistic UI updates in React.
 - **SQLite Page Cache & WAL**:
   - Keep `PRAGMA journal_mode = WAL`, `PRAGMA synchronous = NORMAL`, and `PRAGMA cache_size = -4000` (4 MB) in `Database::open` to minimize native memory consumption while providing high concurrent read performance.
 
 ### 7. Memory Footprint & DOM Virtualization
+- **Title language**: `AppSettings.title_language` (`romaji` | `english` | `native`, serde default `romaji`; missing titles fall back to Romaji). Show titles with `useAnimeTitle()` (or `displayTitle` in plain helpers), never `title_romaji` directly. Torrent search queries always use `title_romaji`.
 - **DOM Virtualization**:
   - Large lists (`VirtualWatchlist.tsx` for the Anime Watchlist across `"grid"`, `"compact"`, and `"table"` modes, and the Indexed Local Episodes table in `LibraryManagerView.tsx`) must remain virtualized so WebView2 only mounts visible rows (+ overscan) and releases decoded cover image bitmaps for off-screen rows.
   - `VirtualWatchlist` virtualizes a row model (optional group header rows + rows of `cols` cards with prefix-sum offsets, binary search for the first visible row); search results grouped by status go through the same path.
@@ -211,4 +215,5 @@ When a filename or media player window title is parsed (`parse_filename` in `src
 - **Media metadata** (`TrackerSyncService::media_metadata`, used by the Now Playing hero): served from `media_metadata`. Only a media with no row is fetched (once, `fetch_media_metadata`, through the rate limiter); playback **never** refreshes it — season fetches are the only refresh path.
 - **Airing dates**: `start_date` / `end_date` (fuzzy `YYYY[-MM[-DD]]`) are part of the light `MEDIA_LIST_FRAGMENT` and compared in `merge_remote_list`, so pulls keep them current without extra requests.
 - **Custom lists** (AniList `customLists` / `hiddenFromStatusLists`): a side channel that never touches `AnimeEntry`, the search index or the matcher. Names live in `tracker_custom_lists` (user order); membership in `anime_custom_lists` (one row per entry, `ON DELETE CASCADE`, wiped by `reset_for_account_switch`). The pull reads both from the existing `MediaListCollection` query and `Database::merge_remote_custom_lists` merges them diff-only (never writes `anime_entries`, never rematches; skipped when the remote list is empty). Edits go through `TrackerSyncService::set_custom_lists` → `apply_custom_list_change`: the row is marked `dirty` and the entry `sync_pending`, so the normal push queue sends it; `SaveMediaListEntry` gets `customLists` / `hiddenFromStatusLists` **only** while the row is dirty, and `finish_push` clears `dirty` (and `sync_pending` only once no membership edit is still unsent). Dirty rows keep local membership through pulls. Creating, renaming and deleting lists stays on AniList. Frontend: `get_custom_lists` state in `App.tsx`, provided through `CustomListsContext`; a selected list replaces the status filter (`customListFilter`), hidden entries leave the status tabs and counts (still in All Anime and search), and the watchlist search is unchanged.
-- **Watch history**: scrobbles log their own row. `Manual`, `Step` and `Batch` changes that raise progress log one row per newly watched episode (`player_name = "Manual"`, no file) via `Database::record_manual_progress`; `Add` never logs.
+- **Watch history**: scrobbles log their own row. `Manual`, `Step` and `Batch` changes that raise progress log one row per newly watched episode (`player_name = "Manual"`, no file) via `Database::record_manual_progress`; a decrease logs one correction row (`progress_from` = old progress, `episode_number` = new). `Add` never logs. Anything counting watched episodes (`watch_history_totals`, `list_stats`) filters `progress_from IS NULL`. The drawer flushes a pending ± step save when it closes instead of dropping it.
+- **Stats** (`get_stats` → `Database::list_stats`, reader only): list totals, backlog, ready-to-watch and the last 366 days of watched-episode events; the frontend buckets events by local day. Drive usage comes from `get_drive_summaries`. No AniList requests.

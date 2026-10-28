@@ -16,6 +16,7 @@ import { AnimeEntry } from "../types";
 import { toraApi } from "../api";
 import { STATUS_OPTIONS } from "./AnimeQuickMenu";
 import { LIST_STATUS_META } from "./AnimePosterCard";
+import { useAnimeTitle } from "../titles";
 
 interface SeasonAnimeMenuProps {
   /** The remote (season) anime that was right-clicked */
@@ -47,6 +48,7 @@ export const SeasonAnimeMenu: React.FC<SeasonAnimeMenuProps> = ({
   onRemove,
   showToast,
 }) => {
+  const titleOf = useAnimeTitle();
   const ref = useRef<HTMLDivElement | null>(null);
   const [position, setPosition] = useState({ top: anchor.y, left: anchor.x });
   const [statusOpen, setStatusOpen] = useState(false);
@@ -105,8 +107,8 @@ export const SeasonAnimeMenu: React.FC<SeasonAnimeMenuProps> = ({
   const handleCopyTitle = async () => {
     onClose();
     try {
-      await navigator.clipboard.writeText(anime.title_romaji);
-      showToast(`Copied "${anime.title_romaji}"`, "info");
+      await navigator.clipboard.writeText(titleOf(anime));
+      showToast(`Copied "${titleOf(anime)}"`, "info");
     } catch {
       showToast("Failed to copy title", "error");
     }
@@ -136,8 +138,8 @@ export const SeasonAnimeMenu: React.FC<SeasonAnimeMenuProps> = ({
     >
       {/* Compact Header */}
       <div className="px-3 py-1.5 border-b border-border-subtle">
-        <div className="font-bold text-text-primary truncate" title={anime.title_romaji}>
-          {anime.title_romaji}
+        <div className="font-bold text-text-primary truncate" title={titleOf(anime)}>
+          {titleOf(anime)}
         </div>
         <div className="flex items-center justify-between gap-2 text-[10px] text-text-muted font-mono mt-0.5">
           <span>

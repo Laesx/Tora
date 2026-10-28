@@ -24,6 +24,7 @@ import {
 } from "../fuzzy";
 import { STATUS_OPTIONS } from "./AnimeQuickMenu";
 import { AnimeAction } from "../animeActions";
+import { altTitles, useAnimeTitle, useTitleLanguage } from "../titles";
 
 export interface PaletteCommand {
   id: string;
@@ -122,6 +123,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
   onSearchAniList,
   getAnimeActions,
 }) => {
+  const titleOf = useAnimeTitle();
   const inputRef = useRef<HTMLInputElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const [tab, setTab] = useState<PaletteTab>("anime");
@@ -550,7 +552,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
                 />
                 <div className="min-w-0 flex items-center gap-1 text-text-muted">
                   <span className="font-semibold text-text-primary truncate">
-                    {menuAnime.title_romaji}
+                    {titleOf(menuAnime)}
                   </span>
                   {menuTrail.map((label) => (
                     <span key={label} className="flex items-center gap-1 shrink-0">
@@ -714,6 +716,8 @@ function PaletteRow({
   query: string;
   rawQuery: string;
 }) {
+  const titleOf = useAnimeTitle();
+  const titleLanguage = useTitleLanguage();
   if (item.kind === "anilist") {
     return (
       <div className="flex items-center gap-2.5 min-w-0">
@@ -749,8 +753,7 @@ function PaletteRow({
   }
 
   const a = item.anime;
-  const altTitle =
-    a.title_english && a.title_english !== a.title_romaji ? a.title_english : null;
+  const altTitle = altTitles(a, titleLanguage)[0] ?? null;
   return (
     <div className="flex items-center gap-2.5 min-w-0">
       <div className="relative shrink-0">
@@ -767,7 +770,7 @@ function PaletteRow({
       </div>
       <div className="min-w-0">
         <div className="font-semibold text-text-primary truncate">
-          <Highlight text={a.title_romaji} query={query} />
+          <Highlight text={titleOf(a)} query={query} />
         </div>
         <div className="text-[10px] text-text-muted truncate">
           <span className="font-mono">

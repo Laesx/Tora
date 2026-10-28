@@ -22,6 +22,7 @@ import { formatBytes, formatCountdown, getOptimizedCoverUrl, toraApi } from "../
 import { open } from "@tauri-apps/plugin-dialog";
 import { useCustomLists } from "../customLists";
 import { CustomListsPanel } from "./CustomListsPanel";
+import { altTitles, useAnimeTitle, useTitleLanguage } from "../titles";
 
 interface AnimeDetailModalProps {
   anime: AnimeEntry;
@@ -30,6 +31,8 @@ interface AnimeDetailModalProps {
   onAddToList: (status: "CURRENT" | "PLANNING") => Promise<void>;
   onClose: () => void;
   onUpdated: (updated: AnimeEntry) => void;
+  /** A debounced ± step saved after the drawer closed or switched anime: update the list only */
+  onSavedInBackground?: (updated: AnimeEntry) => void;
   onDeleted: (animeId: number) => void;
   onSearchTorrents: (query: string) => void;
   showToast: (msg: string, type?: "success" | "info" | "error") => void;
@@ -41,10 +44,13 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
   onAddToList,
   onClose,
   onUpdated,
+  onSavedInBackground,
   onDeleted,
   onSearchTorrents,
   showToast,
 }) => {
+  const titleOf = useAnimeTitle();
+  const titleLanguage = useTitleLanguage();
   const customListNames = useCustomLists().names;
   const [status, setStatus] = useState(anime.user_status);
   const [progress, setProgress] = useState(anime.user_progress);
@@ -54,19 +60,32 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
   const [startedAt, setStartedAt] = useState(anime.user_started_at || "");
   const [completedAt, setCompletedAt] = useState(anime.user_completed_at || "");
   const [customFolder, setCustomFolder] = useState(anime.custom_folder || "");
-  const [synonymsInput, setSynonymsInput] = useState(anime.synonyms.join(", "));
+  const [synonymsInput, setSynonymsInput] = useState(anime.custom_synonyms.join(", "));
   const [localFiles, setLocalFiles] = useState<LocalEpisodeFile[]>([]);
   const [saving, setSaving] = useState(false);
   const [adding, setAdding] = useState(false);
   const stepSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The save a pending ± step will make, so closing the drawer (or switching anime) flushes it
+  const pendingStepSaveRef = useRef<Parameters<typeof toraApi.updateAnimeEntry>[0] | null>(null);
+  const backgroundRef = useRef({ onSavedInBackground, showToast });
+  backgroundRef.current = { onSavedInBackground, showToast };
 
   useEffect(() => {
     return () => {
       if (stepSaveTimerRef.current) {
         clearTimeout(stepSaveTimerRef.current);
+        stepSaveTimerRef.current = null;
       }
+      const pending = pendingStepSaveRef.current;
+      pendingStepSaveRef.current = null;
+      if (!pending) return;
+      const { onSavedInBackground, showToast } = backgroundRef.current;
+      toraApi
+        .updateAnimeEntry(pending)
+        .then((updated) => onSavedInBackground?.(updated))
+        .catch((e) => showToast(String(e), "error"));
     };
-  }, []);
+  }, [anime.id]);
 
   // Sync lightweight user fields when anime prop updates
   useEffect(() => {
@@ -90,7 +109,7 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
   useEffect(() => {
     setNotes(anime.user_notes);
     setCustomFolder(anime.custom_folder || "");
-    setSynonymsInput(anime.synonyms.join(", "));
+    setSynonymsInput(anime.custom_synonyms.join(", "));
   }, [anime.id]);
 
   // Reload local files when anime ID or matched episode count changes (only list entries have local files)
@@ -162,7 +181,7 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
           }))
         );
       }
-      showToast(`Saved changes for ${anime.title_romaji}`, "success");
+      showToast(`Saved changes for ${titleOf(anime)}`, "success");
     } catch (e: any) {
       showToast(String(e), "error");
     } finally {
@@ -193,8 +212,21 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
     if (stepSaveTimerRef.current) {
       clearTimeout(stepSaveTimerRef.current);
     }
+    pendingStepSaveRef.current = {
+      animeId: anime.id,
+      userStatus: nextStat,
+      userProgress: nextProg,
+      userScore: score,
+      userRepeats: repeats,
+      userNotes: notes,
+      customFolder: customFolder.trim() || null,
+      synonyms: null,
+      userStartedAt: startedAt.trim(),
+      userCompletedAt: completedAt.trim(),
+    };
     stepSaveTimerRef.current = setTimeout(() => {
       stepSaveTimerRef.current = null;
+      pendingStepSaveRef.current = null;
       handleSave(nextStat, nextProg, score, repeats, false);
     }, 1200);
   };
@@ -274,7 +306,7 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
           return;
         }
       }
-      showToast(`No local folder linked for "${anime.title_romaji}"`, "error");
+      showToast(`No local folder linked for "${titleOf(anime)}"`, "error");
     } catch (e: any) {
       showToast(String(e), "error");
     }
@@ -300,7 +332,7 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
           {anime.banner_image || anime.cover_image ? (
             <img
               src={anime.banner_image || getOptimizedCoverUrl(anime.cover_image, "large")}
-              alt={anime.title_romaji}
+              alt={titleOf(anime)}
               decoding="async"
               className="w-full h-full object-cover opacity-45 scale-105 blur-[1px]"
             />
@@ -325,7 +357,7 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
           <div className="absolute bottom-3 left-6 right-16 flex items-end gap-5 pointer-events-none">
             <img
               src={getOptimizedCoverUrl(anime.cover_image, "medium")}
-              alt={anime.title_romaji}
+              alt={titleOf(anime)}
               decoding="async"
               className="w-24 h-36 object-cover rounded-xl shadow-xl border-2 border-border-subtle shrink-0 bg-bg-tertiary"
             />
@@ -350,15 +382,13 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
                 )}
               </div>
               <h2 className="text-xl font-bold text-text-primary truncate">
-                {anime.title_romaji}
+                {titleOf(anime)}
               </h2>
-              {anime.title_english &&
-                anime.title_english !== anime.title_romaji && (
-                  <p className="text-xs text-text-secondary truncate">
-                    {anime.title_english}
-                    {anime.title_native ? ` • ${anime.title_native}` : ""}
-                  </p>
-                )}
+              {altTitles(anime, titleLanguage).length > 0 && (
+                <p className="text-xs text-text-secondary truncate">
+                  {altTitles(anime, titleLanguage).join(" • ")}
+                </p>
+              )}
             </div>
           </div>
         </div>
@@ -755,7 +785,7 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
             </div>
           </div>
 
-          {/* Notes, Custom Folder & Recognition Aliases */}
+          {/* Notes, Custom Folder & the user's own recognition aliases (AniList synonyms are not shown) */}
           {inList && (
             <div className="space-y-3 bg-bg-tertiary/30 p-4 rounded-xl border border-border-subtle">
               <h3 className="text-xs font-semibold uppercase tracking-wider text-text-secondary flex items-center gap-1.5">
@@ -766,7 +796,7 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-[11px] text-text-muted mb-1">
-                    Title Aliases
+                    Custom Aliases (file & player recognition)
                   </label>
                   <input
                     type="text"

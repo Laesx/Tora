@@ -30,6 +30,7 @@ import { getOptimizedCoverUrl } from "../api";
 import { openAnimeFolder, playLocalEpisode } from "../nowPlaying";
 import { useCustomLists } from "../customLists";
 import { CustomListsPanel } from "./CustomListsPanel";
+import { useAnimeTitle } from "../titles";
 
 interface AnimeQuickMenuProps {
   anime: AnimeEntry;
@@ -77,6 +78,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
   onDeleteAnime,
   showToast,
 }) => {
+  const titleOf = useAnimeTitle();
   const isMultiSelect = selectedAnime.length > 1;
   const targets = isMultiSelect ? selectedAnime : [anime];
   const targetIds = targets.map((a) => a.id);
@@ -209,7 +211,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
     const handleCopyAllTitles = async () => {
       onClose();
       try {
-        const text = targets.map((a) => a.title_romaji).join("\n");
+        const text = targets.map(titleOf).join("\n");
         await navigator.clipboard.writeText(text);
         showToast(`Copied ${targets.length} titles to clipboard`, "info");
       } catch {
@@ -235,7 +237,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
                   <img
                     key={a.id}
                     src={getOptimizedCoverUrl(a.cover_image, "medium")}
-                    alt={a.title_romaji}
+                    alt={titleOf(a)}
                     className="inline-block w-6 h-8 rounded object-cover ring-1 ring-bg-secondary"
                   />
                 ))}
@@ -672,8 +674,8 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
   const handleCopyTitle = async () => {
     onClose();
     try {
-      await navigator.clipboard.writeText(anime.title_romaji);
-      showToast(`Copied "${anime.title_romaji}"`, "info");
+      await navigator.clipboard.writeText(titleOf(anime));
+      showToast(`Copied "${titleOf(anime)}"`, "info");
     } catch {
       showToast("Failed to copy title", "error");
     }
@@ -686,7 +688,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
         anime_ids: [anime.id],
         user_status: statusId,
       },
-      `Moved "${anime.title_romaji}" to ${label}`
+      `Moved "${titleOf(anime)}" to ${label}`
     );
   };
 
@@ -698,8 +700,8 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
         user_started_at: dateStr,
       },
       dateStr
-        ? `Set Date Started to ${dateStr} for "${anime.title_romaji}"`
-        : `Cleared Date Started for "${anime.title_romaji}"`
+        ? `Set Date Started to ${dateStr} for "${titleOf(anime)}"`
+        : `Cleared Date Started for "${titleOf(anime)}"`
     );
   };
 
@@ -711,7 +713,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
         user_notes: notesValue,
         notes_mode: "replace",
       },
-      `Saved notes for "${anime.title_romaji}"`
+      `Saved notes for "${titleOf(anime)}"`
     );
   };
 
@@ -728,9 +730,9 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
       <div className="px-3 py-1.5 border-b border-border-subtle">
         <div
           className="font-bold text-text-primary truncate"
-          title={anime.title_romaji}
+          title={titleOf(anime)}
         >
-          {anime.title_romaji}
+          {titleOf(anime)}
         </div>
         <div className="flex items-center justify-between text-[10px] text-text-muted font-mono mt-0.5">
           <span>

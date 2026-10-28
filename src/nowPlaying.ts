@@ -1,6 +1,7 @@
 import { AnimeEntry, MediaRanking } from "./types";
 import { toraApi } from "./api";
 import { seasonName } from "./seasons";
+import { displayTitle } from "./titles";
 
 type ShowToast = (msg: string, type?: "success" | "info" | "error") => void;
 
@@ -30,11 +31,11 @@ export async function playLocalEpisode(anime: AnimeEntry, ep: number, showToast:
       files.find((f) => f.episode_number === ep) ||
       (ep === 1 && files.length === 1 ? files[0] : undefined);
     if (!match) {
-      showToast(`Episode ${ep} of "${anime.title_romaji}" not found on disk`, "error");
+      showToast(`Episode ${ep} of "${displayTitle(anime)}" not found on disk`, "error");
       return;
     }
     await toraApi.playEpisodeFile(match.file_path);
-    showToast(`Playing ${anime.title_romaji} — Episode ${ep}`, "info");
+    showToast(`Playing ${displayTitle(anime)} — Episode ${ep}`, "info");
   } catch (e) {
     showToast(String(e), "error");
   }
@@ -52,7 +53,7 @@ export async function openAnimeFolder(anime: AnimeEntry, showToast: ShowToast) {
       await toraApi.revealInExplorer(files[0].file_path);
       return;
     }
-    showToast(`No local folder linked for "${anime.title_romaji}"`, "error");
+    showToast(`No local folder linked for "${displayTitle(anime)}"`, "error");
   } catch (e) {
     showToast(String(e), "error");
   }

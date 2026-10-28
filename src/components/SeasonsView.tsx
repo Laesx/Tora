@@ -32,6 +32,7 @@ import {
 } from "../seasons";
 import { AnimePosterCard, POSTER_CARD_FOOTER_HEIGHT } from "./AnimePosterCard";
 import { SeasonAnimeMenu } from "./SeasonAnimeMenu";
+import { useAnimeTitle } from "../titles";
 
 interface SeasonsViewProps {
   animeList: AnimeEntry[];
@@ -133,7 +134,13 @@ function matchesFilter(item: SeasonalAnime, needle: string): boolean {
   return fields.some((f) => f && f.toLowerCase().includes(needle));
 }
 
-function compareItems(a: SeasonalAnime, b: SeasonalAnime, key: SortKey, dir: SortDir): number {
+function compareItems(
+  a: SeasonalAnime,
+  b: SeasonalAnime,
+  key: SortKey,
+  dir: SortDir,
+  titleOf: (m: SeasonalAnime) => string
+): number {
   const sign = dir === "asc" ? 1 : -1;
   // Missing values always sort last, whatever the direction
   const nullsLast = <T,>(x: T | null | undefined, y: T | null | undefined, cmp: (x: T, y: T) => number) => {
@@ -154,7 +161,7 @@ function compareItems(a: SeasonalAnime, b: SeasonalAnime, key: SortKey, dir: Sor
       res = nullsLast(a.average_score, b.average_score, (x, y) => x - y);
       break;
     case "title":
-      res = sign * a.title_romaji.localeCompare(b.title_romaji);
+      res = sign * titleOf(a).localeCompare(titleOf(b));
       break;
   }
   return res !== 0 ? res : (b.popularity ?? 0) - (a.popularity ?? 0);
@@ -175,6 +182,7 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
   onRemoveAnime,
   showToast,
 }) => {
+  const titleOf = useAnimeTitle();
   const nowSeason = useMemo(() => currentSeason(), []);
   const [menu, setMenu] = useState<{ anime: SeasonalAnime; x: number; y: number } | null>(null);
   const closeMenu = useCallback(() => setMenu(null), []);
@@ -283,8 +291,8 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
     return items
       .filter((it) => !knownFormats.has(it.format) || enabled.has(it.format))
       .filter((it) => matchesFilter(it, needle))
-      .sort((a, b) => compareItems(a, b, prefs.sortKey, prefs.sortDir));
-  }, [items, filter, prefs, knownFormats]);
+      .sort((a, b) => compareItems(a, b, prefs.sortKey, prefs.sortDir, titleOf));
+  }, [items, filter, prefs, knownFormats, titleOf]);
 
   const groups = useMemo(() => {
     if (prefs.groupBy === "none") {

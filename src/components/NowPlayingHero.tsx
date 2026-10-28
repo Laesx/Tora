@@ -35,6 +35,7 @@ import {
   openExternal,
 } from "../nowPlaying";
 import { LIST_STATUS_META } from "./AnimePosterCard";
+import { altTitles, useAnimeTitle, useTitleLanguage } from "../titles";
 
 interface NowPlayingHeroProps {
   session: DetectedMediaSession;
@@ -63,6 +64,8 @@ export const NowPlayingHero: React.FC<NowPlayingHeroProps> = ({
   onSearchTorrents,
   showToast,
 }) => {
+  const titleOf = useAnimeTitle();
+  const titleLanguage = useTitleLanguage();
   const [isRelinking, setIsRelinking] = useState(false);
   const [media, setMedia] = useState<SeasonalAnime | null>(null);
   const [localFiles, setLocalFiles] = useState<LocalEpisodeFile[]>([]);
@@ -117,7 +120,8 @@ export const NowPlayingHero: React.FC<NowPlayingHeroProps> = ({
 
   const ep = session.parsed.episode_number;
   const meta = media?.metadata;
-  const title = entry?.title_romaji || session.matched_anime_title || session.parsed.anime_title;
+  const title = (entry && titleOf(entry)) || session.matched_anime_title || session.parsed.anime_title;
+  const subtitles = entry ? altTitles(entry, titleLanguage) : [];
   const progress = entry?.user_progress ?? session.matched_current_progress ?? 0;
   const total = entry?.episodes ?? session.matched_total_episodes ?? null;
   const alreadySeen = ep !== null && session.matched_current_progress !== null && ep <= session.matched_current_progress;
@@ -298,12 +302,8 @@ export const NowPlayingHero: React.FC<NowPlayingHeroProps> = ({
 
             <div>
               <h2 className="text-2xl font-extrabold text-text-primary leading-tight">{title}</h2>
-              {entry && (entry.title_english || entry.title_native) && (
-                <div className="text-sm text-text-secondary mt-0.5">
-                  {[entry.title_english, entry.title_native]
-                    .filter((t) => t && t !== entry.title_romaji)
-                    .join(" · ")}
-                </div>
+              {subtitles.length > 0 && (
+                <div className="text-sm text-text-secondary mt-0.5">{subtitles.join(" · ")}</div>
               )}
             </div>
 
@@ -535,6 +535,7 @@ const LinkAnimePanel: React.FC<LinkAnimePanelProps> = ({
   onLink,
   showToast,
 }) => {
+  const titleOf = useAnimeTitle();
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<number | null>(session.matched_anime_id);
   const [busy, setBusy] = useState(false);
@@ -619,13 +620,13 @@ const LinkAnimePanel: React.FC<LinkAnimePanelProps> = ({
           >
             <img
               src={getOptimizedCoverUrl(anime.cover_image, "medium")}
-              alt={anime.title_romaji}
+              alt={titleOf(anime)}
               loading="lazy"
               decoding="async"
               className="w-9 h-12 object-cover rounded-md shrink-0"
             />
             <div className="min-w-0 flex-1">
-              <div className="text-xs font-bold text-text-primary truncate">{anime.title_romaji}</div>
+              <div className="text-xs font-bold text-text-primary truncate">{titleOf(anime)}</div>
               {anime.title_english && (
                 <div className="text-[10px] text-text-muted truncate">{anime.title_english}</div>
               )}

@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { AnimeEntry, TorrentItem, TorrentRule } from "../types";
 import { toraApi } from "../api";
+import { useAnimeTitle } from "../titles";
 
 interface TorrentsViewProps {
   animeList: AnimeEntry[];
@@ -30,6 +31,7 @@ export const TorrentsView: React.FC<TorrentsViewProps> = ({
   onSelectAnime,
   showToast,
 }) => {
+  const titleOf = useAnimeTitle();
   const [subTab, setSubTab] = useState<"search" | "rules">("search");
   const [query, setQuery] = useState(initialQuery || "");
   const [provider, setProvider] = useState("nyaa");
@@ -348,7 +350,7 @@ export const TorrentsView: React.FC<TorrentsViewProps> = ({
                               className="px-2 py-0.5 rounded bg-accent/20 text-accent font-semibold text-[10px] hover:underline flex items-center gap-1"
                             >
                               <CheckCircle2 className="w-3 h-3" />
-                              In Library: {linkedAnime.title_romaji}
+                              In Library: {titleOf(linkedAnime)}
                             </button>
                           )}
 

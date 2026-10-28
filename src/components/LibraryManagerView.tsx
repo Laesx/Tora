@@ -23,6 +23,7 @@ import {
   ScanSummary,
 } from "../types";
 import { formatBytes, toraApi } from "../api";
+import { useAnimeTitle } from "../titles";
 
 interface LibraryManagerViewProps {
   animeList: AnimeEntry[];
@@ -39,6 +40,7 @@ export const LibraryManagerView: React.FC<LibraryManagerViewProps> = ({
   onSelectAnime,
   showToast,
 }) => {
+  const titleOf = useAnimeTitle();
   const [folders, setFolders] = useState<LibraryFolder[]>([]);
   const [drives, setDrives] = useState<DriveStorageSummary[]>([]);
   const [episodes, setEpisodes] = useState<LocalEpisodeFile[]>([]);
@@ -531,8 +533,9 @@ export const LibraryManagerView: React.FC<LibraryManagerViewProps> = ({
                               >
                                 <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
                                 <span className="truncate max-w-[180px]">
-                                  {linkedAnime?.title_romaji ||
-                                    ep.matched_anime_title}
+                                  {linkedAnime
+                                    ? titleOf(linkedAnime)
+                                    : ep.matched_anime_title}
                                 </span>
                               </button>
                             ) : bindingFileId === ep.id ? (
@@ -548,7 +551,7 @@ export const LibraryManagerView: React.FC<LibraryManagerViewProps> = ({
                                 >
                                   {animeList.map((a) => (
                                     <option key={a.id} value={a.id}>
-                                      {a.title_romaji}
+                                      {titleOf(a)}
                                     </option>
                                   ))}
                                 </select>

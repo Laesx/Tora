@@ -2,6 +2,7 @@ import React from "react";
 import { Clock, Plus, Star } from "lucide-react";
 import { AnimeEntry } from "../types";
 import { formatCountdown, getOptimizedCoverUrl } from "../api";
+import { useAnimeTitle } from "../titles";
 
 export const LIST_STATUS_META: Record<string, { label: string; badge: string }> = {
   CURRENT: { label: "Watching", badge: "bg-accent text-white" },
@@ -35,6 +36,7 @@ export const AnimePosterCard: React.FC<AnimePosterCardProps> = ({
   onAdd,
   onContextMenu,
 }) => {
+  const titleOf = useAnimeTitle();
   const status = listEntry ? LIST_STATUS_META[listEntry.user_status] : null;
   const countdown = formatCountdown(anime.next_airing_at);
 
@@ -58,7 +60,7 @@ export const AnimePosterCard: React.FC<AnimePosterCardProps> = ({
       >
         <img
           src={getOptimizedCoverUrl(anime.cover_image, "large")}
-          alt={anime.title_romaji}
+          alt={titleOf(anime)}
           loading="lazy"
           decoding="async"
           className="w-full h-full object-cover group-hover:scale-[1.02] transition-transform"
@@ -98,9 +100,9 @@ export const AnimePosterCard: React.FC<AnimePosterCardProps> = ({
         <div className="min-w-0">
           <h3
             className="text-xs font-bold text-text-primary line-clamp-2 leading-snug"
-            title={anime.title_romaji}
+            title={titleOf(anime)}
           >
-            {anime.title_romaji}
+            {titleOf(anime)}
           </h3>
           <p className="text-[10px] text-text-muted mt-0.5 truncate">
             {anime.studios.join(", ") || anime.genres.slice(0, 2).join(", ")}

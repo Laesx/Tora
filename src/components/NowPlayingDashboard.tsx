@@ -12,6 +12,7 @@ import {
 import { AnimeQuickMenu } from "./AnimeQuickMenu";
 import { FloatingQuickMenu } from "./FloatingQuickMenu";
 import { LIST_STATUS_META } from "./AnimePosterCard";
+import { useAnimeTitle } from "../titles";
 
 interface NowPlayingDashboardProps {
   animeList: AnimeEntry[];
@@ -28,6 +29,15 @@ const CONTINUE_LIMIT = 12;
 const RECENT_DAYS = 14;
 const WATCHING = ["CURRENT", "REPEATING"];
 
+/** Watch time left on an anime that finished airing (episode count known); 24 min/episode when the duration is unknown. */
+function timeToFinish(a: AnimeEntry): { episodes: number; perEpisode: number; minutes: number } | null {
+  if (a.airing_status !== "FINISHED" || !a.episodes) return null;
+  const episodes = a.episodes - a.user_progress;
+  if (episodes <= 0) return null;
+  const perEpisode = a.duration && a.duration > 0 ? a.duration : 24;
+  return { episodes, perEpisode, minutes: episodes * perEpisode };
+}
+
 /** Idle state of the Now Playing tab: stats, continue watching and recent airing changes. */
 export const NowPlayingDashboard: React.FC<NowPlayingDashboardProps> = ({
   animeList,
@@ -39,6 +49,7 @@ export const NowPlayingDashboard: React.FC<NowPlayingDashboardProps> = ({
   onDeleteAnime,
   showToast,
 }) => {
+  const titleOf = useAnimeTitle();
   const [stats, setStats] = useState<WatchStats | null>(null);
   const [showAll, setShowAll] = useState(false);
   const [menu, setMenu] = useState<{ anime: AnimeEntry; x: number; y: number } | null>(null);
@@ -167,6 +178,7 @@ export const NowPlayingDashboard: React.FC<NowPlayingDashboardProps> = ({
             {visibleContinue.map((a) => {
               const next = a.user_progress + 1;
               const more = unwatchedOnDisk(a).length - 1;
+              const left = timeToFinish(a);
               return (
                 <button
                   key={a.id}
@@ -182,7 +194,7 @@ export const NowPlayingDashboard: React.FC<NowPlayingDashboardProps> = ({
                   <div className="relative w-11 h-16 shrink-0 rounded-lg overflow-hidden">
                     <img
                       src={getOptimizedCoverUrl(a.cover_image, "medium")}
-                      alt={a.title_romaji}
+                      alt={titleOf(a)}
                       loading="lazy"
                       decoding="async"
                       className="w-full h-full object-cover"
@@ -192,12 +204,20 @@ export const NowPlayingDashboard: React.FC<NowPlayingDashboardProps> = ({
                     </span>
                   </div>
                   <div className="min-w-0 flex-1">
-                    <div className="text-xs font-bold text-text-primary truncate">{a.title_romaji}</div>
+                    <div className="text-xs font-bold text-text-primary truncate">{titleOf(a)}</div>
                     <div className="text-[11px] font-semibold text-emerald-400 mt-1">Ep {next} ready</div>
                     <div className="text-[10px] text-text-muted mt-0.5">
                       {a.user_progress}/{a.episodes ?? "?"}
                       {more > 0 ? ` · +${more} more on disk` : ""}
                     </div>
+                    {left && (
+                      <div
+                        className="text-[10px] text-text-secondary mt-0.5 flex items-center gap-1"
+                        title={`${left.episodes} episode${left.episodes === 1 ? "" : "s"} left × ${left.perEpisode} min`}
+                      >
+                        <Clock className="w-3 h-3 shrink-0 text-text-muted" />~{formatMinutes(left.minutes)} to finish
+                      </div>
+                    )}
                   </div>
                 </button>
               );
@@ -271,7 +291,9 @@ const RecentList: React.FC<{
   dateOf: (a: AnimeEntry) => string | null;
   empty: string;
   onOpenAnime: (anime: AnimeEntry) => void;
-}> = ({ icon, title, items, dateOf, empty, onOpenAnime }) => (
+}> = ({ icon, title, items, dateOf, empty, onOpenAnime }) => {
+  const titleOf = useAnimeTitle();
+  return (
   <section className="bg-bg-secondary border border-border-subtle rounded-2xl p-4 space-y-3">
     <h2 className="text-sm font-bold text-text-primary flex items-center gap-2">
       {icon}
@@ -292,13 +314,13 @@ const RecentList: React.FC<{
             >
               <img
                 src={getOptimizedCoverUrl(a.cover_image, "medium")}
-                alt={a.title_romaji}
+                alt={titleOf(a)}
                 loading="lazy"
                 decoding="async"
                 className="w-8 h-11 object-cover rounded-md shrink-0"
               />
               <div className="min-w-0 flex-1">
-                <div className="text-xs font-semibold text-text-primary truncate">{a.title_romaji}</div>
+                <div className="text-xs font-semibold text-text-primary truncate">{titleOf(a)}</div>
                 <div className="text-[10px] text-text-muted">{formatFuzzyDate(dateOf(a))}</div>
               </div>
               {status && (
@@ -312,4 +334,5 @@ const RecentList: React.FC<{
       </div>
     )}
   </section>
-);
+  );
+};

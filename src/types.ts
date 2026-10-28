@@ -27,7 +27,10 @@ export interface AnimeEntry {
   title_romaji: string;
   title_english: string | null;
   title_native: string | null;
+  /** Every matchable alternative title (AniList synonyms + `custom_synonyms`) */
   synonyms: string[];
+  /** The user's own aliases (subset of `synonyms`); the only ones edited in the drawer */
+  custom_synonyms: string[];
   format: string;
   airing_status: string;
   episodes: number | null;
@@ -294,6 +297,46 @@ export interface WatchHistoryEntry {
   file_name: string;
   scrobbled_to_tracker: boolean;
   timestamp_unix: number;
+  /** Correction rows only (a manual progress decrease): progress before; `episode_number` is the new one */
+  progress_from: number | null;
+}
+
+/** One watched-episode history row (corrections excluded) */
+export interface WatchEvent {
+  t: number;
+  minutes: number;
+  player: string;
+}
+
+export interface ReadyToWatch {
+  anime_id: number;
+  unwatched_on_disk: number;
+  /** Episode `progress + 1` is on disk */
+  next_episode_on_disk: boolean;
+}
+
+/** `get_stats`: list totals, backlog and the last 366 days of watch events (rewatches included) */
+export interface ListStats {
+  total_entries: number;
+  status_counts: Record<string, number>;
+  episodes_watched: number;
+  minutes_watched: number;
+  mean_score: number | null;
+  scored_count: number;
+  planning_episodes: number;
+  planning_minutes: number;
+  watching_remaining_episodes: number;
+  watching_remaining_minutes: number;
+  ready_to_watch: ReadyToWatch[];
+  logged_episodes: number;
+  first_logged_at: number | null;
+  watch_events: WatchEvent[];
+}
+
+export interface AppInfo {
+  data_dir: string;
+  db_path: string;
+  db_size_bytes: number;
 }
 
 export interface TrackerPluginDescriptor {
@@ -337,7 +380,11 @@ export interface AppSettings {
   qbittorrent_category: string;
   qbittorrent_save_path: string;
   players: PlayerDefinition[];
+  /** Which title the UI shows; missing English / Native titles fall back to Romaji */
+  title_language: TitleLanguage;
 }
+
+export type TitleLanguage = "romaji" | "english" | "native";
 
 export interface SyncSummary {
   added: number;

@@ -17,6 +17,8 @@ import {
 import { AnimeEntry, BatchAnimeUpdatePatch } from "../types";
 import { formatCountdown, getOptimizedCoverUrl } from "../api";
 import { AnimeQuickMenu, STATUS_OPTIONS } from "./AnimeQuickMenu";
+import { displayTitle, useAnimeTitle } from "../titles";
+import { playLocalEpisode } from "../nowPlaying";
 
 /** A titled section of the list (search results grouped by status) */
 export interface WatchlistGroup {
@@ -88,6 +90,7 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
   onDeleteAnime,
   showToast,
 }) => {
+  const titleOf = useAnimeTitle();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const menuWrapperRef = useRef<HTMLDivElement | null>(null);
   const lastClickedIdRef = useRef<number | null>(null);
@@ -173,6 +176,25 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
       onOpenAnimeModal(anime);
     },
     [onOpenAnimeModal, onSetQuickMenuAnimeId]
+  );
+
+  // Middle click plays the next episode from disk (mousedown is cancelled so WebView2 doesn't start autoscroll)
+  const handleMiddleMouseDown = useCallback((e: React.MouseEvent) => {
+    if (e.button === 1) e.preventDefault();
+  }, []);
+
+  const handleAuxClick = useCallback(
+    (e: React.MouseEvent, anime: AnimeEntry) => {
+      if (e.button !== 1) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (anime.episodes && anime.user_progress >= anime.episodes) {
+        showToast(`All episodes of "${displayTitle(anime)}" are watched`, "info");
+        return;
+      }
+      void playLocalEpisode(anime, anime.user_progress + 1, showToast);
+    },
+    [showToast]
   );
 
   const handleContextMenu = useCallback(
@@ -476,6 +498,8 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
         style={{ height: layout.cardHeight }}
         onClick={(e) => handleItemClick(e, anime)}
         onDoubleClick={(e) => handleItemDoubleClick(e, anime)}
+        onMouseDown={handleMiddleMouseDown}
+        onAuxClick={(e) => handleAuxClick(e, anime)}
         onContextMenu={(e) => handleContextMenu(e, anime)}
         className={`group relative rounded-2xl overflow-visible flex flex-col cursor-pointer transition-[color,background-color,border-color,box-shadow] shadow-sm hover:shadow-xl ${isSelected
           ? "bg-accent/10 border border-accent ring-2 ring-accent/40 shadow-lg shadow-accent/10"
@@ -485,7 +509,7 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
         <div className="relative flex-1 w-full rounded-t-2xl overflow-hidden bg-bg-tertiary">
           <img
             src={getOptimizedCoverUrl(anime.cover_image, "large")}
-            alt={anime.title_romaji}
+            alt={titleOf(anime)}
             loading="lazy"
             decoding="async"
             className="w-full h-full object-cover"
@@ -557,9 +581,9 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
               ? "text-accent"
               : "text-text-primary group-hover:text-accent"
               }`}
-            title={anime.title_romaji}
+            title={titleOf(anime)}
           >
-            {anime.title_romaji}
+            {titleOf(anime)}
           </h3>
           <div className="flex items-center justify-between text-[11px] text-text-muted">
             <span className="truncate">{anime.studios[0] || anime.format}</span>
@@ -583,6 +607,8 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
         style={{ height: layout.cardHeight }}
         onClick={(e) => handleItemClick(e, anime)}
         onDoubleClick={(e) => handleItemDoubleClick(e, anime)}
+        onMouseDown={handleMiddleMouseDown}
+        onAuxClick={(e) => handleAuxClick(e, anime)}
         onContextMenu={(e) => handleContextMenu(e, anime)}
         className={`group flex gap-4 p-3.5 rounded-2xl cursor-pointer transition-[color,background-color,border-color,box-shadow] ${isSelected
           ? "bg-accent/10 border border-accent ring-2 ring-accent/30 shadow-md"
@@ -592,7 +618,7 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
         <div className="relative w-20 h-28 shrink-0">
           <img
             src={getOptimizedCoverUrl(anime.cover_image, "medium")}
-            alt={anime.title_romaji}
+            alt={titleOf(anime)}
             loading="lazy"
             decoding="async"
             className="w-20 h-28 object-cover rounded-xl"
@@ -609,7 +635,7 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
                 className={`text-sm font-bold truncate ${isSelected ? "text-accent" : "text-text-primary"
                   }`}
               >
-                {anime.title_romaji}
+                {titleOf(anime)}
               </h3>
               <span className="px-2 py-0.5 rounded bg-bg-tertiary text-[10px] font-mono text-text-secondary shrink-0">
                 {anime.format}
@@ -668,6 +694,8 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
         style={{ height: layout.rowHeight }}
         onClick={(e) => handleItemClick(e, anime)}
         onDoubleClick={(e) => handleItemDoubleClick(e, anime)}
+        onMouseDown={handleMiddleMouseDown}
+        onAuxClick={(e) => handleAuxClick(e, anime)}
         onContextMenu={(e) => handleContextMenu(e, anime)}
         className={`cursor-pointer transition-colors ${isSelected
           ? "bg-accent/15 hover:bg-accent/20 shadow-[inset_3px_0_0_0_rgb(var(--accent-primary))]"
@@ -677,7 +705,7 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
         <td className="py-2 pl-4 pr-3 flex items-center gap-3">
           <img
             src={getOptimizedCoverUrl(anime.cover_image, "medium")}
-            alt={anime.title_romaji}
+            alt={titleOf(anime)}
             loading="lazy"
             decoding="async"
             className="w-7 h-10 object-cover rounded shrink-0"
@@ -690,7 +718,7 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
               {anime.sync_pending && (
                 <PendingSyncDot className="inline-block mr-1.5 align-middle" />
               )}
-              {anime.title_romaji}
+              {titleOf(anime)}
             </div>
             <div className="text-[10px] text-text-muted truncate max-w-md">
               {anime.studios.join(", ")}
