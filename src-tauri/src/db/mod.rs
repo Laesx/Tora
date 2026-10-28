@@ -1,7 +1,7 @@
 use crate::detection::anisthesia::{default_players, PlayerDefinition};
 use crate::detection::anitomy::{extract_effective_season, normalize_anime_title, AnitomyElements};
 use crate::detection::relations::relations_db;
-use crate::plugins::SeasonalAnime;
+use crate::plugins::{AiringScheduleItem, SeasonalAnime};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use once_cell::sync::Lazy;
@@ -1154,7 +1154,9 @@ fn run_data_migrations(conn: &mut Connection) -> Result<(), String> {
          DELETE FROM title_aliases
            WHERE anime_id IN (SELECT id FROM anime_entries WHERE anilist_id IS NULL);
          DELETE FROM anime_entries WHERE anilist_id IS NULL;
-         DELETE FROM seasonal_cache WHERE payload_json LIKE '[{%';",
+         DELETE FROM seasonal_cache WHERE payload_json LIKE '[{%';
+         DELETE FROM airing_schedule_cache
+           WHERE payload_json LIKE '[{%' AND payload_json NOT LIKE '%\"country\":%';",
     )
     .map_err(|e| e.to_string())?;
 
@@ -1554,6 +1556,13 @@ impl Database {
 
             CREATE TABLE IF NOT EXISTS media_metadata (
                 anilist_id INTEGER PRIMARY KEY,
+                fetched_at INTEGER NOT NULL,
+                payload_json TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS airing_schedule_cache (
+                week_from INTEGER PRIMARY KEY,
+                week_to INTEGER NOT NULL,
                 fetched_at INTEGER NOT NULL,
                 payload_json TEXT NOT NULL
             );",
@@ -2317,6 +2326,51 @@ impl Database {
     pub fn put_media_metadata(&self, fetched_at: i64, item: &SeasonalAnime) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         put_media_metadata_tx(&conn, fetched_at, item)
+    }
+
+    /// Cached airing schedule of the range starting at `from`: `(fetched_at, items)`. A range with a
+    /// different end or a corrupt payload counts as a miss.
+    pub fn get_airing_schedule_cache(
+        &self,
+        from: i64,
+        to: i64,
+    ) -> Result<Option<(i64, Vec<AiringScheduleItem>)>, String> {
+        let conn = self.reader()?;
+        let row: Option<(i64, i64, String)> = conn
+            .query_row(
+                "SELECT week_to, fetched_at, payload_json FROM airing_schedule_cache WHERE week_from = ?1",
+                params![from],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        Ok(row.and_then(|(week_to, fetched_at, json)| {
+            if week_to != to {
+                return None;
+            }
+            serde_json::from_str::<Vec<AiringScheduleItem>>(&json)
+                .ok()
+                .map(|items| (fetched_at, items))
+        }))
+    }
+
+    pub fn put_airing_schedule_cache(
+        &self,
+        from: i64,
+        to: i64,
+        fetched_at: i64,
+        items: &[AiringScheduleItem],
+    ) -> Result<(), String> {
+        let json = serde_json::to_string(items).map_err(|e| e.to_string())?;
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO airing_schedule_cache (week_from, week_to, fetched_at, payload_json) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(week_from) DO UPDATE SET week_to = excluded.week_to, fetched_at = excluded.fetched_at,
+                 payload_json = excluded.payload_json",
+            params![from, to, fetched_at, json],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     pub fn list_cached_seasons(&self) -> Result<Vec<CachedSeason>, String> {

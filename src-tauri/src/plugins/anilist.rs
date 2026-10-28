@@ -1,7 +1,7 @@
 use crate::db::AnimeEntry;
 use crate::plugins::{
-    BoxFuture, MediaMetadata, MediaRanking, MediaTag, RemoteEntryState, RemoteListSnapshot,
-    SeasonPage, SeasonalAnime, StudioRef,
+    AiringScheduleItem, AiringSchedulePage, BoxFuture, MediaMetadata, MediaRanking, MediaTag,
+    RemoteEntryState, RemoteListSnapshot, SeasonPage, SeasonalAnime, StudioRef,
     TrackerEntryUpdate, TrackerError, TrackerPlugin, TrackerPluginDescriptor, TrackerUserProfile,
     MEDIA_DETAILS_CHUNK,
 };
@@ -669,6 +669,24 @@ const MEDIA_LIST_FRAGMENT: &str = r#"
     }
 "#;
 
+/// `Page.airingSchedules` node (`episode`, `airingAt`, `media { MEDIA_LIST_FRAGMENT isAdult }`) → item.
+/// Adult media and nodes missing a field are skipped.
+fn parse_airing_schedule_node(node: &Value) -> Option<AiringScheduleItem> {
+    let media = node.get("media")?;
+    if media.get("isAdult").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return None;
+    }
+    Some(AiringScheduleItem {
+        episode: opt_u32(node.get("episode"))?,
+        airing_at: node.get("airingAt")?.as_i64()?,
+        media: AniListPlugin::parse_media_node(media, None)?,
+        country: media
+            .get("countryOfOrigin")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+    })
+}
+
 impl TrackerPlugin for AniListPlugin {
     fn descriptor(&self) -> TrackerPluginDescriptor {
         TrackerPluginDescriptor {
@@ -1035,6 +1053,58 @@ impl TrackerPlugin for AniListPlugin {
         })
     }
 
+    fn fetch_airing_schedule_page<'a>(
+        &'a self,
+        from: i64,
+        to: i64,
+        page: u32,
+    ) -> BoxFuture<'a, Result<AiringSchedulePage, TrackerError>> {
+        Box::pin(async move {
+            let gql = format!(
+                r#"
+                query ($from: Int, $to: Int, $page: Int) {{
+                    Page(page: $page, perPage: {SEASON_PAGE_SIZE}) {{
+                        pageInfo {{
+                            hasNextPage
+                        }}
+                        airingSchedules(airingAt_greater: $from, airingAt_lesser: $to, sort: [TIME]) {{
+                            episode
+                            airingAt
+                            media {{
+                                {MEDIA_LIST_FRAGMENT}
+                                isAdult
+                                countryOfOrigin
+                            }}
+                        }}
+                    }}
+                }}
+                "#
+            );
+            // airingAt_greater is exclusive, so start one second early to include `from` itself
+            let vars = json!({
+                "from": from - 1,
+                "to": to,
+                "page": page.max(1),
+            });
+            let data = self.graphql_request(&gql, vars, None).await?;
+            let page_obj = data.get("Page");
+            let has_next_page = page_obj
+                .and_then(|p| p.get("pageInfo"))
+                .and_then(|p| p.get("hasNextPage"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let items = page_obj
+                .and_then(|p| p.get("airingSchedules"))
+                .and_then(|m| m.as_array())
+                .map(|arr| arr.iter().filter_map(parse_airing_schedule_node).collect())
+                .unwrap_or_default();
+            Ok(AiringSchedulePage {
+                items,
+                has_next_page,
+            })
+        })
+    }
+
     fn fetch_media_metadata<'a>(
         &'a self,
         id: i64,
@@ -1268,6 +1338,24 @@ mod tests {
         // Heavy metadata is absent in the light fetch (the merge never writes these for existing rows)
         assert!(e.synopsis.is_empty() && e.genres.is_empty() && e.studios.is_empty());
         assert_eq!((e.mal_id, e.banner_image, e.trailer_url), (None, None, None));
+    }
+
+    #[test]
+    fn airing_schedule_nodes_parse_and_skip_adult_media() {
+        let nodes = json!([
+            { "episode": 5, "airingAt": 1900000000, "media": {
+                "id": 7, "title": { "romaji": "Show" }, "format": "TV", "status": "RELEASING",
+                "coverImage": { "large": "https://img/7.jpg" }, "isAdult": false, "countryOfOrigin": "CN" } },
+            { "episode": 2, "airingAt": 1900003600, "media": {
+                "id": 8, "title": { "romaji": "Adult" }, "isAdult": true } },
+            { "episode": null, "airingAt": 1900007200, "media": { "id": 9, "title": { "romaji": "No ep" } } }
+        ]);
+        let items: Vec<_> = nodes.as_array().unwrap().iter().filter_map(parse_airing_schedule_node).collect();
+        assert_eq!(items.len(), 1);
+        assert_eq!((items[0].episode, items[0].airing_at), (5, 1_900_000_000));
+        assert_eq!(items[0].media.id, 7);
+        assert_eq!(items[0].media.cover_image, "https://img/7.jpg");
+        assert_eq!(items[0].country.as_deref(), Some("CN"));
     }
 
     #[test]

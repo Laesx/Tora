@@ -21,7 +21,7 @@ use crate::db::{AnimeEntry, AppSettings, BatchAnimeUpdatePatch, Database};
 use crate::detection::anisthesia::DetectedMediaSession;
 use crate::library::scanner::ScanSummary;
 use crate::plugins::{
-    PluginManager, SeasonalAnime, TrackerEntryUpdate, TrackerError, TrackerPlugin,
+    AiringScheduleItem, PluginManager, SeasonalAnime, TrackerEntryUpdate, TrackerError, TrackerPlugin,
     MEDIA_DETAILS_CHUNK,
 };
 use serde::{Deserialize, Serialize};
@@ -1427,6 +1427,113 @@ impl TrackerSyncService {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Airing schedule (public data, snapshot per week in `airing_schedule_cache`)
+// ---------------------------------------------------------------------------------------------
+
+/// A cached range that hasn't ended yet is refetched after this long (delays and breaks move episodes).
+const SCHEDULE_STALE_AFTER_SECS: i64 = 6 * 60 * 60;
+/// Safety cap on pages per range (50 airings each).
+const MAX_SCHEDULE_PAGES: u32 = 10;
+/// Longest range a single request may cover (a calendar week, with slack for DST).
+const MAX_SCHEDULE_RANGE_SECS: i64 = 8 * 24 * 60 * 60;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiringScheduleResult {
+    pub from: i64,
+    pub to: i64,
+    pub fetched_at: i64,
+    /// Sorted by `airing_at`.
+    pub items: Vec<AiringScheduleItem>,
+    pub from_cache: bool,
+    /// Served from cache, but old enough that the caller should refresh in the background.
+    pub stale: bool,
+}
+
+/// Ranges that already ended never change; others go stale after [`SCHEDULE_STALE_AFTER_SECS`].
+pub fn schedule_cache_is_stale(to: i64, fetched_at: i64, now: i64) -> bool {
+    to > now && now - fetched_at > SCHEDULE_STALE_AFTER_SECS
+}
+
+impl TrackerSyncService {
+    /// Every episode airing in `from..to` (unix seconds). Serves the cached snapshot unless
+    /// `force_refresh` or none exists; otherwise fetches all pages (through the shared rate limiter)
+    /// and replaces it. Never touches `anime_entries` or `media_metadata`.
+    pub async fn fetch_airing_schedule(
+        &self,
+        from: i64,
+        to: i64,
+        force_refresh: bool,
+    ) -> Result<AiringScheduleResult, String> {
+        if to <= from || to - from > MAX_SCHEDULE_RANGE_SECS {
+            return Err(format!("Invalid airing schedule range {}..{}", from, to));
+        }
+        let now = chrono::Utc::now().timestamp();
+
+        if !force_refresh {
+            if let Some((fetched_at, items)) = self
+                .blocking(move |db| db.get_airing_schedule_cache(from, to))
+                .await?
+            {
+                return Ok(AiringScheduleResult {
+                    from,
+                    to,
+                    fetched_at,
+                    items,
+                    from_cache: true,
+                    stale: schedule_cache_is_stale(to, fetched_at, now),
+                });
+            }
+        }
+
+        let plugin = self.plugin()?;
+        let phase = Instant::now();
+        let mut items: Vec<AiringScheduleItem> = Vec::new();
+        let mut seen = HashSet::new();
+        let mut page = 1;
+        loop {
+            let result = self
+                .limiter
+                .run(|| plugin.fetch_airing_schedule_page(from, to, page))
+                .await?;
+            items.extend(
+                result
+                    .items
+                    .into_iter()
+                    .filter(|it| it.airing_at >= from && it.airing_at < to)
+                    .filter(|it| seen.insert((it.media.id, it.episode))),
+            );
+            if !result.has_next_page || page >= MAX_SCHEDULE_PAGES {
+                break;
+            }
+            page += 1;
+        }
+        items.sort_by_key(|it| it.airing_at);
+        eprintln!(
+            "[schedule] fetched {}..{}: {} airings in {} page(s), {}ms",
+            from,
+            to,
+            items.len(),
+            page,
+            phase.elapsed().as_millis()
+        );
+
+        let fetched_at = chrono::Utc::now().timestamp();
+        let to_store = items.clone();
+        self.blocking(move |db| db.put_airing_schedule_cache(from, to, fetched_at, &to_store))
+            .await?;
+
+        Ok(AiringScheduleResult {
+            from,
+            to,
+            fetched_at,
+            items,
+            from_cache: false,
+            stale: false,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------------------------
 
@@ -1714,6 +1821,10 @@ mod tests {
         season_calls: Mutex<Vec<(String, u32, u32)>>,
         /// Ids of every `fetch_media_metadata` call.
         metadata_calls: Mutex<Vec<i64>>,
+        /// Airings returned by `fetch_airing_schedule_page`, 2 per page (unfiltered by range).
+        schedule_items: Mutex<Vec<AiringScheduleItem>>,
+        /// `(from, to, page)` of every `fetch_airing_schedule_page` call.
+        schedule_calls: Mutex<Vec<(i64, i64, u32)>>,
     }
 
     impl TrackerPlugin for MockTracker {
@@ -1796,6 +1907,22 @@ mod tests {
                     .collect();
                 Ok(crate::plugins::SeasonPage {
                     items,
+                    has_next_page: start + 2 < all.len(),
+                })
+            })
+        }
+        fn fetch_airing_schedule_page<'a>(
+            &'a self,
+            from: i64,
+            to: i64,
+            page: u32,
+        ) -> BoxFuture<'a, Result<crate::plugins::AiringSchedulePage, TrackerError>> {
+            Box::pin(async move {
+                self.schedule_calls.lock().unwrap().push((from, to, page));
+                let all = self.schedule_items.lock().unwrap().clone();
+                let start = ((page - 1) * 2) as usize;
+                Ok(crate::plugins::AiringSchedulePage {
+                    items: all.iter().skip(start).take(2).cloned().collect(),
                     has_next_page: start + 2 < all.len(),
                 })
             })
@@ -1949,6 +2076,63 @@ mod tests {
         );
 
         assert!(svc.fetch_season("AUTUMN", 2025, false).await.is_err());
+    }
+
+    #[test]
+    fn schedule_staleness_only_applies_to_unfinished_ranges() {
+        let h = 60 * 60;
+        // Range still running: stale after 6h
+        assert!(!schedule_cache_is_stale(10_000_000, 1_000, 1_000 + 6 * h - 1));
+        assert!(schedule_cache_is_stale(10_000_000, 1_000, 1_000 + 6 * h + 1));
+        // Range already over: never stale
+        assert!(!schedule_cache_is_stale(5_000, 1_000, 1_000 + 100 * h));
+    }
+
+    #[tokio::test]
+    async fn fetch_airing_schedule_pages_through_and_caches() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let mock = Arc::new(MockTracker::default());
+        let (from, to) = (1_000_000, 1_000_000 + 7 * 86_400);
+        let airing = |id: i64, ep: u32, at: i64| AiringScheduleItem {
+            episode: ep,
+            airing_at: at,
+            media: test_entry(id, &format!("Show {}", id)),
+            country: Some("JP".into()),
+        };
+        *mock.schedule_items.lock().unwrap() = vec![
+            airing(1, 3, from + 7_200),
+            airing(2, 1, from + 3_600),
+            airing(1, 3, from + 7_200), // duplicate across pages
+            airing(3, 9, to),           // outside the range (end is exclusive)
+            airing(4, 2, from),
+        ];
+        let (svc, _events) = service(db.clone(), mock.clone());
+
+        let first = svc.fetch_airing_schedule(from, to, false).await.unwrap();
+        assert!(!first.from_cache);
+        let order: Vec<_> = first.items.iter().map(|it| (it.media.id, it.episode)).collect();
+        assert_eq!(order, vec![(4, 2), (2, 1), (1, 3)]);
+        assert_eq!(mock.schedule_calls.lock().unwrap().len(), 3);
+        // Browsing never creates list entries or metadata rows
+        assert!(db.list_anime_entries().unwrap().is_empty());
+        assert!(db.get_media_metadata(1).unwrap().is_none());
+
+        // Served from the cache without touching the tracker
+        let cached = svc.fetch_airing_schedule(from, to, false).await.unwrap();
+        assert!(cached.from_cache);
+        assert_eq!(cached.items.len(), 3);
+        assert_eq!(cached.items[2].media.title_romaji, "Show 1");
+        assert_eq!(mock.schedule_calls.lock().unwrap().len(), 3);
+
+        // A different end for the same start is a miss; a forced refresh replaces the snapshot
+        mock.schedule_items.lock().unwrap().truncate(1);
+        let refreshed = svc.fetch_airing_schedule(from, to, true).await.unwrap();
+        assert!(!refreshed.from_cache);
+        assert_eq!(refreshed.items.len(), 1);
+        assert!(db.get_airing_schedule_cache(from, to - 3_600).unwrap().is_none());
+
+        assert!(svc.fetch_airing_schedule(to, from, false).await.is_err());
+        assert!(svc.fetch_airing_schedule(from, from + 30 * 86_400, false).await.is_err());
     }
 
     #[tokio::test]

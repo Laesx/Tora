@@ -185,6 +185,26 @@ pub struct SeasonPage {
     pub has_next_page: bool,
 }
 
+/// One episode airing (AniList `AiringSchedule`). `media` carries only the light list fields; a
+/// response / cache type only — never written to `anime_entries` or `media_metadata`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiringScheduleItem {
+    pub episode: u32,
+    /// Unix seconds.
+    pub airing_at: i64,
+    pub media: AnimeEntry,
+    /// ISO 3166-1 alpha-2 country of origin (`JP`, `CN`, `KR`, …).
+    #[serde(default)]
+    pub country: Option<String>,
+}
+
+/// One page of [`TrackerPlugin::fetch_airing_schedule_page`].
+#[derive(Debug, Clone)]
+pub struct AiringSchedulePage {
+    pub items: Vec<AiringScheduleItem>,
+    pub has_next_page: bool,
+}
+
 /// Core internal trait for all anime tracker plugins (AniList, MyAnimeList, Kitsu, Shikimori, etc.)
 pub trait TrackerPlugin: Send + Sync {
     fn descriptor(&self) -> TrackerPluginDescriptor;
@@ -226,6 +246,15 @@ pub trait TrackerPlugin: Send + Sync {
         year: u32,
         page: u32,
     ) -> BoxFuture<'a, Result<SeasonPage, TrackerError>>;
+
+    /// Fetch one page (1-based) of every episode airing in `from..to` (unix seconds), earliest first.
+    /// Adult media are left out.
+    fn fetch_airing_schedule_page<'a>(
+        &'a self,
+        from: i64,
+        to: i64,
+        page: u32,
+    ) -> BoxFuture<'a, Result<AiringSchedulePage, TrackerError>>;
 
     /// Fetch one media with the same fields as a season page item. `Ok(None)` if it doesn't exist.
     fn fetch_media_metadata<'a>(
@@ -311,6 +340,16 @@ impl TrackerPlugin for StubTrackerPlugin {
         _year: u32,
         _page: u32,
     ) -> BoxFuture<'a, Result<SeasonPage, TrackerError>> {
+        let err = self.not_configured();
+        Box::pin(async move { Err(err) })
+    }
+
+    fn fetch_airing_schedule_page<'a>(
+        &'a self,
+        _from: i64,
+        _to: i64,
+        _page: u32,
+    ) -> BoxFuture<'a, Result<AiringSchedulePage, TrackerError>> {
         let err = self.not_configured();
         Box::pin(async move { Err(err) })
     }

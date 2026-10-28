@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import {
+  AiringScheduleResult,
   AnimeEntry,
   AppSettings,
   BatchAnimeUpdatePatch,
@@ -226,6 +227,14 @@ export const toraApi = {
     }),
 
   listCachedSeasons: () => invoke<CachedSeason[]>("list_cached_seasons"),
+
+  // Every episode airing in [from, to) (unix seconds); cached per range, refetched when forced (or stale, by the caller)
+  getAiringSchedule: (params: { from: number; to: number; forceRefresh?: boolean }) =>
+    invoke<AiringScheduleResult>("get_airing_schedule", {
+      from: params.from,
+      to: params.to,
+      forceRefresh: params.forceRefresh ?? false,
+    }),
 
   getLibraryFolders: () => invoke<LibraryFolder[]>("get_library_folders"),
 

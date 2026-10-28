@@ -21,6 +21,7 @@ import {
   User,
   RefreshCw,
   CalendarDays,
+  CalendarClock,
   History,
 } from "lucide-react";
 import {
@@ -45,6 +46,7 @@ import { TorrentsView } from "./components/TorrentsView";
 import { NowPlayingView } from "./components/NowPlayingView";
 import { HistoryView } from "./components/HistoryView";
 import { SeasonsView } from "./components/SeasonsView";
+import { ScheduleView } from "./components/ScheduleView";
 import { SearchView } from "./components/SearchView";
 import { SettingsView } from "./components/SettingsView";
 import { CommandPalette } from "./components/CommandPalette";
@@ -53,6 +55,7 @@ type NavTab =
   | "watchlist"
   | "torrents"
   | "seasons"
+  | "schedule"
   | "search"
   | "nowplaying"
   | "history"
@@ -948,6 +951,19 @@ export const App: React.FC = () => {
             </button>
 
             <button
+              onClick={() => setActiveTab("schedule")}
+              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${activeTab === "schedule"
+                ? "bg-accent text-white shadow-sm"
+                : "text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
+                }`}
+            >
+              <span className="flex items-center gap-2.5">
+                <CalendarClock className="w-4 h-4" />
+                Schedule
+              </span>
+            </button>
+
+            <button
               onClick={() => setActiveTab("search")}
               className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${activeTab === "search"
                 ? "bg-accent text-white shadow-sm"
@@ -1331,6 +1347,30 @@ export const App: React.FC = () => {
                 )
               }
               onRemoveAnime={handleDeleteAnime}
+              showToast={showToast}
+            />
+          )}
+
+          {activeTab === "schedule" && (
+            <ScheduleView
+              animeList={animeList}
+              onOpenAnime={openAnime}
+              onAddAnime={handleAddRemoteAnime}
+              onChangeStatus={(anime, status, label) =>
+                handleBatchUpdate(
+                  { anime_ids: [anime.id], user_status: status },
+                  `Moved "${anime.title_romaji}" to ${label}`
+                )
+              }
+              onRemoveAnime={handleDeleteAnime}
+              onStepEpisode={handleStepEpisode}
+              onBatchUpdate={handleBatchUpdate}
+              onBatchDelete={handleBatchDelete}
+              onSearchTorrents={(q) => {
+                setTorrentSearchQuery(q);
+                setActiveTab("torrents");
+              }}
+              onDeleteAnime={handleDeleteAnime}
               showToast={showToast}
             />
           )}

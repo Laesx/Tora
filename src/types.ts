@@ -121,6 +121,27 @@ export interface SeasonResult {
   stale: boolean;
 }
 
+/** One episode airing; `media` carries only the light list fields (never a list entry by itself). */
+export interface AiringScheduleItem {
+  episode: number;
+  /** Unix seconds */
+  airing_at: number;
+  media: AnimeEntry;
+  /** ISO country of origin (`JP`, `CN`, `KR`, …) */
+  country: string | null;
+}
+
+export interface AiringScheduleResult {
+  from: number;
+  to: number;
+  fetched_at: number;
+  /** Sorted by `airing_at` */
+  items: AiringScheduleItem[];
+  from_cache: boolean;
+  /** Served from cache but due for a background refresh */
+  stale: boolean;
+}
+
 export interface CachedSeason {
   season: string;
   year: number;

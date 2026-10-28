@@ -14,7 +14,7 @@ use crate::detection::anitomy::{parse_filename, AnitomyElements};
 use crate::library::scanner::{DriveStorageSummary, LibraryMonitorHandle, ScanSummary};
 use crate::plugins::{PluginManager, SeasonalAnime, TrackerPluginDescriptor, TrackerUserProfile};
 use crate::sync::{
-    ChangeSource, SeasonResult, SyncEmitter, SyncStatus, SyncSummary, TrackerSyncService,
+    AiringScheduleResult, ChangeSource, SeasonResult, SyncEmitter, SyncStatus, SyncSummary, TrackerSyncService,
     UserStateChange,
 };
 use crate::torrents::{
@@ -196,6 +196,16 @@ async fn get_season(
     force_refresh: bool,
 ) -> Result<SeasonResult, String> {
     state.sync.fetch_season(&season, year, force_refresh).await
+}
+
+#[tauri::command]
+async fn get_airing_schedule(
+    state: State<'_, AppState>,
+    from: i64,
+    to: i64,
+    force_refresh: bool,
+) -> Result<AiringScheduleResult, String> {
+    state.sync.fetch_airing_schedule(from, to, force_refresh).await
 }
 
 #[tauri::command]
@@ -1352,6 +1362,7 @@ pub fn run() {
             get_sync_status,
             search_remote_anime,
             get_season,
+            get_airing_schedule,
             list_cached_seasons,
             get_library_folders,
             add_library_folder,

@@ -59,6 +59,7 @@ Tora/
 │   ├── api.ts                            # Typed Tauri invoke wrappers (`toraApi`), theme presets & image downscaling helpers
 │   ├── types.ts                          # Shared TypeScript interfaces mirroring Rust database and detection models
 │   ├── seasons.ts                        # Season helpers (current season, shift, labels; broadcast quarters)
+│   ├── schedule.ts                       # Airing schedule helpers (Mon–Sun local weeks, bounds, day/time labels, country labels, `detectBreaks`)
 │   ├── nowPlaying.ts                     # Now Playing helpers: AniList links, play/open-folder, date & enum formatting
 │   ├── main.tsx                          # React 19 entrypoint & root provider
 │   ├── styles/
@@ -70,12 +71,13 @@ Tora/
 │       ├── CommandPalette.tsx            # Ctrl+K fuzzy command palette & global search
 │       ├── AnimePosterCard.tsx           # Poster card for remote anime (Seasons / Search): opens drawer, quick-add
 │       ├── SeasonsView.tsx               # Cached seasonal browser (chips, ‹ ›, picker, sort/group/format filters, virtualized grid)
+│       ├── ScheduleView.tsx              # Weekly airing timetable (columns / agenda layouts, countdowns, my list / all anime, format/country/status filters, inferred breaks, "next episode ready" play, right-click add)
 │       ├── SearchView.tsx                # Global AniList search (Enter in the Seasons filter lands here)
 │       ├── LibraryManagerView.tsx        # Multi-drive folder manager, disk usage & virtualized episode table (Settings → Library)
 │       ├── NowPlayingView.tsx            # Now Playing tab: hero while playing, dashboard when idle
 │       ├── NowPlayingHero.tsx            # Playing anime hero (cover → AniList, metadata, studios/genres/tags links, episodes, link prompt)
 │       ├── NowPlayingDashboard.tsx       # Idle: watch stats, continue watching (next ep on disk), recently started/finished airing
-│       ├── AiringCountdown.tsx           # Next-episode countdown for airing anime in the list (Now Playing dashboard)
+│       ├── FloatingQuickMenu.tsx         # Viewport-clamped portal for right-click quick menus (dashboard, schedule)
 │       ├── HistoryView.tsx               # History tab: scrobbles + manual progress changes, grouped by day
 │       ├── SettingsView.tsx              # Sectioned settings: Appearance, Tracker, Library, Playback & Detection (Anisthesia players), Torrents, Diagnostics
 │       ├── TorrentsView.tsx              # Nyaa/AnimeTosho RSS search, feed preview & automated torrent rule editor
@@ -194,6 +196,7 @@ When a filename or media player window title is parsed (`parse_filename` in `src
 - **Pulls must stay diff-only and must never rematch the library**: `merge_remote_list` writes nothing for unchanged entries, uses targeted UPDATEs for changed ones, rewrites `normalized_titles_json` only when titles/synonyms change, and only touches `local_episodes.watched` for entries whose progress changed. Heavy metadata (`fetch_media_details`) is fetched only for new entries. Episode matching after a pull is limited to `rematch_ids` (new or retitled entries) via `match_unmatched_episodes_for_ids` in a background task that emits `library-changed`. **Never** call `rematch_all_local_episodes()` from a pull.
 - **Invariants**: every `anime_entries` row has an `anilist_id`; there is no seed data. A signed-in AniList OAuth token is required for any push/pull.
 - **Seasons** (`TrackerSyncService::fetch_season`): public data, no token. All pages of `Page.media(season, seasonYear)` (50/page, `hasNextPage`) go through the shared rate limiter. Each media (`SeasonalAnime`: full metadata + popularity + `MediaMetadata` tags/studios with ids/rankings/mean score/favourites) is upserted into `media_metadata` (one row per AniList id); `seasonal_cache` stores only the season's ordered id list. Browsing never writes `anime_entries`; list status in the Seasons view comes from the local list by id. Cached past seasons are only refetched on demand; current/upcoming ones are flagged `stale` after 24h and refreshed in the background by the frontend.
+- **Airing schedule** (`TrackerSyncService::fetch_airing_schedule`): public data, no token. All pages of `Page.airingSchedules(airingAt_greater, airingAt_lesser)` for one `[from, to)` range (a local Mon–Sun week computed by the frontend, ≤ 8 days) go through the shared rate limiter; media carry only the light `MEDIA_LIST_FRAGMENT` fields (adult media dropped) plus the item's `country` (`countryOfOrigin`). Opening or adding a non-list anime from the schedule first swaps the light media for `media_metadata` (`getMediaMetadata`). "No episode this week" breaks are inferred in the frontend (`detectBreaks`, from list entries' `next_airing_at`) and never stored. Each range is cached as one row in `airing_schedule_cache`; ranges that already ended are never stale, others are flagged `stale` after 6h and refreshed in the background by the frontend. Browsing **never** writes `anime_entries` or `media_metadata`; list state comes from the local list by id.
 - **Media metadata** (`TrackerSyncService::media_metadata`, used by the Now Playing hero): served from `media_metadata`. Only a media with no row is fetched (once, `fetch_media_metadata`, through the rate limiter); playback **never** refreshes it — season fetches are the only refresh path.
 - **Airing dates**: `start_date` / `end_date` (fuzzy `YYYY[-MM[-DD]]`) are part of the light `MEDIA_LIST_FRAGMENT` and compared in `merge_remote_list`, so pulls keep them current without extra requests.
 - **Watch history**: scrobbles log their own row. `Manual`, `Step` and `Batch` changes that raise progress log one row per newly watched episode (`player_name = "Manual"`, no file) via `Database::record_manual_progress`; `Add` never logs.
