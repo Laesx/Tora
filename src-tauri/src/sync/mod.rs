@@ -405,7 +405,20 @@ pub fn write_local_change(
         let _ = db.rematch_all_local_episodes();
         entry = db.get_anime_entry_by_id(change.anime_id)?;
     }
+    if logs_manual_history(change.source) {
+        db.record_manual_progress(&[(
+            current.id,
+            current.title_romaji.clone(),
+            current.user_progress,
+            st.user_progress,
+        )])?;
+    }
     Ok(entry)
+}
+
+/// Manual progress changes are logged to `watch_history` (scrobbles log themselves; adds are not watching).
+fn logs_manual_history(source: ChangeSource) -> bool {
+    matches!(source, ChangeSource::Manual | ChangeSource::Step | ChangeSource::Batch)
 }
 
 /// Blocking: normalize every id of a batch patch and write all states in one transaction.
@@ -417,16 +430,22 @@ pub fn write_batch_change(
     sync_pending: bool,
 ) -> Result<Vec<AnimeEntry>, String> {
     let mut states = Vec::with_capacity(patch.anime_ids.len());
+    let mut progressed = Vec::new();
     for &id in &patch.anime_ids {
         let Ok(current) = db.get_anime_entry_by_id(id) else {
             continue;
         };
         let change = UserStateChange::from_batch_patch(patch, id);
-        states.push((id, normalize_change(&current, &change, today)?));
+        let st = normalize_change(&current, &change, today)?;
+        if st.user_progress > current.user_progress {
+            progressed.push((id, current.title_romaji.clone(), current.user_progress, st.user_progress));
+        }
+        states.push((id, st));
     }
     if db.write_resolved_states(&states, sync_pending)? {
         let _ = db.rematch_all_local_episodes();
     }
+    db.record_manual_progress(&progressed)?;
     Ok(states
         .iter()
         .filter_map(|(id, _)| db.get_anime_entry_by_id(*id).ok())
@@ -1381,6 +1400,30 @@ impl TrackerSyncService {
             stale: false,
         })
     }
+
+    /// Stored metadata of one media (as written by season fetches). Only when none is stored yet is it
+    /// fetched once (through the rate limiter) and stored; it is never refreshed here — season refreshes do that.
+    pub async fn media_metadata(&self, anilist_id: i64) -> Result<Option<SeasonalAnime>, String> {
+        if let Some((_, item)) = self
+            .blocking(move |db| db.get_media_metadata(anilist_id))
+            .await?
+        {
+            return Ok(Some(item));
+        }
+        let plugin = self.plugin()?;
+        let Some(item) = self
+            .limiter
+            .run(|| plugin.fetch_media_metadata(anilist_id))
+            .await?
+        else {
+            return Ok(None);
+        };
+        let fetched_at = chrono::Utc::now().timestamp();
+        let to_store = item.clone();
+        self.blocking(move |db| db.put_media_metadata(fetched_at, &to_store))
+            .await?;
+        Ok(Some(item))
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1669,6 +1712,8 @@ mod tests {
         season_media: Mutex<Vec<AnimeEntry>>,
         /// `(season, year, page)` of every `fetch_season_page` call.
         season_calls: Mutex<Vec<(String, u32, u32)>>,
+        /// Ids of every `fetch_media_metadata` call.
+        metadata_calls: Mutex<Vec<i64>>,
     }
 
     impl TrackerPlugin for MockTracker {
@@ -1746,13 +1791,29 @@ mod tests {
                     .map(|e| SeasonalAnime {
                         entry: e.clone(),
                         popularity: Some(1000 - e.id as u32),
-                        start_date: Some("2026-10".into()),
+                        metadata: Default::default(),
                     })
                     .collect();
                 Ok(crate::plugins::SeasonPage {
                     items,
                     has_next_page: start + 2 < all.len(),
                 })
+            })
+        }
+        fn fetch_media_metadata<'a>(
+            &'a self,
+            id: i64,
+        ) -> BoxFuture<'a, Result<Option<SeasonalAnime>, TrackerError>> {
+            Box::pin(async move {
+                self.metadata_calls.lock().unwrap().push(id);
+                Ok(Some(SeasonalAnime {
+                    entry: test_entry(id, "Fetched"),
+                    popularity: Some(5),
+                    metadata: crate::plugins::MediaMetadata {
+                        favourites: Some(7),
+                        ..Default::default()
+                    },
+                }))
             })
         }
         fn save_list_entry<'a>(
@@ -2133,7 +2194,7 @@ mod tests {
             .unwrap();
         assert!(svc.push_entry_with_history(1, Some(hid)).await);
         assert!(!db.get_anime_entry_by_id(1).unwrap().sync_pending);
-        assert!(db.list_watch_history(5).unwrap()[0].scrobbled_to_tracker);
+        assert!(db.list_watch_history(5, 0).unwrap()[0].scrobbled_to_tracker);
     }
 
     fn step_for(anime_id: i64, progress: u32) -> UserStateChange {
@@ -2185,5 +2246,75 @@ mod tests {
         assert!(db.get_anime_entry_by_id(10).is_err());
         wait_until(|| db.count_pending_deletions().unwrap() == 0).await;
         assert_eq!(*mock.deletes.lock().unwrap(), vec![(10, None)]);
+    }
+
+    #[test]
+    fn manual_progress_increases_are_logged_once_per_episode() {
+        let db = Database::open_in_memory().unwrap();
+        let mut e = test_entry(1, "Alpha");
+        e.user_status = "CURRENT".into();
+        e.user_progress = 3;
+        e.episodes = Some(12);
+        db.upsert_anime_entry(&e).unwrap();
+
+        // Step 3 → 5 logs episodes 4 and 5
+        write_local_change(&db, &UserStateChange { anime_id: 1, ..step(5) }, TODAY, false).unwrap();
+        let hist = db.list_watch_history(10, 0).unwrap();
+        let mut eps: Vec<u32> = hist.iter().map(|h| h.episode_number).collect();
+        eps.sort();
+        assert_eq!(eps, vec![4, 5]);
+        assert!(hist.iter().all(|h| h.player_name == crate::db::MANUAL_HISTORY_PLAYER));
+
+        // A decrease logs nothing
+        write_local_change(&db, &UserStateChange { anime_id: 1, ..step(2) }, TODAY, false).unwrap();
+        assert_eq!(db.list_watch_history(10, 0).unwrap().len(), 2);
+
+        // Scrobbles record their own row; the change itself is not logged again
+        let scrobble = UserStateChange {
+            anime_id: 1,
+            progress: Some(3),
+            source: ChangeSource::Scrobble,
+            ..Default::default()
+        };
+        write_local_change(&db, &scrobble, TODAY, false).unwrap();
+        assert_eq!(db.list_watch_history(10, 0).unwrap().len(), 2);
+
+        // Batch +2 logs per entry
+        let patch = BatchAnimeUpdatePatch {
+            anime_ids: vec![1],
+            user_status: None,
+            user_progress: None,
+            progress_delta: Some(2),
+            mark_completed_progress: None,
+            user_score: None,
+            user_repeats: None,
+            user_notes: None,
+            notes_mode: None,
+            user_started_at: None,
+            user_completed_at: None,
+        };
+        write_batch_change(&db, &patch, TODAY, false).unwrap();
+        assert_eq!(db.list_watch_history(10, 0).unwrap().len(), 4);
+        let now = chrono::Utc::now().timestamp();
+        assert_eq!(db.watch_history_totals(now - 60, now + 1).unwrap().0, 4);
+    }
+
+    #[tokio::test]
+    async fn media_metadata_is_fetched_once_then_served_from_store() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let mock = Arc::new(MockTracker::default());
+        let (svc, _events) = service(db.clone(), mock.clone());
+
+        let first = svc.media_metadata(42).await.unwrap().unwrap();
+        assert_eq!(first.metadata.favourites, Some(7));
+        let again = svc.media_metadata(42).await.unwrap().unwrap();
+        assert_eq!(again.entry.title_romaji, "Fetched");
+        assert_eq!(*mock.metadata_calls.lock().unwrap(), vec![42]);
+
+        // Season fetches write the same store, so their media need no extra request
+        *mock.season_media.lock().unwrap() = vec![test_entry(7, "Seasonal")];
+        svc.fetch_season("SUMMER", 2025, false).await.unwrap();
+        assert_eq!(svc.media_metadata(7).await.unwrap().unwrap().entry.title_romaji, "Seasonal");
+        assert_eq!(*mock.metadata_calls.lock().unwrap(), vec![42]);
     }
 }

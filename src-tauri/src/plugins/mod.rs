@@ -125,15 +125,57 @@ pub struct RemoteListSnapshot {
     pub entries: Vec<AnimeEntry>,
 }
 
-/// One media of a seasonal listing: full metadata plus the fields only the Seasons view sorts by.
-/// A response / cache type only — never written to `anime_entries`.
+/// One media tag (AniList `MediaTag`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MediaTag {
+    pub name: String,
+    /// Relevance 0–100.
+    pub rank: Option<u32>,
+    /// Media or general spoiler.
+    pub is_spoiler: bool,
+}
+
+/// A studio or producer credited on a media (AniList `StudioEdge`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct StudioRef {
+    pub id: i64,
+    pub name: String,
+    pub is_main: bool,
+    pub is_animation_studio: bool,
+}
+
+/// One AniList ranking (e.g. "#3 Highest rated Fall 2026").
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MediaRanking {
+    pub rank: u32,
+    /// `RATED` | `POPULAR`
+    pub kind: String,
+    pub all_time: bool,
+    pub season: Option<String>,
+    pub year: Option<u32>,
+    pub context: String,
+}
+
+/// Non-essential metadata shown by the Now Playing hero. Written only by season fetches (or one
+/// fetch for media that have none yet); never refreshed by playback.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MediaMetadata {
+    pub mean_score: Option<u32>,
+    pub favourites: Option<u32>,
+    pub tags: Vec<MediaTag>,
+    pub studios: Vec<StudioRef>,
+    pub rankings: Vec<MediaRanking>,
+}
+
+/// One media of a seasonal listing (or of `media_metadata`): full metadata plus the fields only the
+/// Seasons view and Now Playing hero use. A response / cache type only — never written to `anime_entries`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SeasonalAnime {
     #[serde(flatten)]
     pub entry: AnimeEntry,
     pub popularity: Option<u32>,
-    /// `YYYY`, `YYYY-MM` or `YYYY-MM-DD` (AniList fuzzy start date), so it sorts lexicographically.
-    pub start_date: Option<String>,
+    #[serde(default)]
+    pub metadata: MediaMetadata,
 }
 
 /// One page of [`TrackerPlugin::fetch_season_page`].
@@ -184,6 +226,12 @@ pub trait TrackerPlugin: Send + Sync {
         year: u32,
         page: u32,
     ) -> BoxFuture<'a, Result<SeasonPage, TrackerError>>;
+
+    /// Fetch one media with the same fields as a season page item. `Ok(None)` if it doesn't exist.
+    fn fetch_media_metadata<'a>(
+        &'a self,
+        id: i64,
+    ) -> BoxFuture<'a, Result<Option<SeasonalAnime>, TrackerError>>;
 
     /// Create or update the viewer's list entry for `update.media_id`.
     fn save_list_entry<'a>(
@@ -263,6 +311,14 @@ impl TrackerPlugin for StubTrackerPlugin {
         _year: u32,
         _page: u32,
     ) -> BoxFuture<'a, Result<SeasonPage, TrackerError>> {
+        let err = self.not_configured();
+        Box::pin(async move { Err(err) })
+    }
+
+    fn fetch_media_metadata<'a>(
+        &'a self,
+        _id: i64,
+    ) -> BoxFuture<'a, Result<Option<SeasonalAnime>, TrackerError>> {
         let err = self.not_configured();
         Box::pin(async move { Err(err) })
     }

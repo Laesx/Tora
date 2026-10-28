@@ -46,6 +46,9 @@ export interface AnimeEntry {
   trailer_url: string | null;
   site_url: string | null;
   source_material: string | null;
+  /** Airing start / end: `YYYY`, `YYYY-MM` or `YYYY-MM-DD` */
+  start_date: string | null;
+  end_date: string | null;
   // User list state
   user_status: "CURRENT" | "PLANNING" | "COMPLETED" | "PAUSED" | "DROPPED" | "REPEATING" | string;
   user_progress: number;
@@ -64,12 +67,49 @@ export interface AnimeEntry {
   available_episodes: number[];
 }
 
-/** One anime of a seasonal listing (browse/cache data only, never a list entry by itself). */
+export interface MediaTag {
+  name: string;
+  /** Relevance 0–100 */
+  rank: number | null;
+  is_spoiler: boolean;
+}
+
+export interface StudioRef {
+  id: number;
+  name: string;
+  is_main: boolean;
+  is_animation_studio: boolean;
+}
+
+export interface MediaRanking {
+  rank: number;
+  kind: "RATED" | "POPULAR" | string;
+  all_time: boolean;
+  season: string | null;
+  year: number | null;
+  context: string;
+}
+
+/** Non-essential metadata; written by season fetches, fetched once for media without any. */
+export interface MediaMetadata {
+  mean_score: number | null;
+  favourites: number | null;
+  tags: MediaTag[];
+  studios: StudioRef[];
+  rankings: MediaRanking[];
+}
+
+/** One anime of a seasonal listing / of the media metadata store (never a list entry by itself). */
 export type SeasonalAnime = AnimeEntry & {
   popularity: number | null;
-  /** `YYYY`, `YYYY-MM` or `YYYY-MM-DD` */
-  start_date: string | null;
+  metadata: MediaMetadata;
 };
+
+export interface WatchStats {
+  episodes_last_week: number;
+  minutes_last_week: number;
+  episodes_prev_week: number;
+}
 
 export interface SeasonResult {
   season: string;
@@ -220,6 +260,9 @@ export interface TorrentRule {
   action: "highlight" | "auto_download" | "discard" | string;
   only_unwatched: boolean;
 }
+
+/** `player_name` of history rows logged from manual progress changes */
+export const MANUAL_HISTORY_PLAYER = "Manual";
 
 export interface WatchHistoryEntry {
   id: number;

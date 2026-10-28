@@ -9,17 +9,15 @@ import React, {
 import {
   ArrowDownWideNarrow,
   ArrowUpNarrowWide,
-  Calendar,
   CalendarDays,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
-  Clock,
   RefreshCw,
   Search,
 } from "lucide-react";
 import { AnimeEntry, CachedSeason, SeasonalAnime, SeasonResult } from "../types";
-import { formatCountdown, getOptimizedCoverUrl, toraApi } from "../api";
+import { toraApi } from "../api";
 import {
   FIRST_SEASON_YEAR,
   SEASONS,
@@ -81,7 +79,6 @@ const STATUS_GROUPS: { id: string; label: string; statuses: string[]; dot: strin
 ];
 
 const PREFS_KEY = "tora.seasons.prefs";
-const COUNTDOWN_KEY = "tora.seasons.countdownCollapsed";
 const HEADER_ROW_HEIGHT = 44;
 const GRID_GAP = 16;
 
@@ -188,13 +185,6 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
   const [cachedSeasons, setCachedSeasons] = useState<CachedSeason[]>([]);
   const [filter, setFilter] = useState("");
   const [prefs, setPrefs] = useState<SeasonPrefs>(loadPrefs);
-  const [countdownCollapsed, setCountdownCollapsed] = useState(() => {
-    try {
-      return localStorage.getItem(COUNTDOWN_KEY) === "1";
-    } catch {
-      return false;
-    }
-  });
   const [pickerOpen, setPickerOpen] = useState(false);
   const requestIdRef = useRef(0);
 
@@ -279,14 +269,6 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
     [animeList]
   );
 
-  const airingInWatchlist = useMemo(
-    () =>
-      animeList
-        .filter((a) => a.next_airing_at && a.next_airing_episode)
-        .sort((a, b) => (a.next_airing_at || 0) - (b.next_airing_at || 0)),
-    [animeList]
-  );
-
   const items = result?.items ?? [];
   const knownFormats = useMemo(() => new Set(FORMATS.map((f) => f.id)), []);
   const formatCounts = useMemo(() => {
@@ -339,7 +321,7 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
     setViewportHeight(scrollEl.clientHeight || 800);
   };
 
-  // Content above the grid (countdown, hint row, empty states) moves it without resizing it:
+  // Content above the grid (hint row, empty states) moves it without resizing it:
   // re-measure after every render; unchanged values bail out of the state update.
   useLayoutEffect(measure);
 
@@ -434,68 +416,6 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
 
   return (
     <div className="p-6 space-y-5 max-w-7xl mx-auto">
-      {/* Airing countdown for the user's own list */}
-      {airingInWatchlist.length > 0 && (
-        <div className="bg-bg-secondary border border-border-subtle rounded-2xl p-4 space-y-3">
-          <button
-            onClick={() => {
-              const next = !countdownCollapsed;
-              setCountdownCollapsed(next);
-              savePref(COUNTDOWN_KEY, next ? "1" : "0");
-            }}
-            className="w-full flex items-center gap-2 text-sm font-bold text-text-primary"
-          >
-            <Calendar className="w-4 h-4 text-accent" />
-            Airing Countdown
-            <span className="text-[11px] font-medium text-text-muted">
-              {airingInWatchlist.length}
-            </span>
-            <ChevronDown
-              className={`w-4 h-4 ml-auto text-text-muted transition-transform ${countdownCollapsed ? "-rotate-90" : ""}`}
-            />
-          </button>
-
-          {!countdownCollapsed && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-              {airingInWatchlist.map((a) => {
-                const cd = formatCountdown(a.next_airing_at);
-                const behind = Math.max(0, (a.next_airing_episode || 1) - 1 - a.user_progress);
-                return (
-                  <div
-                    key={a.id}
-                    onClick={() => onOpenAnime(a)}
-                    className="flex items-center gap-3 p-3 rounded-xl bg-bg-primary border border-border-subtle hover:border-accent/60 cursor-pointer transition"
-                  >
-                    <img
-                      src={getOptimizedCoverUrl(a.cover_image, "medium")}
-                      alt={a.title_romaji}
-                      loading="lazy"
-                      decoding="async"
-                      className="w-12 h-16 object-cover rounded-lg shrink-0"
-                    />
-                    <div className="min-w-0 flex-1">
-                      <div className="text-xs font-bold text-text-primary truncate">
-                        {a.title_romaji}
-                      </div>
-                      <div className="flex items-center gap-2 mt-1">
-                        <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 text-[11px] font-mono font-semibold flex items-center gap-1">
-                          <Clock className="w-3 h-3" />
-                          Ep {a.next_airing_episode} in {cd}
-                        </span>
-                      </div>
-                      <div className="text-[10px] text-text-muted mt-1">
-                        Progress: {a.user_progress} / {a.episodes ?? "?"}
-                        {behind > 0 ? ` (${behind} ep behind)` : " (Caught up!)"}
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
-      )}
-
       <div className="bg-bg-secondary border border-border-subtle rounded-2xl p-5 space-y-4">
         {/* Season header: arrows + picker, quick chips, refresh */}
         <div className="flex flex-wrap items-center gap-3">

@@ -12,7 +12,7 @@ use crate::db::{
 use crate::detection::anisthesia::{detect_active_media_player, DetectedMediaSession};
 use crate::detection::anitomy::{parse_filename, AnitomyElements};
 use crate::library::scanner::{DriveStorageSummary, LibraryMonitorHandle, ScanSummary};
-use crate::plugins::{PluginManager, TrackerPluginDescriptor, TrackerUserProfile};
+use crate::plugins::{PluginManager, SeasonalAnime, TrackerPluginDescriptor, TrackerUserProfile};
 use crate::sync::{
     ChangeSource, SeasonResult, SyncEmitter, SyncStatus, SyncSummary, TrackerSyncService,
     UserStateChange,
@@ -763,11 +763,51 @@ async fn link_detected_episode_to_anime(
 }
 
 #[tauri::command]
-async fn get_watch_history(state: State<'_, AppState>) -> Result<Vec<WatchHistoryEntry>, String> {
+async fn get_watch_history(
+    state: State<'_, AppState>,
+    limit: Option<u32>,
+    offset: Option<u32>,
+) -> Result<Vec<WatchHistoryEntry>, String> {
     let db = state.db.clone();
-    tokio::task::spawn_blocking(move || db.list_watch_history(100))
+    let (limit, offset) = (limit.unwrap_or(100).min(500), offset.unwrap_or(0));
+    tokio::task::spawn_blocking(move || db.list_watch_history(limit, offset))
         .await
         .map_err(|e| e.to_string())?
+}
+
+/// Episodes watched (scrobbled or logged manually) in the last 7 days and the 7 days before.
+#[derive(Debug, Clone, Serialize)]
+struct WatchStats {
+    episodes_last_week: u32,
+    minutes_last_week: u32,
+    episodes_prev_week: u32,
+}
+
+#[tauri::command]
+async fn get_watch_stats(state: State<'_, AppState>) -> Result<WatchStats, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let now = chrono::Utc::now().timestamp();
+        let week = 7 * 24 * 60 * 60;
+        let (episodes_last_week, minutes_last_week) = db.watch_history_totals(now - week, now + 1)?;
+        let (episodes_prev_week, _) = db.watch_history_totals(now - 2 * week, now - week)?;
+        Ok(WatchStats {
+            episodes_last_week,
+            minutes_last_week,
+            episodes_prev_week,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Tags, studios, rankings etc. of one media. Served from `media_metadata`; fetched once if missing.
+#[tauri::command]
+async fn get_media_metadata(
+    state: State<'_, AppState>,
+    anilist_id: i64,
+) -> Result<Option<SeasonalAnime>, String> {
+    state.sync.media_metadata(anilist_id).await
 }
 
 #[tauri::command]
@@ -1329,6 +1369,8 @@ pub fn run() {
             poll_media_recognition,
             link_detected_episode_to_anime,
             get_watch_history,
+            get_watch_stats,
+            get_media_metadata,
             search_torrents_cmd,
             get_torrent_rules,
             save_torrent_rule,

@@ -38,6 +38,11 @@ pub struct AnimeEntry {
     pub trailer_url: Option<String>,
     pub site_url: Option<String>,
     pub source_material: Option<String>,
+    /// Airing start / end as AniList fuzzy dates: `YYYY`, `YYYY-MM` or `YYYY-MM-DD` (sorts lexicographically).
+    #[serde(default)]
+    pub start_date: Option<String>,
+    #[serde(default)]
+    pub end_date: Option<String>,
     // User list fields
     pub user_status: String,
     pub user_progress: u32,
@@ -602,14 +607,18 @@ const SEEDED_TORRENT_RULE_NAMES: [&str; 2] = [
 ];
 const SEED_MARKER_KEY: &str = "seeded_kusuriya_s3";
 
-/// Column list used by every `anime_entries` insert (37 columns, bound as ?1..?37).
+/// `watch_history.player_name` of rows logged from manual progress changes (not a media player).
+pub const MANUAL_HISTORY_PLAYER: &str = "Manual";
+
+/// Column list used by every `anime_entries` insert (39 columns, bound as ?1..?39).
 const ENTRY_INSERT_COLUMNS: &str = "id, anilist_id, mal_id, title_romaji, title_english, title_native,
     synonyms_json, normalized_titles_json, format, airing_status, episodes,
     duration, season, season_year, average_score, cover_image, banner_image,
     cover_color, synopsis, genres_json, studios_json, next_airing_episode,
     next_airing_at, trailer_url, site_url, source_material, user_status,
     user_progress, user_score, user_repeats, user_notes, user_started_at,
-    user_completed_at, custom_folder, updated_at, sync_pending, anilist_list_entry_id";
+    user_completed_at, custom_folder, updated_at, sync_pending, anilist_list_entry_id,
+    start_date, end_date";
 
 /// Metadata refreshed on conflict regardless of who wins the user fields.
 /// `custom_folder` is always preserved unless the incoming row sets one; `sync_pending` is never touched here.
@@ -638,6 +647,8 @@ const ENTRY_METADATA_UPDATE: &str = "anilist_id = COALESCE(excluded.anilist_id, 
     trailer_url = COALESCE(excluded.trailer_url, anime_entries.trailer_url),
     site_url = COALESCE(excluded.site_url, anime_entries.site_url),
     source_material = COALESCE(excluded.source_material, anime_entries.source_material),
+    start_date = COALESCE(excluded.start_date, anime_entries.start_date),
+    end_date = COALESCE(excluded.end_date, anime_entries.end_date),
     custom_folder = COALESCE(excluded.custom_folder, anime_entries.custom_folder),
     anilist_list_entry_id = COALESCE(excluded.anilist_list_entry_id, anime_entries.anilist_list_entry_id)";
 
@@ -654,14 +665,14 @@ const ENTRY_USER_FIELDS_UPDATE: &str = "user_status = excluded.user_status,
 static UPSERT_OVERWRITE_SQL: Lazy<String> = Lazy::new(|| {
     format!(
         "INSERT INTO anime_entries ({ENTRY_INSERT_COLUMNS}) VALUES ({}) ON CONFLICT(id) DO UPDATE SET {ENTRY_METADATA_UPDATE}, {ENTRY_USER_FIELDS_UPDATE}",
-        placeholders(37)
+        placeholders(39)
     )
 });
 
 static UPSERT_KEEP_USER_SQL: Lazy<String> = Lazy::new(|| {
     format!(
         "INSERT INTO anime_entries ({ENTRY_INSERT_COLUMNS}) VALUES ({}) ON CONFLICT(id) DO UPDATE SET {ENTRY_METADATA_UPDATE}",
-        placeholders(37)
+        placeholders(39)
     )
 });
 
@@ -676,7 +687,8 @@ const ENTRY_SELECT_COLUMNS: &str = "id, anilist_id, mal_id, title_romaji, title_
     synopsis, genres_json, studios_json, next_airing_episode, next_airing_at,
     trailer_url, site_url, source_material, user_status, user_progress,
     user_score, user_repeats, user_notes, custom_folder, updated_at,
-    user_started_at, user_completed_at, sync_pending, anilist_list_entry_id";
+    user_started_at, user_completed_at, sync_pending, anilist_list_entry_id,
+    start_date, end_date";
 
 fn row_to_entry(row: &rusqlite::Row<'_>, avail: Vec<u32>) -> rusqlite::Result<AnimeEntry> {
     let synonyms_str: String = row.get(6)?;
@@ -719,6 +731,8 @@ fn row_to_entry(row: &rusqlite::Row<'_>, avail: Vec<u32>) -> rusqlite::Result<An
         user_completed_at: row.get(33)?,
         sync_pending: row.get::<_, i64>(34)? != 0,
         anilist_list_entry_id: row.get(35)?,
+        start_date: row.get(36)?,
+        end_date: row.get(37)?,
         local_episode_count: avail.len() as u32,
         available_episodes: avail,
     })
@@ -808,6 +822,8 @@ fn write_entry_tx(conn: &Connection, entry: &AnimeEntry, mode: UserFieldsMode) -
         entry.updated_at,
         entry.sync_pending as i64,
         entry.anilist_list_entry_id,
+        entry.start_date,
+        entry.end_date,
     ])
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -1127,6 +1143,7 @@ fn add_column_if_missing(
 
 /// One-time / idempotent data migrations:
 /// - purge entries without an AniList id (they can never be synced),
+/// - drop season snapshots in the old inline format (media now live in `media_metadata`),
 /// - purge the old demo seed if its marker is present.
 fn run_data_migrations(conn: &mut Connection) -> Result<(), String> {
     let tx = conn.transaction().map_err(|e| e.to_string())?;
@@ -1136,7 +1153,8 @@ fn run_data_migrations(conn: &mut Connection) -> Result<(), String> {
            WHERE matched_anime_id IN (SELECT id FROM anime_entries WHERE anilist_id IS NULL);
          DELETE FROM title_aliases
            WHERE anime_id IN (SELECT id FROM anime_entries WHERE anilist_id IS NULL);
-         DELETE FROM anime_entries WHERE anilist_id IS NULL;",
+         DELETE FROM anime_entries WHERE anilist_id IS NULL;
+         DELETE FROM seasonal_cache WHERE payload_json LIKE '[{%';",
     )
     .map_err(|e| e.to_string())?;
 
@@ -1165,6 +1183,17 @@ fn run_data_migrations(conn: &mut Connection) -> Result<(), String> {
     }
 
     tx.commit().map_err(|e| e.to_string())
+}
+
+fn put_media_metadata_tx(conn: &Connection, fetched_at: i64, item: &SeasonalAnime) -> Result<(), String> {
+    let json = serde_json::to_string(item).map_err(|e| e.to_string())?;
+    conn.prepare_cached(
+        "INSERT INTO media_metadata (anilist_id, fetched_at, payload_json) VALUES (?1, ?2, ?3)
+         ON CONFLICT(anilist_id) DO UPDATE SET fetched_at = excluded.fetched_at, payload_json = excluded.payload_json",
+    )
+    .and_then(|mut s| s.execute(params![item.entry.id, fetched_at, json]))
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Per-entry local state used by [`Database::merge_remote_list`] for conflict resolution.
@@ -1201,13 +1230,16 @@ struct LocalMergeRow {
     next_airing_episode: Option<u32>,
     next_airing_at: Option<i64>,
     anilist_list_entry_id: Option<i64>,
+    start_date: Option<String>,
+    end_date: Option<String>,
 }
 
 const MERGE_LOCAL_SELECT_SQL: &str = "SELECT id, anilist_id, updated_at, sync_pending, user_status, user_progress,
         user_score, user_repeats, user_notes, user_started_at, user_completed_at,
         title_romaji, title_english, title_native, synonyms_json, normalized_titles_json,
         format, airing_status, episodes, season, season_year, average_score,
-        cover_image, cover_color, next_airing_episode, next_airing_at, anilist_list_entry_id
+        cover_image, cover_color, next_airing_episode, next_airing_at, anilist_list_entry_id,
+        start_date, end_date
      FROM anime_entries WHERE anilist_id IS NOT NULL";
 
 /// Light-metadata update used by the diff-only merge. Heavy metadata columns (synopsis, genres, studios,
@@ -1217,7 +1249,8 @@ const MERGE_UPDATE_META_SQL: &str = "UPDATE anime_entries SET
         title_romaji = ?1, title_english = ?2, title_native = ?3, format = ?4, airing_status = ?5,
         episodes = ?6, season = ?7, season_year = ?8, average_score = ?9, cover_image = ?10,
         cover_color = ?11, next_airing_episode = ?12, next_airing_at = ?13, anilist_list_entry_id = ?14,
-        synonyms_json = ?15, normalized_titles_json = COALESCE(?16, normalized_titles_json)
+        synonyms_json = ?15, normalized_titles_json = COALESCE(?16, normalized_titles_json),
+        start_date = ?18, end_date = ?19
      WHERE id = ?17";
 
 /// Remote-wins user-field update used by the diff-only merge (`sync_pending` untouched).
@@ -1517,6 +1550,12 @@ impl Database {
                 fetched_at INTEGER NOT NULL,
                 payload_json TEXT NOT NULL,
                 PRIMARY KEY (season, year)
+            );
+
+            CREATE TABLE IF NOT EXISTS media_metadata (
+                anilist_id INTEGER PRIMARY KEY,
+                fetched_at INTEGER NOT NULL,
+                payload_json TEXT NOT NULL
             );",
         )
         .map_err(|e| e.to_string())?;
@@ -1531,6 +1570,8 @@ impl Database {
             "INTEGER NOT NULL DEFAULT 0",
         )?;
         add_column_if_missing(&conn, "anime_entries", "anilist_list_entry_id", "INTEGER")?;
+        add_column_if_missing(&conn, "anime_entries", "start_date", "TEXT")?;
+        add_column_if_missing(&conn, "anime_entries", "end_date", "TEXT")?;
 
         run_data_migrations(&mut conn)?;
         drop(conn);
@@ -1662,6 +1703,8 @@ impl Database {
                             next_airing_episode: r.get(24)?,
                             next_airing_at: r.get(25)?,
                             anilist_list_entry_id: r.get(26)?,
+                            start_date: r.get(27)?,
+                            end_date: r.get(28)?,
                         },
                     ))
                 })
@@ -1755,7 +1798,9 @@ impl Database {
                 || local.cover_color.as_ref() != cover_color
                 || local.next_airing_episode != remote.next_airing_episode
                 || local.next_airing_at != remote.next_airing_at
-                || local.anilist_list_entry_id != list_entry_id;
+                || local.anilist_list_entry_id != list_entry_id
+                || local.start_date != remote.start_date
+                || local.end_date != remote.end_date;
 
             if meta_changed {
                 let (synonyms_json, norm_json) = if titles_changed {
@@ -1795,7 +1840,9 @@ impl Database {
                             list_entry_id,
                             synonyms_json,
                             norm_json,
-                            id
+                            id,
+                            remote.start_date,
+                            remote.end_date
                         ])
                     })
                     .map_err(|e| e.to_string())?;
@@ -2179,7 +2226,8 @@ impl Database {
         .map_err(|e| e.to_string())
     }
 
-    /// Cached snapshot of one season: `(fetched_at, items)`. A corrupt payload counts as a miss.
+    /// Cached snapshot of one season: `(fetched_at, items)`. The season row stores only media ids; the
+    /// items come from `media_metadata` in listing order. A corrupt payload or a missing media row counts as a miss.
     pub fn get_season_cache(
         &self,
         season: &str,
@@ -2194,13 +2242,37 @@ impl Database {
             )
             .optional()
             .map_err(|e| e.to_string())?;
-        Ok(row.and_then(|(fetched_at, json)| {
-            serde_json::from_str::<Vec<SeasonalAnime>>(&json)
-                .ok()
-                .map(|items| (fetched_at, items))
-        }))
+        let Some((fetched_at, ids_json)) = row else {
+            return Ok(None);
+        };
+        let Ok(ids) = serde_json::from_str::<Vec<i64>>(&ids_json) else {
+            return Ok(None);
+        };
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT m.payload_json FROM json_each(?1) j
+                 JOIN media_metadata m ON m.anilist_id = j.value
+                 ORDER BY j.key",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![ids_json], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        let mut items = Vec::with_capacity(ids.len());
+        for r in rows {
+            let json = r.map_err(|e| e.to_string())?;
+            match serde_json::from_str::<SeasonalAnime>(&json) {
+                Ok(item) => items.push(item),
+                Err(_) => return Ok(None),
+            }
+        }
+        if items.len() != ids.len() {
+            return Ok(None);
+        }
+        Ok(Some((fetched_at, items)))
     }
 
+    /// Store a season: every media goes to `media_metadata` (upsert), the season row keeps their ids.
     pub fn put_season_cache(
         &self,
         season: &str,
@@ -2208,15 +2280,43 @@ impl Database {
         fetched_at: i64,
         items: &[SeasonalAnime],
     ) -> Result<(), String> {
-        let json = serde_json::to_string(items).map_err(|e| e.to_string())?;
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
+        let ids: Vec<i64> = items.iter().map(|it| it.entry.id).collect();
+        let ids_json = serde_json::to_string(&ids).map_err(|e| e.to_string())?;
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        for item in items {
+            put_media_metadata_tx(&tx, fetched_at, item)?;
+        }
+        tx.execute(
             "INSERT INTO seasonal_cache (season, year, fetched_at, payload_json) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(season, year) DO UPDATE SET fetched_at = excluded.fetched_at, payload_json = excluded.payload_json",
-            params![season, year, fetched_at, json],
+            params![season, year, fetched_at, ids_json],
         )
         .map_err(|e| e.to_string())?;
-        Ok(())
+        tx.commit().map_err(|e| e.to_string())
+    }
+
+    /// Stored metadata of one media (`fetched_at`, item), written by season fetches or a one-off fetch.
+    pub fn get_media_metadata(&self, anilist_id: i64) -> Result<Option<(i64, SeasonalAnime)>, String> {
+        let conn = self.reader()?;
+        let row: Option<(i64, String)> = conn
+            .query_row(
+                "SELECT fetched_at, payload_json FROM media_metadata WHERE anilist_id = ?1",
+                params![anilist_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        Ok(row.and_then(|(fetched_at, json)| {
+            serde_json::from_str::<SeasonalAnime>(&json)
+                .ok()
+                .map(|item| (fetched_at, item))
+        }))
+    }
+
+    pub fn put_media_metadata(&self, fetched_at: i64, item: &SeasonalAnime) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        put_media_metadata_tx(&conn, fetched_at, item)
     }
 
     pub fn list_cached_seasons(&self) -> Result<Vec<CachedSeason>, String> {
@@ -2540,16 +2640,55 @@ impl Database {
         Ok(())
     }
 
-    pub fn list_watch_history(&self, limit: u32) -> Result<Vec<WatchHistoryEntry>, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+    /// Log manual progress increases: one row per newly watched episode (`from + 1 ..= to`) for each
+    /// `(anime_id, title, from, to)`, in one transaction. Rows use [`MANUAL_HISTORY_PLAYER`] and no file.
+    pub fn record_manual_progress(&self, changes: &[(i64, String, u32, u32)]) -> Result<(), String> {
+        if changes.iter().all(|(_, _, from, to)| to <= from) {
+            return Ok(());
+        }
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let now = chrono::Utc::now().timestamp();
+        {
+            let mut stmt = tx
+                .prepare_cached(
+                    "INSERT INTO watch_history (anime_id, anime_title, episode_number, player_name, file_name, scrobbled_to_tracker, timestamp_unix)
+                     VALUES (?1, ?2, ?3, ?4, '', 0, ?5)",
+                )
+                .map_err(|e| e.to_string())?;
+            for (anime_id, title, from, to) in changes {
+                for ep in (*from + 1)..=*to {
+                    stmt.execute(params![anime_id, title, ep, MANUAL_HISTORY_PLAYER, now])
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())
+    }
+
+    /// Episodes logged in `[since, until)` and the minutes they add up to (episode `duration`, 24 if unknown).
+    pub fn watch_history_totals(&self, since: i64, until: i64) -> Result<(u32, u32), String> {
+        let conn = self.reader()?;
+        conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(COALESCE(a.duration, 24)), 0)
+             FROM watch_history h LEFT JOIN anime_entries a ON a.id = h.anime_id
+             WHERE h.timestamp_unix >= ?1 AND h.timestamp_unix < ?2",
+            params![since, until],
+            |r| Ok((r.get::<_, i64>(0)? as u32, r.get::<_, i64>(1)? as u32)),
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    pub fn list_watch_history(&self, limit: u32, offset: u32) -> Result<Vec<WatchHistoryEntry>, String> {
+        let conn = self.reader()?;
         let mut stmt = conn
             .prepare(
                 "SELECT id, anime_id, anime_title, episode_number, player_name, file_name, scrobbled_to_tracker, timestamp_unix
-                 FROM watch_history ORDER BY timestamp_unix DESC LIMIT ?1",
+                 FROM watch_history ORDER BY timestamp_unix DESC, id DESC LIMIT ?1 OFFSET ?2",
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
-            .query_map(params![limit], |r| {
+            .query_map(params![limit, offset], |r| {
                 Ok(WatchHistoryEntry {
                     id: r.get(0)?,
                     anime_id: r.get(1)?,
@@ -2690,6 +2829,8 @@ pub(crate) fn test_entry(id: i64, title: &str) -> AnimeEntry {
         available_episodes: vec![],
         sync_pending: false,
         anilist_list_entry_id: None,
+        start_date: None,
+        end_date: None,
     }
 }
 
@@ -2736,6 +2877,8 @@ pub(crate) fn test_fixture_entries() -> Vec<AnimeEntry> {
         available_episodes: vec![],
         sync_pending: false,
         anilist_list_entry_id: None,
+        start_date: None,
+        end_date: None,
     };
     let starter_entries = vec![
         AnimeEntry {
@@ -2777,6 +2920,8 @@ pub(crate) fn test_fixture_entries() -> Vec<AnimeEntry> {
             available_episodes: vec![],
         sync_pending: false,
         anilist_list_entry_id: None,
+        start_date: None,
+        end_date: None,
         },
         AnimeEntry {
             id: 171018,
@@ -2817,6 +2962,8 @@ pub(crate) fn test_fixture_entries() -> Vec<AnimeEntry> {
             available_episodes: vec![],
         sync_pending: false,
         anilist_list_entry_id: None,
+        start_date: None,
+        end_date: None,
         },
         AnimeEntry {
             id: 153518,
@@ -2857,6 +3004,8 @@ pub(crate) fn test_fixture_entries() -> Vec<AnimeEntry> {
             available_episodes: vec![],
         sync_pending: false,
         anilist_list_entry_id: None,
+        start_date: None,
+        end_date: None,
         },
         AnimeEntry {
             id: 161645,
@@ -2897,6 +3046,8 @@ pub(crate) fn test_fixture_entries() -> Vec<AnimeEntry> {
             available_episodes: vec![],
         sync_pending: false,
         anilist_list_entry_id: None,
+        start_date: None,
+        end_date: None,
         },
         AnimeEntry {
             id: 130003,
@@ -2937,6 +3088,8 @@ pub(crate) fn test_fixture_entries() -> Vec<AnimeEntry> {
             available_episodes: vec![],
         sync_pending: false,
         anilist_list_entry_id: None,
+        start_date: None,
+        end_date: None,
         },
         AnimeEntry {
             id: 4224,
@@ -2977,6 +3130,8 @@ pub(crate) fn test_fixture_entries() -> Vec<AnimeEntry> {
             available_episodes: vec![],
         sync_pending: false,
         anilist_list_entry_id: None,
+        start_date: None,
+        end_date: None,
         },
         AnimeEntry {
             id: 176301,
@@ -3017,6 +3172,8 @@ pub(crate) fn test_fixture_entries() -> Vec<AnimeEntry> {
             available_episodes: vec![],
         sync_pending: false,
         anilist_list_entry_id: None,
+        start_date: None,
+        end_date: None,
         },
         kusuriya_s3,
     ];
@@ -3663,7 +3820,7 @@ mod tests {
             .record_watch_history(Some(2), "Beta", 1, "mpv", "beta.mkv", false)
             .unwrap();
         db.mark_watch_history_scrobbled(hid).unwrap();
-        let hist = db.list_watch_history(10).unwrap();
+        let hist = db.list_watch_history(10, 0).unwrap();
         assert_eq!(hist[0].id, hid);
         assert!(hist[0].scrobbled_to_tracker);
     }

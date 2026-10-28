@@ -10,6 +10,7 @@ import {
   LibraryFolder,
   LocalEpisodeFile,
   ScanSummary,
+  SeasonalAnime,
   SeasonResult,
   SyncStatus,
   SyncSummary,
@@ -19,6 +20,7 @@ import {
   TrackerPluginDescriptor,
   TrackerUserProfile,
   WatchHistoryEntry,
+  WatchStats,
 } from "./types";
 
 export const THEME_PRESETS: ThemePreset[] = [
@@ -270,7 +272,14 @@ export const toraApi = {
       aliasTitle,
     }),
 
-  getWatchHistory: () => invoke<WatchHistoryEntry[]>("get_watch_history"),
+  getWatchHistory: (limit = 100, offset = 0) =>
+    invoke<WatchHistoryEntry[]>("get_watch_history", { limit, offset }),
+
+  getWatchStats: () => invoke<WatchStats>("get_watch_stats"),
+
+  /** Stored metadata (tags, studios, rankings…); fetched from AniList only if none is stored yet. */
+  getMediaMetadata: (anilistId: number) =>
+    invoke<SeasonalAnime | null>("get_media_metadata", { anilistId }),
 
   searchTorrents: (query: string, provider?: string) =>
     invoke<TorrentItem[]>("search_torrents_cmd", { query, provider }),

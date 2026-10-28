@@ -59,6 +59,7 @@ Tora/
 │   ├── api.ts                            # Typed Tauri invoke wrappers (`toraApi`), theme presets & image downscaling helpers
 │   ├── types.ts                          # Shared TypeScript interfaces mirroring Rust database and detection models
 │   ├── seasons.ts                        # Season helpers (current season, shift, labels; broadcast quarters)
+│   ├── nowPlaying.ts                     # Now Playing helpers: AniList links, play/open-folder, date & enum formatting
 │   ├── main.tsx                          # React 19 entrypoint & root provider
 │   ├── styles/
 │   │   └── index.css                     # Tailwind CSS v4 stylesheets, custom theme variables & scrollbars
@@ -68,10 +69,14 @@ Tora/
 │       ├── AnimeQuickMenu.tsx            # Context menu for anime cards (+1 episode, mark status, open folder, copy title)
 │       ├── CommandPalette.tsx            # Ctrl+K fuzzy command palette & global search
 │       ├── AnimePosterCard.tsx           # Poster card for remote anime (Seasons / Search): opens drawer, quick-add
-│       ├── SeasonsView.tsx               # Cached seasonal browser (chips, ‹ ›, picker, sort/group/format filters, virtualized grid) & airing countdown
+│       ├── SeasonsView.tsx               # Cached seasonal browser (chips, ‹ ›, picker, sort/group/format filters, virtualized grid)
 │       ├── SearchView.tsx                # Global AniList search (Enter in the Seasons filter lands here)
 │       ├── LibraryManagerView.tsx        # Multi-drive folder manager, disk usage & virtualized episode table (Settings → Library)
-│       ├── RecognitionView.tsx           # Live player detection, unmatched episode linking prompt & watch history log
+│       ├── NowPlayingView.tsx            # Now Playing tab: hero while playing, dashboard when idle
+│       ├── NowPlayingHero.tsx            # Playing anime hero (cover → AniList, metadata, studios/genres/tags links, episodes, link prompt)
+│       ├── NowPlayingDashboard.tsx       # Idle: watch stats, continue watching (next ep on disk), recently started/finished airing
+│       ├── AiringCountdown.tsx           # Next-episode countdown for airing anime in the list (Now Playing dashboard)
+│       ├── HistoryView.tsx               # History tab: scrobbles + manual progress changes, grouped by day
 │       ├── SettingsView.tsx              # Sectioned settings: Appearance, Tracker, Library, Playback & Detection (Anisthesia players), Torrents, Diagnostics
 │       ├── TorrentsView.tsx              # Nyaa/AnimeTosho RSS search, feed preview & automated torrent rule editor
 │       └── VirtualWatchlist.tsx          # Viewport-windowed virtual grid/list for Grid, Compact & Table display modes
@@ -131,7 +136,7 @@ When a filename or media player window title is parsed (`parse_filename` in `src
    - Priority sequence: Custom folder path prefix $\rightarrow$ user-linked aliases (`title_aliases`) $\rightarrow$ exact normalized titles $\rightarrow$ season-isolated fuzzy core-title matching (`entry_season == query_season`).
    - **Never** allow a Season 2/3 episode to fall back to a Season 1 library entry.
 6. **Unmatched Media Behavior**:
-   - If `matched_anime_id` is `None`, **never** auto-update or run the scrobble countdown. Focus the `Episode Detection` tab and prompt the user to link the episode to an anime entry via `link_detected_episode_to_anime` (`Database::link_alias_to_anime`), which persists the relation in `title_aliases` and the anime's `synonyms` for all subsequent episodes.
+   - If `matched_anime_id` is `None`, **never** auto-update or run the scrobble countdown. Focus the `Now Playing` tab and prompt the user to link the episode to an anime entry via `link_detected_episode_to_anime` (`Database::link_alias_to_anime`), which persists the relation in `title_aliases` and the anime's `synonyms` for all subsequent episodes.
 
 ### 4. Zero-Polling Win32 IOCP Directory Monitoring & Incremental Scanning
 - **Native Win32 IOCP Monitor (`LibraryMonitorHandle`)**:
@@ -188,4 +193,7 @@ When a filename or media player window title is parsed (`parse_filename` in `src
 - **Pull**: serialized by `op_lock`; flushes tombstones and pending pushes first, then fetches the viewer's list with the light `MEDIA_LIST_FRAGMENT` and calls `Database::merge_remote_list` (newest `updated_at` wins per entry, pending entries keep local state, `custom_folder` preserved, remote-missing entries deleted locally unless pending — skipped on viewer mismatch or empty remote list). Emits `tracker-sync-started` / `tracker-list-synced` (`SyncSummary` delta: `changed` + `removed_ids`) / `tracker-sync-failed`. No background polling. Each pull logs one `[sync] pull(...)` timing line.
 - **Pulls must stay diff-only and must never rematch the library**: `merge_remote_list` writes nothing for unchanged entries, uses targeted UPDATEs for changed ones, rewrites `normalized_titles_json` only when titles/synonyms change, and only touches `local_episodes.watched` for entries whose progress changed. Heavy metadata (`fetch_media_details`) is fetched only for new entries. Episode matching after a pull is limited to `rematch_ids` (new or retitled entries) via `match_unmatched_episodes_for_ids` in a background task that emits `library-changed`. **Never** call `rematch_all_local_episodes()` from a pull.
 - **Invariants**: every `anime_entries` row has an `anilist_id`; there is no seed data. A signed-in AniList OAuth token is required for any push/pull.
-- **Seasons** (`TrackerSyncService::fetch_season`): public data, no token. All pages of `Page.media(season, seasonYear)` (50/page, `hasNextPage`) go through the shared rate limiter and are stored as one JSON snapshot per season in `seasonal_cache`. Browsing never writes `anime_entries`; list status in the Seasons view comes from the local list by id. Cached past seasons are only refetched on demand; current/upcoming ones are flagged `stale` after 24h and refreshed in the background by the frontend.
+- **Seasons** (`TrackerSyncService::fetch_season`): public data, no token. All pages of `Page.media(season, seasonYear)` (50/page, `hasNextPage`) go through the shared rate limiter. Each media (`SeasonalAnime`: full metadata + popularity + `MediaMetadata` tags/studios with ids/rankings/mean score/favourites) is upserted into `media_metadata` (one row per AniList id); `seasonal_cache` stores only the season's ordered id list. Browsing never writes `anime_entries`; list status in the Seasons view comes from the local list by id. Cached past seasons are only refetched on demand; current/upcoming ones are flagged `stale` after 24h and refreshed in the background by the frontend.
+- **Media metadata** (`TrackerSyncService::media_metadata`, used by the Now Playing hero): served from `media_metadata`. Only a media with no row is fetched (once, `fetch_media_metadata`, through the rate limiter); playback **never** refreshes it — season fetches are the only refresh path.
+- **Airing dates**: `start_date` / `end_date` (fuzzy `YYYY[-MM[-DD]]`) are part of the light `MEDIA_LIST_FRAGMENT` and compared in `merge_remote_list`, so pulls keep them current without extra requests.
+- **Watch history**: scrobbles log their own row. `Manual`, `Step` and `Batch` changes that raise progress log one row per newly watched episode (`player_name = "Manual"`, no file) via `Database::record_manual_progress`; `Add` never logs.

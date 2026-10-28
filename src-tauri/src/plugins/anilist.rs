@@ -1,6 +1,7 @@
 use crate::db::AnimeEntry;
 use crate::plugins::{
-    BoxFuture, RemoteEntryState, RemoteListSnapshot, SeasonPage, SeasonalAnime,
+    BoxFuture, MediaMetadata, MediaRanking, MediaTag, RemoteEntryState, RemoteListSnapshot,
+    SeasonPage, SeasonalAnime, StudioRef,
     TrackerEntryUpdate, TrackerError, TrackerPlugin, TrackerPluginDescriptor, TrackerUserProfile,
     MEDIA_DETAILS_CHUNK,
 };
@@ -264,6 +265,8 @@ impl AniListPlugin {
             trailer_url,
             site_url,
             source_material,
+            start_date: parse_partial_date(media.get("startDate")),
+            end_date: parse_partial_date(media.get("endDate")),
             user_status,
             user_progress,
             user_score,
@@ -491,23 +494,134 @@ const MEDIA_FRAGMENT: &str = r#"
         id
         site
     }
-"#;
-
-/// Per-season page size (AniList `Page.perPage` maximum).
-const SEASON_PAGE_SIZE: usize = 50;
-
-/// Extra fields the Seasons view sorts by, appended to `MEDIA_FRAGMENT`.
-const SEASON_EXTRA_FIELDS: &str = r#"
-    popularity
     startDate {
+        year
+        month
+        day
+    }
+    endDate {
         year
         month
         day
     }
 "#;
 
-/// AniList fuzzy date → `YYYY`, `YYYY-MM` or `YYYY-MM-DD` (only the known parts).
-fn parse_start_date(obj: Option<&Value>) -> Option<String> {
+/// Per-season page size (AniList `Page.perPage` maximum).
+const SEASON_PAGE_SIZE: usize = 50;
+
+/// Extra fields of a season item (Seasons sorting + Now Playing metadata), appended to `MEDIA_FRAGMENT`.
+/// `studioEdges` aliases a second `studios` selection (all studios and producers, with ids).
+const SEASON_EXTRA_FIELDS: &str = r#"
+    popularity
+    meanScore
+    favourites
+    rankings {
+        rank
+        type
+        allTime
+        season
+        year
+        context
+    }
+    tags {
+        name
+        rank
+        isMediaSpoiler
+        isGeneralSpoiler
+    }
+    studioEdges: studios {
+        edges {
+            isMain
+            node {
+                id
+                name
+                isAnimationStudio
+            }
+        }
+    }
+"#;
+
+fn opt_u32(v: Option<&Value>) -> Option<u32> {
+    v.and_then(|v| v.as_u64()).map(|n| n as u32)
+}
+
+/// `MEDIA_FRAGMENT + SEASON_EXTRA_FIELDS` media node → season item.
+fn parse_seasonal_media(m: &Value) -> Option<SeasonalAnime> {
+    let entry = AniListPlugin::parse_media_node(m, None)?;
+    let tags = m
+        .get("tags")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| {
+                    Some(MediaTag {
+                        name: t.get("name")?.as_str()?.to_string(),
+                        rank: opt_u32(t.get("rank")),
+                        is_spoiler: t.get("isMediaSpoiler").and_then(|v| v.as_bool()).unwrap_or(false)
+                            || t.get("isGeneralSpoiler").and_then(|v| v.as_bool()).unwrap_or(false),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let studios = m
+        .get("studioEdges")
+        .and_then(|s| s.get("edges"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| {
+                    let node = e.get("node")?;
+                    Some(StudioRef {
+                        id: node.get("id")?.as_i64()?,
+                        name: node.get("name")?.as_str()?.to_string(),
+                        is_main: e.get("isMain").and_then(|v| v.as_bool()).unwrap_or(false),
+                        is_animation_studio: node
+                            .get("isAnimationStudio")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let rankings = m
+        .get("rankings")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|r| {
+                    Some(MediaRanking {
+                        rank: opt_u32(r.get("rank"))?,
+                        kind: r.get("type")?.as_str()?.to_string(),
+                        all_time: r.get("allTime").and_then(|v| v.as_bool()).unwrap_or(false),
+                        season: r.get("season").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                        year: opt_u32(r.get("year")),
+                        context: r
+                            .get("context")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(SeasonalAnime {
+        entry,
+        popularity: opt_u32(m.get("popularity")),
+        metadata: MediaMetadata {
+            mean_score: opt_u32(m.get("meanScore")),
+            favourites: opt_u32(m.get("favourites")),
+            tags,
+            studios,
+            rankings,
+        },
+    })
+}
+
+/// AniList fuzzy date → `YYYY`, `YYYY-MM` or `YYYY-MM-DD` (only the known parts). Used for airing dates.
+fn parse_partial_date(obj: Option<&Value>) -> Option<String> {
     let d = obj?;
     let y = d.get("year").and_then(|v| v.as_i64()).filter(|&y| y > 0)?;
     let Some(m) = d.get("month").and_then(|v| v.as_i64()).filter(|m| (1..=12).contains(m)) else {
@@ -542,6 +656,16 @@ const MEDIA_LIST_FRAGMENT: &str = r#"
     nextAiringEpisode {
         episode
         airingAt
+    }
+    startDate {
+        year
+        month
+        day
+    }
+    endDate {
+        year
+        month
+        day
     }
 "#;
 
@@ -902,26 +1026,35 @@ impl TrackerPlugin for AniListPlugin {
             let items = page_obj
                 .and_then(|p| p.get("media"))
                 .and_then(|m| m.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|m| {
-                            let entry = Self::parse_media_node(m, None)?;
-                            Some(SeasonalAnime {
-                                entry,
-                                popularity: m
-                                    .get("popularity")
-                                    .and_then(|v| v.as_u64())
-                                    .map(|n| n as u32),
-                                start_date: parse_start_date(m.get("startDate")),
-                            })
-                        })
-                        .collect()
-                })
+                .map(|arr| arr.iter().filter_map(parse_seasonal_media).collect())
                 .unwrap_or_default();
             Ok(SeasonPage {
                 items,
                 has_next_page,
             })
+        })
+    }
+
+    fn fetch_media_metadata<'a>(
+        &'a self,
+        id: i64,
+    ) -> BoxFuture<'a, Result<Option<SeasonalAnime>, TrackerError>> {
+        Box::pin(async move {
+            let gql = format!(
+                r#"
+                query ($id: Int) {{
+                    Media(id: $id, type: ANIME) {{
+                        {MEDIA_FRAGMENT}
+                        {SEASON_EXTRA_FIELDS}
+                    }}
+                }}
+                "#
+            );
+            match self.graphql_request(&gql, json!({ "id": id }), None).await {
+                Ok(data) => Ok(data.get("Media").and_then(parse_seasonal_media)),
+                Err(TrackerError::NotFound(_)) => Ok(None),
+                Err(e) => Err(e),
+            }
         })
     }
 
@@ -1138,16 +1271,49 @@ mod tests {
     }
 
     #[test]
+    fn seasonal_media_parses_dates_and_metadata() {
+        let media = json!({
+            "id": 5, "title": { "romaji": "Show" }, "format": "TV", "status": "FINISHED",
+            "startDate": { "year": 2026, "month": 7, "day": 4 }, "endDate": { "year": 2026, "month": 9, "day": null },
+            "popularity": 1234, "meanScore": 81, "favourites": 56,
+            "rankings": [
+                { "rank": 3, "type": "RATED", "allTime": false, "season": "SUMMER", "year": 2026, "context": "highest rated" },
+                { "rank": null, "type": "POPULAR" }
+            ],
+            "tags": [
+                { "name": "Isekai", "rank": 90, "isMediaSpoiler": false, "isGeneralSpoiler": false },
+                { "name": "Twist", "rank": 60, "isMediaSpoiler": true, "isGeneralSpoiler": false }
+            ],
+            "studios": { "nodes": [{ "name": "Studio A" }] },
+            "studioEdges": { "edges": [
+                { "isMain": true, "node": { "id": 11, "name": "Studio A", "isAnimationStudio": true } },
+                { "isMain": false, "node": { "id": 12, "name": "Producer B", "isAnimationStudio": false } }
+            ] }
+        });
+        let item = parse_seasonal_media(&media).unwrap();
+        assert_eq!(item.entry.start_date.as_deref(), Some("2026-07-04"));
+        assert_eq!(item.entry.end_date.as_deref(), Some("2026-09"));
+        assert_eq!(item.entry.studios, vec!["Studio A".to_string()]);
+        assert_eq!(item.popularity, Some(1234));
+        let m = &item.metadata;
+        assert_eq!((m.mean_score, m.favourites), (Some(81), Some(56)));
+        assert_eq!(m.rankings.len(), 1);
+        assert_eq!(m.rankings[0].season.as_deref(), Some("SUMMER"));
+        assert_eq!(m.tags.iter().map(|t| t.is_spoiler).collect::<Vec<_>>(), vec![false, true]);
+        assert_eq!(m.studios[1], StudioRef { id: 12, name: "Producer B".into(), is_main: false, is_animation_studio: false });
+    }
+
+    #[test]
     fn start_dates_keep_only_known_parts() {
         let full = json!({ "year": 2026, "month": 10, "day": 3 });
         let month = json!({ "year": 2026, "month": 10, "day": null });
         let year = json!({ "year": 2027, "month": null, "day": null });
         let none = json!({ "year": null, "month": null, "day": null });
-        assert_eq!(parse_start_date(Some(&full)).as_deref(), Some("2026-10-03"));
-        assert_eq!(parse_start_date(Some(&month)).as_deref(), Some("2026-10"));
-        assert_eq!(parse_start_date(Some(&year)).as_deref(), Some("2027"));
-        assert_eq!(parse_start_date(Some(&none)), None);
-        assert_eq!(parse_start_date(None), None);
+        assert_eq!(parse_partial_date(Some(&full)).as_deref(), Some("2026-10-03"));
+        assert_eq!(parse_partial_date(Some(&month)).as_deref(), Some("2026-10"));
+        assert_eq!(parse_partial_date(Some(&year)).as_deref(), Some("2027"));
+        assert_eq!(parse_partial_date(Some(&none)), None);
+        assert_eq!(parse_partial_date(None), None);
     }
 
     #[test]

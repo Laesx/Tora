@@ -21,6 +21,7 @@ import {
   User,
   RefreshCw,
   CalendarDays,
+  History,
 } from "lucide-react";
 import {
   AnimeEntry,
@@ -41,7 +42,8 @@ import {
 import { AnimeDetailModal } from "./components/AnimeDetailModal";
 import { VirtualWatchlist } from "./components/VirtualWatchlist";
 import { TorrentsView } from "./components/TorrentsView";
-import { RecognitionView } from "./components/RecognitionView";
+import { NowPlayingView } from "./components/NowPlayingView";
+import { HistoryView } from "./components/HistoryView";
 import { SeasonsView } from "./components/SeasonsView";
 import { SearchView } from "./components/SearchView";
 import { SettingsView } from "./components/SettingsView";
@@ -52,7 +54,8 @@ type NavTab =
   | "torrents"
   | "seasons"
   | "search"
-  | "recognition"
+  | "nowplaying"
+  | "history"
   | "settings";
 
 // Unix timestamp (seconds or milliseconds) -> short relative label for the sync button tooltip
@@ -385,14 +388,14 @@ export const App: React.FC = () => {
         const session = await toraApi.pollMediaRecognition();
         setActiveSession((prev) => {
           if (!prev && !session) return prev;
-          // Auto-focus the Episode Detection tab when a new media playback session is detected
+          // Auto-focus the Now Playing tab when a new media playback session is detected
           if (
             session &&
             (!prev ||
               prev.cleaned_media_title !== session.cleaned_media_title ||
               prev.player_name !== session.player_name)
           ) {
-            setActiveTab("recognition");
+            setActiveTab("nowplaying");
           }
           // If auto_synced just flipped to true, refresh anime list and notify user
           if (
@@ -876,11 +879,10 @@ export const App: React.FC = () => {
 
             <button
               onClick={() => setActiveTab("settings")}
-              className={`p-2 rounded-lg transition shrink-0 cursor-pointer ${
-                activeTab === "settings"
+              className={`p-2 rounded-lg transition shrink-0 cursor-pointer ${activeTab === "settings"
                   ? "bg-accent text-white shadow-sm"
                   : "bg-bg-tertiary hover:bg-bg-elevated text-text-secondary hover:text-accent"
-              }`}
+                }`}
               title="Settings"
             >
               <Settings className="w-4 h-4" />
@@ -959,19 +961,32 @@ export const App: React.FC = () => {
             </button>
 
             <button
-              onClick={() => setActiveTab("recognition")}
-              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${activeTab === "recognition"
+              onClick={() => setActiveTab("nowplaying")}
+              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${activeTab === "nowplaying"
                 ? "bg-accent text-white shadow-sm"
                 : "text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
                 }`}
             >
               <span className="flex items-center gap-2.5">
                 <Activity className="w-4 h-4" />
-                Episode Detection
+                Now Playing
               </span>
               {activeSession && (
                 <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
               )}
+            </button>
+
+            <button
+              onClick={() => setActiveTab("history")}
+              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${activeTab === "history"
+                ? "bg-accent text-white shadow-sm"
+                : "text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
+                }`}
+            >
+              <span className="flex items-center gap-2.5">
+                <History className="w-4 h-4" />
+                History
+              </span>
             </button>
 
           </nav>
@@ -980,77 +995,77 @@ export const App: React.FC = () => {
         {/* Bottom Account & AniList Auth Section */}
         <div className="p-3">
           {isSignedIn && settings ? (
-              <div className="flex items-center justify-between gap-2 p-2 rounded-xl bg-bg-primary border border-border-subtle">
-                <button
-                  onClick={handleOpenAnilistProfile}
-                  className="flex items-center gap-2.5 min-w-0 flex-1 text-left group cursor-pointer"
-                  title={`Open @${settings.anilist_username} on AniList`}
-                >
-                  {settings.anilist_avatar ? (
-                    <img
-                      src={settings.anilist_avatar}
-                      alt={settings.anilist_username}
-                      className="w-9 h-9 rounded-full object-cover border border-border-subtle group-hover:border-accent transition shrink-0 bg-bg-tertiary"
-                    />
-                  ) : (
-                    <div className="w-9 h-9 rounded-full bg-accent/15 border border-accent/30 group-hover:border-accent flex items-center justify-center text-accent font-bold text-xs shrink-0 transition">
-                      {settings.anilist_username ? (
-                        settings.anilist_username.charAt(0).toUpperCase()
-                      ) : (
-                        <User className="w-4 h-4" />
-                      )}
-                    </div>
-                  )}
-                  <div className="min-w-0 flex-1">
-                    <div className="text-xs font-bold text-text-primary group-hover:text-accent transition truncate flex items-center gap-1">
-                      <span className="truncate">
-                        {settings.anilist_username || "AniList User"}
-                      </span>
-                      <ExternalLink className="w-3 h-3 opacity-0 group-hover:opacity-100 transition shrink-0 text-accent" />
-                    </div>
-                    <div className="text-[10px] text-text-muted truncate">
-                      AniList Profile
-                    </div>
-                  </div>
-                </button>
-
-                <button
-                  onClick={() => setSignOutModalOpen(true)}
-                  className="p-2 rounded-lg text-text-muted hover:text-rose-400 hover:bg-rose-500/10 transition shrink-0 cursor-pointer"
-                  title="Sign Out"
-                >
-                  <LogOut className="w-4 h-4" />
-                </button>
-              </div>
-            ) : (
+            <div className="flex items-center justify-between gap-2 p-2 rounded-xl bg-bg-primary border border-border-subtle">
               <button
-                onClick={handleStartAnilistLogin}
-                className="w-full flex items-center gap-3 p-3 rounded-xl bg-gradient-to-r from-accent/15 via-bg-primary to-bg-primary border border-accent/40 hover:border-accent hover:from-accent/25 transition text-left group cursor-pointer shadow-sm"
+                onClick={handleOpenAnilistProfile}
+                className="flex items-center gap-2.5 min-w-0 flex-1 text-left group cursor-pointer"
+                title={`Open @${settings.anilist_username} on AniList`}
               >
-                <div className="w-9 h-9 rounded-xl bg-accent text-white flex items-center justify-center shrink-0 shadow-sm group-hover:scale-105 transition">
-                  <LogIn className="w-4 h-4" />
-                </div>
+                {settings.anilist_avatar ? (
+                  <img
+                    src={settings.anilist_avatar}
+                    alt={settings.anilist_username}
+                    className="w-9 h-9 rounded-full object-cover border border-border-subtle group-hover:border-accent transition shrink-0 bg-bg-tertiary"
+                  />
+                ) : (
+                  <div className="w-9 h-9 rounded-full bg-accent/15 border border-accent/30 group-hover:border-accent flex items-center justify-center text-accent font-bold text-xs shrink-0 transition">
+                    {settings.anilist_username ? (
+                      settings.anilist_username.charAt(0).toUpperCase()
+                    ) : (
+                      <User className="w-4 h-4" />
+                    )}
+                  </div>
+                )}
                 <div className="min-w-0 flex-1">
-                  <div className="text-xs font-bold text-text-primary group-hover:text-accent transition">
-                    {isAuthorizingAnilist
-                      ? "Waiting for AniList..."
-                      : "Sign in with AniList"}
+                  <div className="text-xs font-bold text-text-primary group-hover:text-accent transition truncate flex items-center gap-1">
+                    <span className="truncate">
+                      {settings.anilist_username || "AniList User"}
+                    </span>
+                    <ExternalLink className="w-3 h-3 opacity-0 group-hover:opacity-100 transition shrink-0 text-accent" />
                   </div>
                   <div className="text-[10px] text-text-muted truncate">
-                    {isAuthorizingAnilist
-                      ? "Authorize in browser or click to retry"
-                      : "Click to authorize & sync your list"}
+                    AniList Profile
                   </div>
                 </div>
               </button>
-            )}
+
+              <button
+                onClick={() => setSignOutModalOpen(true)}
+                className="p-2 rounded-lg text-text-muted hover:text-rose-400 hover:bg-rose-500/10 transition shrink-0 cursor-pointer"
+                title="Sign Out"
+              >
+                <LogOut className="w-4 h-4" />
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={handleStartAnilistLogin}
+              className="w-full flex items-center gap-3 p-3 rounded-xl bg-gradient-to-r from-accent/15 via-bg-primary to-bg-primary border border-accent/40 hover:border-accent hover:from-accent/25 transition text-left group cursor-pointer shadow-sm"
+            >
+              <div className="w-9 h-9 rounded-xl bg-accent text-white flex items-center justify-center shrink-0 shadow-sm group-hover:scale-105 transition">
+                <LogIn className="w-4 h-4" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="text-xs font-bold text-text-primary group-hover:text-accent transition">
+                  {isAuthorizingAnilist
+                    ? "Waiting for AniList..."
+                    : "Sign in with AniList"}
+                </div>
+                <div className="text-[10px] text-text-muted truncate">
+                  {isAuthorizingAnilist
+                    ? "Authorize in browser or click to retry"
+                    : "Click to authorize & sync your list"}
+                </div>
+              </div>
+            </button>
+          )}
         </div>
       </aside>
 
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col min-w-0 h-full overflow-hidden">
-        {/* Live "Now Playing" Anisthesia + Anitomy Scrobble Bar */}
-        {activeSession && (
+        {/* Live "Now Playing"  (the Now Playing tab shows its own hero) */}
+        {activeSession && activeTab !== "nowplaying" && (
           <div className="bg-gradient-to-r from-accent/20 via-bg-secondary to-bg-secondary border-b border-accent/40 px-6 py-2.5 flex items-center justify-between gap-4 shrink-0">
             <div className="flex items-center gap-3 min-w-0">
               <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-accent text-white text-[11px] font-bold shrink-0">
@@ -1092,7 +1107,7 @@ export const App: React.FC = () => {
                 )
               ) : (
                 <button
-                  onClick={() => setActiveTab("recognition")}
+                  onClick={() => setActiveTab("nowplaying")}
                   className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-500/20 border border-amber-500/40 text-amber-300 font-semibold hover:bg-amber-500/30 transition text-[11px]"
                 >
                   <AlertTriangle className="w-3.5 h-3.5" />
@@ -1330,14 +1345,32 @@ export const App: React.FC = () => {
             />
           )}
 
-          {activeTab === "recognition" && settings && (
-            <RecognitionView
+          {activeTab === "nowplaying" && settings && (
+            <NowPlayingView
               activeSession={activeSession}
               animeList={animeList}
               settings={settings}
               onUpdateSettings={handleUpdateSettings}
               onLinkDetectedEpisode={handleLinkDetectedEpisode}
+              onDismissSession={handleDismissSession}
+              onOpenAnime={openAnime}
+              onStepEpisode={handleStepEpisode}
+              onBatchUpdate={handleBatchUpdate}
+              onBatchDelete={handleBatchDelete}
+              onSearchTorrents={(q) => {
+                setTorrentSearchQuery(q);
+                setActiveTab("torrents");
+              }}
+              onDeleteAnime={handleDeleteAnime}
               showToast={showToast}
+            />
+          )}
+
+          {activeTab === "history" && (
+            <HistoryView
+              animeList={animeList}
+              refreshKey={animeList}
+              onOpenAnime={openAnime}
             />
           )}
 
