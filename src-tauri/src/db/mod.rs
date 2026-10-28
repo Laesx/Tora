@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use once_cell::sync::Lazy;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnimeEntry {
@@ -96,10 +98,20 @@ pub struct ResolvedState {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct MergeStats {
     pub added: usize,
+    /// Existing entries whose user fields were replaced by (different) remote ones.
     pub updated_from_remote: usize,
+    /// Existing entries whose (different) local user fields were kept (pending or newer locally).
     pub kept_local: usize,
     pub deleted: usize,
     pub deletion_skipped_reason: Option<String>,
+    /// Local ids of every row inserted or written by this merge (new + changed).
+    pub changed_ids: Vec<i64>,
+    /// Local ids deleted because they are missing on the tracker.
+    pub removed_ids: Vec<i64>,
+    /// Local ids of newly inserted entries (need full metadata + matching).
+    pub new_ids: Vec<i64>,
+    /// Local ids whose matchable titles changed (new entries + title / synonym changes).
+    pub rematch_ids: Vec<i64>,
 }
 
 /// A queued tracker-side deletion (tombstone) for an entry already deleted locally.
@@ -328,6 +340,21 @@ fn compute_core_title_similarity(query_core: &str, cand_core: &str) -> f64 {
     0.0
 }
 
+/// One fuzzy-matchable normalized title in [`AnimeMatcherIndex::norm_list`].
+#[derive(Debug, Clone)]
+pub struct NormTitle {
+    /// Full normalized title (e.g. `"kusuriya no hitorigoto 2"`).
+    pub norm: String,
+    /// Season-stripped core title, precomputed at build time (e.g. `"kusuriya no hitorigoto"`).
+    pub core: String,
+    /// Effective season of this title / entry.
+    pub season: u32,
+    pub anime_id: i64,
+}
+
+/// Title-step result of [`AnimeMatcherIndex::match_title`]: `(anime_id, title_romaji, cover, user_progress, episodes)`.
+pub type TitleMatch = (i64, String, String, u32, Option<u32>);
+
 /// Fast in-memory matcher index built from a single SQL pass so batch episode/torrent matching is O(1) with zero DB queries per item.
 pub struct AnimeMatcherIndex {
     pub by_id: HashMap<i64, (String, String, u32, Option<u32>)>,
@@ -337,44 +364,48 @@ pub struct AnimeMatcherIndex {
     pub user_aliases: HashMap<String, i64>,
     pub exact_norm: HashMap<String, i64>,
     pub custom_folders: Vec<(String, i64)>,
-    pub norm_list: Vec<(String, u32, i64)>,
+    pub norm_list: Vec<NormTitle>,
 }
 
 impl AnimeMatcherIndex {
-    pub fn match_title(
-        &self,
-        normalized_title: &str,
-        file_path: Option<&str>,
-    ) -> Option<(i64, String, String, u32, Option<u32>)> {
-        // 1. Check custom folder prefix match
-        if let Some(fp) = file_path {
-            if !self.custom_folders.is_empty() {
-                let fp_lower = fp.to_ascii_lowercase();
-                for (folder_prefix, aid) in &self.custom_folders {
-                    if fp_lower.starts_with(folder_prefix) {
-                        if let Some((t, cov, prog, eps)) = self.by_id.get(aid) {
-                            return Some((*aid, t.clone(), cov.clone(), *prog, *eps));
-                        }
-                    }
-                }
-            }
-        }
+    pub fn title_match_for(&self, aid: i64) -> Option<TitleMatch> {
+        self.by_id
+            .get(&aid)
+            .map(|(t, cov, prog, eps)| (aid, t.clone(), cov.clone(), *prog, *eps))
+    }
 
+    /// Step 1 of [`Self::match_title`]: the first custom folder whose (lowercased) path prefixes `file_path`.
+    pub fn match_custom_folder(&self, file_path: &str) -> Option<i64> {
+        if self.custom_folders.is_empty() {
+            return None;
+        }
+        let fp_lower = file_path.to_ascii_lowercase();
+        self.custom_folders
+            .iter()
+            .find(|(folder_prefix, aid)| {
+                fp_lower.starts_with(folder_prefix.as_str()) && self.by_id.contains_key(aid)
+            })
+            .map(|(_, aid)| *aid)
+    }
+
+    /// Steps 2-4 of [`Self::match_title`] (no custom folder check): user aliases, exact normalized titles,
+    /// then season-isolated fuzzy matching. Depends only on `normalized_title`, so callers can memoize it.
+    pub fn match_title_only(&self, normalized_title: &str) -> Option<i64> {
         if normalized_title.is_empty() {
             return None;
         }
 
         // 2. O(1) explicit user-linked alias lookup
         if let Some(aid) = self.user_aliases.get(normalized_title) {
-            if let Some((t, cov, prog, eps)) = self.by_id.get(aid) {
-                return Some((*aid, t.clone(), cov.clone(), *prog, *eps));
+            if self.by_id.contains_key(aid) {
+                return Some(*aid);
             }
         }
 
         // 3. O(1) exact normalized title lookup
         if let Some(aid) = self.exact_norm.get(normalized_title) {
-            if let Some((t, cov, prog, eps)) = self.by_id.get(aid) {
-                return Some((*aid, t.clone(), cov.clone(), *prog, *eps));
+            if self.by_id.contains_key(aid) {
+                return Some(*aid);
             }
         }
 
@@ -385,22 +416,19 @@ impl AnimeMatcherIndex {
 
         if query_core.len() >= 4 {
             let mut best_match: Option<(f64, i64)> = None;
-            for (norm, entry_season, aid) in &self.norm_list {
-                if *entry_season != query_season {
+            for cand in &self.norm_list {
+                if cand.season != query_season {
                     continue;
                 }
-                let cand_core = strip_trailing_season(norm, *entry_season);
-                let score = compute_core_title_similarity(query_core, cand_core);
-                if score >= 0.74 {
-                    if best_match.map_or(true, |(best_score, _)| score > best_score) {
-                        best_match = Some((score, *aid));
-                    }
+                let score = compute_core_title_similarity(query_core, &cand.core);
+                if score >= 0.74 && best_match.map_or(true, |(best_score, _)| score > best_score) {
+                    best_match = Some((score, cand.anime_id));
                 }
             }
 
             if let Some((_, aid)) = best_match {
-                if let Some((t, cov, prog, eps)) = self.by_id.get(&aid) {
-                    return Some((aid, t.clone(), cov.clone(), *prog, *eps));
+                if self.by_id.contains_key(&aid) {
+                    return Some(aid);
                 }
             }
         }
@@ -408,15 +436,36 @@ impl AnimeMatcherIndex {
         None
     }
 
+    pub fn match_title(&self, normalized_title: &str, file_path: Option<&str>) -> Option<TitleMatch> {
+        // 1. Check custom folder prefix match
+        if let Some(aid) = file_path.and_then(|fp| self.match_custom_folder(fp)) {
+            return self.title_match_for(aid);
+        }
+        let aid = self.match_title_only(normalized_title)?;
+        self.title_match_for(aid)
+    }
+
     /// Match a parsed `AnitomyElements` against the index, validating episode bounds and applying
     /// `erengy/anime-relations` ID redirections or multi-season sequential episode offsets (ported from Taiga's `identify`).
+    /// Equivalent to [`Self::match_title`] followed by [`Self::resolve_episode`].
     pub fn match_episode(
         &self,
         parsed: &mut AnitomyElements,
         file_path: Option<&str>,
-    ) -> Option<(i64, String, String, u32, Option<u32>)> {
+    ) -> Option<TitleMatch> {
         let matched = self.match_title(&parsed.normalized_title, file_path)?;
-        let (aid, title, cover, prog, eps) = matched;
+        self.resolve_episode(matched, parsed, file_path)
+    }
+
+    /// Episode step of [`Self::match_episode`]: given the title match for `parsed.normalized_title` / `file_path`,
+    /// validate the episode number and apply relations / multi-season redirections (may rewrite `parsed`).
+    pub fn resolve_episode(
+        &self,
+        title_match: TitleMatch,
+        parsed: &mut AnitomyElements,
+        file_path: Option<&str>,
+    ) -> Option<TitleMatch> {
+        let (aid, title, cover, prog, eps) = title_match;
 
         let Some(ep) = parsed.episode_number else {
             return Some((aid, title, cover, prog, eps));
@@ -522,7 +571,15 @@ impl AnimeMatcherIndex {
 }
 
 pub struct Database {
+    /// Write connection (also used for reads that must see the caller's own open transaction).
     pub conn: Mutex<Connection>,
+    /// Read-only (`PRAGMA query_only`) connection on the same WAL file for hot UI reads, so they don't queue
+    /// behind sync / scan writes. `None` for in-memory databases (tests): reads then use `conn`.
+    read_conn: Option<Mutex<Connection>>,
+    /// Cached matcher index tagged with the `matcher_generation` it was built at.
+    matcher_cache: RwLock<Option<(u64, Arc<AnimeMatcherIndex>)>>,
+    /// Bumped by the SQLite update hook on every row change in `anime_entries` / `title_aliases`.
+    matcher_generation: Arc<AtomicU64>,
 }
 
 /// AniList ids of the demo entries the removed seed used to insert.
@@ -745,6 +802,144 @@ fn write_entry_tx(conn: &Connection, entry: &AnimeEntry, mode: UserFieldsMode) -
     ])
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Build an [`AnimeMatcherIndex`] from `conn` (two SELECTs, no writes).
+/// Uses the stored `normalized_titles_json` and only re-normalizes rows where it is empty.
+fn build_matcher_index_from(conn: &Connection) -> Result<AnimeMatcherIndex, String> {
+    let mut by_id = HashMap::new();
+    let mut external_ids = HashMap::new();
+    let mut by_anilist_id = HashMap::new();
+    let mut by_mal_id = HashMap::new();
+    let mut user_aliases = HashMap::new();
+    let mut exact_norm = HashMap::new();
+    let mut custom_folders = Vec::new();
+    let mut norm_list = Vec::new();
+
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, anilist_id, mal_id, title_romaji, title_english, title_native,
+                        synonyms_json, cover_image, user_progress, episodes, custom_folder,
+                        normalized_titles_json
+                 FROM anime_entries",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Option<i64>>(1)?,
+                    r.get::<_, Option<i64>>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, Option<String>>(5)?,
+                    r.get::<_, String>(6)?,
+                    r.get::<_, String>(7)?,
+                    r.get::<_, u32>(8)?,
+                    r.get::<_, Option<u32>>(9)?,
+                    r.get::<_, Option<String>>(10)?,
+                    r.get::<_, String>(11)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+
+        for row in rows.flatten() {
+            let (
+                id,
+                anilist_id,
+                mal_id,
+                romaji,
+                english,
+                native,
+                syns_json,
+                cover,
+                prog,
+                eps,
+                cfolder,
+                norms_json,
+            ) = row;
+            let mut norms: Vec<String> = serde_json::from_str(&norms_json).unwrap_or_default();
+            if norms.is_empty() {
+                let syns: Vec<String> = serde_json::from_str(&syns_json).unwrap_or_default();
+                norms = Database::build_normalized_titles(
+                    &romaji,
+                    english.as_deref(),
+                    native.as_deref(),
+                    &syns,
+                );
+            }
+            let mut effective_season = extract_effective_season(&romaji);
+            if effective_season == 1 {
+                if let Some(eng) = english.as_deref() {
+                    effective_season = extract_effective_season(eng);
+                }
+            }
+
+            by_id.insert(id, (romaji, cover, prog, eps));
+            external_ids.insert(id, (anilist_id, mal_id, effective_season));
+            if let Some(aid) = anilist_id {
+                by_anilist_id.insert(aid, id);
+            }
+            if let Some(mid) = mal_id {
+                by_mal_id.insert(mid, id);
+            }
+            if let Some(cf) = cfolder.filter(|s| !s.trim().is_empty()) {
+                custom_folders.push((cf.to_ascii_lowercase(), id));
+            }
+            for n in norms {
+                if !n.is_empty() {
+                    let s = extract_effective_season(&n).max(effective_season);
+                    exact_norm.entry(n.clone()).or_insert(id);
+                    if n.len() >= 4 {
+                        norm_list.push(NormTitle {
+                            core: strip_trailing_season(&n, s).to_string(),
+                            norm: n,
+                            season: s,
+                            anime_id: id,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Load explicit user title aliases (override exact_norm and include in norm_list)
+    {
+        let mut alias_stmt = conn
+            .prepare("SELECT normalized_alias, anime_id FROM title_aliases")
+            .map_err(|e| e.to_string())?;
+        let rows = alias_stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            .map_err(|e| e.to_string())?;
+        for (alias, aid) in rows.flatten() {
+            if by_id.contains_key(&aid) {
+                let entry_season = external_ids.get(&aid).map(|x| x.2).unwrap_or(1);
+                let s = extract_effective_season(&alias).max(entry_season);
+                user_aliases.insert(alias.clone(), aid);
+                exact_norm.insert(alias.clone(), aid);
+                if alias.len() >= 4 {
+                    norm_list.push(NormTitle {
+                        core: strip_trailing_season(&alias, s).to_string(),
+                        norm: alias,
+                        season: s,
+                        anime_id: aid,
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(AnimeMatcherIndex {
+        by_id,
+        external_ids,
+        by_anilist_id,
+        by_mal_id,
+        user_aliases,
+        exact_norm,
+        custom_folders,
+        norm_list,
+    })
 }
 
 /// Unmatch local episodes, drop aliases and delete the entry row (inside the caller's transaction).
@@ -977,6 +1172,72 @@ struct LocalSyncRow {
     completed_at: Option<String>,
 }
 
+/// Local row as loaded once by [`Database::merge_remote_list`]: user state plus the "light" metadata the
+/// list fetch carries (everything a sync can compare without the heavy per-media fields).
+struct LocalMergeRow {
+    user: LocalSyncRow,
+    title_romaji: String,
+    title_english: Option<String>,
+    title_native: Option<String>,
+    synonyms_json: String,
+    normalized_titles_json: String,
+    format: String,
+    airing_status: String,
+    episodes: Option<u32>,
+    season: Option<String>,
+    season_year: Option<u32>,
+    average_score: Option<u32>,
+    cover_image: String,
+    cover_color: Option<String>,
+    next_airing_episode: Option<u32>,
+    next_airing_at: Option<i64>,
+    anilist_list_entry_id: Option<i64>,
+}
+
+const MERGE_LOCAL_SELECT_SQL: &str = "SELECT id, anilist_id, updated_at, sync_pending, user_status, user_progress,
+        user_score, user_repeats, user_notes, user_started_at, user_completed_at,
+        title_romaji, title_english, title_native, synonyms_json, normalized_titles_json,
+        format, airing_status, episodes, season, season_year, average_score,
+        cover_image, cover_color, next_airing_episode, next_airing_at, anilist_list_entry_id
+     FROM anime_entries WHERE anilist_id IS NOT NULL";
+
+/// Light-metadata update used by the diff-only merge. Heavy metadata columns (synopsis, genres, studios,
+/// banner, trailer, source, duration, site_url, mal_id) and `custom_folder` are never touched here.
+/// `normalized_titles_json` is only replaced when ?16 is non-NULL (titles / synonyms changed).
+const MERGE_UPDATE_META_SQL: &str = "UPDATE anime_entries SET
+        title_romaji = ?1, title_english = ?2, title_native = ?3, format = ?4, airing_status = ?5,
+        episodes = ?6, season = ?7, season_year = ?8, average_score = ?9, cover_image = ?10,
+        cover_color = ?11, next_airing_episode = ?12, next_airing_at = ?13, anilist_list_entry_id = ?14,
+        synonyms_json = ?15, normalized_titles_json = COALESCE(?16, normalized_titles_json)
+     WHERE id = ?17";
+
+/// Remote-wins user-field update used by the diff-only merge (`sync_pending` untouched).
+const MERGE_UPDATE_USER_SQL: &str = "UPDATE anime_entries SET
+        user_status = ?1, user_progress = ?2, user_score = ?3, user_repeats = ?4, user_notes = ?5,
+        user_started_at = ?6, user_completed_at = ?7, updated_at = ?8
+     WHERE id = ?9";
+
+const MERGE_UPDATE_WATCHED_SQL: &str = "UPDATE local_episodes
+     SET watched = CASE WHEN episode_number IS NOT NULL AND episode_number <= ?1 THEN 1 ELSE 0 END
+     WHERE matched_anime_id = ?2";
+
+/// Union of `stored` and `remote` synonyms (case-insensitive), keeping the stored order and appending
+/// remote-only ones. Returns the merged list and whether anything was appended.
+fn merge_synonyms_keep_stored(stored: &[String], remote: &[String]) -> (Vec<String>, bool) {
+    let mut merged = stored.to_vec();
+    let mut appended = false;
+    for s in remote {
+        if !merged.iter().any(|x| x.eq_ignore_ascii_case(s)) {
+            merged.push(s.clone());
+            appended = true;
+        }
+    }
+    (merged, appended)
+}
+
+/// Max bound parameters per `IN (...)` chunk (well under SQLite's default variable limit).
+const IN_CHUNK: usize = 500;
+
 impl LocalSyncRow {
     fn differs_from_state(&self, state: &ResolvedState) -> bool {
         self.status != state.user_status
@@ -1009,17 +1270,36 @@ impl Database {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
-        Self::from_connection(conn)
+        let mut db = Self::from_connection(conn)?;
+        // Opened after the schema exists and WAL mode is persisted in the file.
+        db.read_conn = Some(Mutex::new(Self::open_read_connection(db_path)?));
+        Ok(db)
     }
 
-    /// Fresh in-memory database with the full schema (tests only).
+    /// Fresh in-memory database with the full schema (tests only). Reads share the write connection.
     #[cfg(test)]
     pub fn open_in_memory() -> Result<Self, String> {
         let conn = Connection::open_in_memory().map_err(|e| e.to_string())?;
         Self::from_connection(conn)
     }
 
+    fn open_read_connection(db_path: &Path) -> Result<Connection, String> {
+        let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
+        conn.busy_timeout(Duration::from_millis(5000))
+            .map_err(|e| e.to_string())?;
+        conn.execute_batch(
+            "PRAGMA temp_store = MEMORY;
+             PRAGMA cache_size = -4000;
+             PRAGMA mmap_size = 0;
+             PRAGMA query_only = ON;",
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(conn)
+    }
+
     fn from_connection(conn: Connection) -> Result<Self, String> {
+        conn.busy_timeout(Duration::from_millis(5000))
+            .map_err(|e| e.to_string())?;
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
@@ -1030,11 +1310,72 @@ impl Database {
         )
         .map_err(|e| e.to_string())?;
 
+        // Central matcher-cache invalidation: any INSERT / UPDATE / DELETE (incl. upserts and
+        // `INSERT OR REPLACE`) on the tables the matcher index is built from bumps the generation.
+        // Both are rowid tables, so the hook fires for every row change (no `DELETE FROM` without
+        // WHERE exists for them, which would hit SQLite's truncate optimization and skip the hook).
+        let matcher_generation = Arc::new(AtomicU64::new(0));
+        let hook_generation = matcher_generation.clone();
+        conn.update_hook(Some(
+            move |_action: rusqlite::hooks::Action, _db: &str, table: &str, _rowid: i64| {
+                if table == "anime_entries" || table == "title_aliases" {
+                    hook_generation.fetch_add(1, Ordering::SeqCst);
+                }
+            },
+        ));
+
         let db = Self {
             conn: Mutex::new(conn),
+            read_conn: None,
+            matcher_cache: RwLock::new(None),
+            matcher_generation,
         };
         db.init_schema()?;
         Ok(db)
+    }
+
+    /// Connection for read-only queries: the dedicated read connection when available, else the writer.
+    /// Never call a write method while holding this guard (it may be the writer itself).
+    pub(crate) fn reader(&self) -> Result<MutexGuard<'_, Connection>, String> {
+        self.read_conn
+            .as_ref()
+            .unwrap_or(&self.conn)
+            .lock()
+            .map_err(|e| e.to_string())
+    }
+
+    /// Current matcher-index generation (changes whenever `anime_entries` / `title_aliases` rows change).
+    pub fn matcher_generation(&self) -> u64 {
+        self.matcher_generation.load(Ordering::SeqCst)
+    }
+
+    fn bump_matcher_generation(&self) {
+        self.matcher_generation.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Shared, cached matcher index. Rebuilt lazily only when `matcher_generation` changed since the last build.
+    pub fn matcher_index(&self) -> Result<Arc<AnimeMatcherIndex>, String> {
+        let current = self.matcher_generation();
+        {
+            let cache = self.matcher_cache.read().map_err(|e| e.to_string())?;
+            if let Some((generation, index)) = cache.as_ref() {
+                if *generation == current {
+                    return Ok(index.clone());
+                }
+            }
+        }
+
+        let mut cache = self.matcher_cache.write().map_err(|e| e.to_string())?;
+        let current = self.matcher_generation();
+        if let Some((generation, index)) = cache.as_ref() {
+            if *generation == current {
+                return Ok(index.clone());
+            }
+        }
+        let (generation, index) = self.build_matcher_index_snapshot()?;
+        let index = Arc::new(index);
+        *cache = Some((generation, index.clone()));
+        Ok(index)
     }
 
     fn init_schema(&self) -> Result<(), String> {
@@ -1175,7 +1516,10 @@ impl Database {
         add_column_if_missing(&conn, "anime_entries", "anilist_list_entry_id", "INTEGER")?;
 
         run_data_migrations(&mut conn)?;
+        drop(conn);
 
+        // Schema changes / migrations: never trust a previously cached index.
+        self.bump_matcher_generation();
         Ok(())
     }
 
@@ -1236,14 +1580,21 @@ impl Database {
         .map_err(|e| e.to_string())
     }
 
-    /// Merge the tracker's list into the local DB in one transaction (newest-wins per entry).
+    /// Merge the tracker's list into the local DB in one transaction (newest-wins per entry), writing
+    /// only what actually changed.
     ///
     /// - Media ids in `skip_media_ids` (pending remote deletions) are ignored.
-    /// - New remote entries are inserted.
-    /// - If the local entry is `sync_pending` or newer (`updated_at`) than the remote, local user fields are
-    ///   kept and only metadata is refreshed (`kept_local` counts only entries whose user fields differ).
-    /// - Otherwise remote user fields overwrite local ones (`updated_from_remote` counts actual changes).
-    /// - `custom_folder` is always preserved and synonyms merged; `anilist_list_entry_id` is stored.
+    /// - New remote entries are inserted (full row).
+    /// - Existing entries: if the local entry is `sync_pending` or newer (`updated_at`) than the remote, local
+    ///   user fields are kept (`kept_local` counts only entries whose user fields differ). Otherwise differing
+    ///   remote user fields replace local ones (`updated_from_remote`); `local_episodes.watched` follows a
+    ///   progress change in the same transaction.
+    /// - Light metadata (titles, synonyms, format, status, episodes, season, score, cover, next airing,
+    ///   list-entry id) is compared and written with a targeted UPDATE only when it differs. Heavy metadata
+    ///   (synopsis, genres, studios, banner, trailer, …) is never touched for existing entries, so a light
+    ///   list fetch cannot blank it. `normalized_titles_json` is rebuilt only when titles / synonyms change.
+    /// - An entry with nothing to change gets no write at all.
+    /// - `custom_folder` is always preserved; synonyms are a case-insensitive union with the stored ones.
     /// - With `delete_missing`, local entries absent from the remote list (and not `sync_pending`) are deleted,
     ///   unless the remote list is empty while local entries exist (guard against partial/broken fetches).
     pub fn merge_remote_list(
@@ -1256,30 +1607,44 @@ impl Database {
         let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
 
-        let mut local_by_media: HashMap<i64, LocalSyncRow> = HashMap::new();
+        let mut local_by_media: HashMap<i64, LocalMergeRow> = HashMap::new();
         {
             let mut stmt = tx
-                .prepare(
-                    "SELECT id, anilist_id, updated_at, sync_pending, user_status, user_progress,
-                            user_score, user_repeats, user_notes, user_started_at, user_completed_at
-                     FROM anime_entries WHERE anilist_id IS NOT NULL",
-                )
+                .prepare_cached(MERGE_LOCAL_SELECT_SQL)
                 .map_err(|e| e.to_string())?;
             let rows = stmt
                 .query_map([], |r| {
                     Ok((
                         r.get::<_, i64>(1)?,
-                        LocalSyncRow {
-                            id: r.get(0)?,
-                            updated_at: r.get(2)?,
-                            sync_pending: r.get::<_, i64>(3)? != 0,
-                            status: r.get(4)?,
-                            progress: r.get(5)?,
-                            score: r.get(6)?,
-                            repeats: r.get(7)?,
-                            notes: r.get(8)?,
-                            started_at: r.get(9)?,
-                            completed_at: r.get(10)?,
+                        LocalMergeRow {
+                            user: LocalSyncRow {
+                                id: r.get(0)?,
+                                updated_at: r.get(2)?,
+                                sync_pending: r.get::<_, i64>(3)? != 0,
+                                status: r.get(4)?,
+                                progress: r.get(5)?,
+                                score: r.get(6)?,
+                                repeats: r.get(7)?,
+                                notes: r.get(8)?,
+                                started_at: r.get(9)?,
+                                completed_at: r.get(10)?,
+                            },
+                            title_romaji: r.get(11)?,
+                            title_english: r.get(12)?,
+                            title_native: r.get(13)?,
+                            synonyms_json: r.get(14)?,
+                            normalized_titles_json: r.get(15)?,
+                            format: r.get(16)?,
+                            airing_status: r.get(17)?,
+                            episodes: r.get(18)?,
+                            season: r.get(19)?,
+                            season_year: r.get(20)?,
+                            average_score: r.get(21)?,
+                            cover_image: r.get(22)?,
+                            cover_color: r.get(23)?,
+                            next_airing_episode: r.get(24)?,
+                            next_airing_at: r.get(25)?,
+                            anilist_list_entry_id: r.get(26)?,
                         },
                     ))
                 })
@@ -1295,34 +1660,133 @@ impl Database {
             let Some(media_id) = remote.anilist_id else {
                 continue;
             };
-            remote_media_ids.insert(media_id);
-            if skip_media_ids.contains(&media_id) {
+            // Duplicates in the snapshot: the first occurrence wins.
+            if !remote_media_ids.insert(media_id) || skip_media_ids.contains(&media_id) {
                 continue;
             }
 
-            match local_by_media.get(&media_id) {
-                None => {
-                    let mut fresh = remote.clone();
-                    fresh.sync_pending = false;
-                    write_entry_tx(&tx, &fresh, UserFieldsMode::Overwrite)?;
-                    stats.added += 1;
-                }
-                Some(local) => {
-                    let mut incoming = remote.clone();
-                    incoming.id = local.id;
-                    let differs = local.user_fields_differ(remote);
-                    if local.sync_pending || local.updated_at > remote.updated_at {
-                        write_entry_tx(&tx, &incoming, UserFieldsMode::KeepExisting)?;
-                        if differs {
-                            stats.kept_local += 1;
-                        }
-                    } else {
-                        write_entry_tx(&tx, &incoming, UserFieldsMode::Overwrite)?;
-                        if differs {
-                            stats.updated_from_remote += 1;
-                        }
+            let Some(local) = local_by_media.get(&media_id) else {
+                let mut fresh = remote.clone();
+                fresh.sync_pending = false;
+                write_entry_tx(&tx, &fresh, UserFieldsMode::Overwrite)?;
+                stats.added += 1;
+                stats.new_ids.push(fresh.id);
+                stats.changed_ids.push(fresh.id);
+                stats.rematch_ids.push(fresh.id);
+                continue;
+            };
+            let id = local.user.id;
+            let mut wrote = false;
+
+            // ---- user fields
+            let user_differs = local.user.user_fields_differ(remote);
+            let keep_local =
+                local.user.sync_pending || local.user.updated_at > remote.updated_at;
+            if user_differs {
+                if keep_local {
+                    stats.kept_local += 1;
+                } else {
+                    stats.updated_from_remote += 1;
+                    tx.prepare_cached(MERGE_UPDATE_USER_SQL)
+                        .and_then(|mut s| {
+                            s.execute(params![
+                                remote.user_status,
+                                remote.user_progress,
+                                remote.user_score,
+                                remote.user_repeats,
+                                remote.user_notes,
+                                normalize_opt_text(remote.user_started_at.as_deref()),
+                                normalize_opt_text(remote.user_completed_at.as_deref()),
+                                remote.updated_at,
+                                id
+                            ])
+                        })
+                        .map_err(|e| e.to_string())?;
+                    if local.user.progress != remote.user_progress {
+                        tx.prepare_cached(MERGE_UPDATE_WATCHED_SQL)
+                            .and_then(|mut s| s.execute(params![remote.user_progress, id]))
+                            .map_err(|e| e.to_string())?;
                     }
+                    wrote = true;
                 }
+            }
+
+            // ---- light metadata
+            let stored_synonyms: Vec<String> =
+                serde_json::from_str(&local.synonyms_json).unwrap_or_default();
+            let (merged_synonyms, synonyms_changed) =
+                merge_synonyms_keep_stored(&stored_synonyms, &remote.synonyms);
+            let titles_changed = synonyms_changed
+                || local.title_romaji != remote.title_romaji
+                || local.title_english != remote.title_english
+                || local.title_native != remote.title_native;
+            let cover_image = if remote.cover_image.is_empty() {
+                local.cover_image.as_str()
+            } else {
+                remote.cover_image.as_str()
+            };
+            let cover_color = remote.cover_color.as_ref().or(local.cover_color.as_ref());
+            let list_entry_id = remote.anilist_list_entry_id.or(local.anilist_list_entry_id);
+            let meta_changed = titles_changed
+                || local.format != remote.format
+                || local.airing_status != remote.airing_status
+                || local.episodes != remote.episodes
+                || local.season != remote.season
+                || local.season_year != remote.season_year
+                || local.average_score != remote.average_score
+                || local.cover_image != cover_image
+                || local.cover_color.as_ref() != cover_color
+                || local.next_airing_episode != remote.next_airing_episode
+                || local.next_airing_at != remote.next_airing_at
+                || local.anilist_list_entry_id != list_entry_id;
+
+            if meta_changed {
+                let (synonyms_json, norm_json) = if titles_changed {
+                    let norm = Database::build_normalized_titles(
+                        &remote.title_romaji,
+                        remote.title_english.as_deref(),
+                        remote.title_native.as_deref(),
+                        &merged_synonyms,
+                    );
+                    let norm_json = serde_json::to_string(&norm).unwrap_or_else(|_| "[]".into());
+                    if norm_json != local.normalized_titles_json {
+                        stats.rematch_ids.push(id);
+                    }
+                    (
+                        serde_json::to_string(&merged_synonyms).unwrap_or_else(|_| "[]".into()),
+                        Some(norm_json),
+                    )
+                } else {
+                    (local.synonyms_json.clone(), None)
+                };
+                tx.prepare_cached(MERGE_UPDATE_META_SQL)
+                    .and_then(|mut s| {
+                        s.execute(params![
+                            remote.title_romaji,
+                            remote.title_english,
+                            remote.title_native,
+                            remote.format,
+                            remote.airing_status,
+                            remote.episodes,
+                            remote.season,
+                            remote.season_year,
+                            remote.average_score,
+                            cover_image,
+                            cover_color,
+                            remote.next_airing_episode,
+                            remote.next_airing_at,
+                            list_entry_id,
+                            synonyms_json,
+                            norm_json,
+                            id
+                        ])
+                    })
+                    .map_err(|e| e.to_string())?;
+                wrote = true;
+            }
+
+            if wrote {
+                stats.changed_ids.push(id);
             }
         }
 
@@ -1334,12 +1798,14 @@ impl Database {
                 ));
             } else {
                 for (media_id, local) in &local_by_media {
-                    if remote_media_ids.contains(media_id) || local.sync_pending {
+                    if remote_media_ids.contains(media_id) || local.user.sync_pending {
                         continue;
                     }
-                    delete_entry_rows_tx(&tx, local.id)?;
+                    delete_entry_rows_tx(&tx, local.user.id)?;
                     stats.deleted += 1;
+                    stats.removed_ids.push(local.user.id);
                 }
+                stats.removed_ids.sort_unstable();
             }
         }
 
@@ -1347,9 +1813,101 @@ impl Database {
         Ok(stats)
     }
 
+    /// Write full (heavy) metadata for entries that already exist locally, in one transaction.
+    /// User state, `updated_at`, `sync_pending` and `custom_folder` are untouched (same rules as
+    /// [`refresh_entry_metadata`](Self::refresh_entry_metadata)); ids without a local row are skipped
+    /// (never inserted). Returns the number of rows written.
+    pub fn refresh_existing_entries_metadata(&self, entries: &[AnimeEntry]) -> Result<usize, String> {
+        if entries.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let mut written = 0;
+        for entry in entries {
+            let exists = tx
+                .prepare_cached("SELECT 1 FROM anime_entries WHERE id = ?1")
+                .and_then(|mut s| s.exists(params![entry.id]))
+                .map_err(|e| e.to_string())?;
+            if exists {
+                write_entry_tx(&tx, entry, UserFieldsMode::KeepExisting)?;
+                written += 1;
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(written)
+    }
+
+    /// Batched fetch of full entries (incl. `available_episodes` / `local_episode_count`) for `ids`, in the
+    /// order given (duplicates and unknown ids dropped). One read snapshot; `IN (...)` queries are chunked.
+    pub fn get_anime_entries_by_ids(&self, ids: &[i64]) -> Result<Vec<AnimeEntry>, String> {
+        let mut unique: Vec<i64> = Vec::with_capacity(ids.len());
+        let mut seen: HashSet<i64> = HashSet::with_capacity(ids.len());
+        for &id in ids {
+            if seen.insert(id) {
+                unique.push(id);
+            }
+        }
+        if unique.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let reader = self.reader()?;
+        // One read transaction so all queries see the same committed snapshot.
+        let conn = reader.unchecked_transaction().map_err(|e| e.to_string())?;
+
+        let mut ep_map: HashMap<i64, Vec<u32>> = HashMap::new();
+        let mut by_id: HashMap<i64, AnimeEntry> = HashMap::with_capacity(unique.len());
+        for chunk in unique.chunks(IN_CHUNK) {
+            let marks = placeholders(chunk.len());
+            {
+                let mut stmt = conn
+                    .prepare(&format!(
+                        "SELECT matched_anime_id, episode_number FROM local_episodes
+                         WHERE matched_anime_id IN ({marks}) AND episode_number IS NOT NULL"
+                    ))
+                    .map_err(|e| e.to_string())?;
+                let rows = stmt
+                    .query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+                        Ok((r.get::<_, i64>(0)?, r.get::<_, u32>(1)?))
+                    })
+                    .map_err(|e| e.to_string())?;
+                for row in rows {
+                    let (aid, ep) = row.map_err(|e| e.to_string())?;
+                    ep_map.entry(aid).or_default().push(ep);
+                }
+            }
+            for eps in ep_map.values_mut() {
+                eps.sort_unstable();
+                eps.dedup();
+            }
+
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT {ENTRY_SELECT_COLUMNS} FROM anime_entries WHERE id IN ({marks})"
+                ))
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                    let id: i64 = row.get(0)?;
+                    let avail = ep_map.get(&id).cloned().unwrap_or_default();
+                    row_to_entry(row, avail)
+                })
+                .map_err(|e| e.to_string())?;
+            for row in rows {
+                let entry = row.map_err(|e| e.to_string())?;
+                by_id.insert(entry.id, entry);
+            }
+        }
+
+        Ok(unique.iter().filter_map(|id| by_id.remove(id)).collect())
+    }
+
     /// Fetch a single AnimeEntry by ID in O(1) without loading the entire anime_entries table.
     pub fn get_anime_entry_by_id(&self, anime_id: i64) -> Result<AnimeEntry, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let reader = self.reader()?;
+        // One read transaction so both queries see the same committed snapshot.
+        let conn = reader.unchecked_transaction().map_err(|e| e.to_string())?;
 
         let mut avail: Vec<u32> = Vec::new();
         {
@@ -1377,7 +1935,9 @@ impl Database {
     }
 
     pub fn list_anime_entries(&self) -> Result<Vec<AnimeEntry>, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let reader = self.reader()?;
+        // One read transaction so both queries see the same committed snapshot.
+        let conn = reader.unchecked_transaction().map_err(|e| e.to_string())?;
 
         // Build map of matched local episodes per anime_id
         let mut ep_map: HashMap<i64, Vec<u32>> = HashMap::new();
@@ -1690,127 +2250,46 @@ impl Database {
         .map_err(|e| e.to_string())
     }
 
-    /// Build an in-memory AnimeMatcherIndex in a single SQL pass for ultra-fast batch matching.
+    /// Build a fresh (uncached) in-memory AnimeMatcherIndex in a single SQL pass.
+    /// Prefer [`Database::matcher_index`], which reuses the cached index while nothing changed.
     pub fn build_matcher_index(&self) -> Result<AnimeMatcherIndex, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        self.build_matcher_index_snapshot().map(|(_, index)| index)
+    }
 
-        let mut by_id = HashMap::new();
-        let mut external_ids = HashMap::new();
-        let mut by_anilist_id = HashMap::new();
-        let mut by_mal_id = HashMap::new();
-        let mut user_aliases = HashMap::new();
-        let mut exact_norm = HashMap::new();
-        let mut custom_folders = Vec::new();
-        let mut norm_list = Vec::new();
-
-        {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT id, anilist_id, mal_id, title_romaji, title_english, title_native,
-                            synonyms_json, cover_image, user_progress, episodes, custom_folder
-                     FROM anime_entries",
-                )
-                .map_err(|e| e.to_string())?;
-            let rows = stmt
-                .query_map([], |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, Option<i64>>(1)?,
-                        r.get::<_, Option<i64>>(2)?,
-                        r.get::<_, String>(3)?,
-                        r.get::<_, Option<String>>(4)?,
-                        r.get::<_, Option<String>>(5)?,
-                        r.get::<_, String>(6)?,
-                        r.get::<_, String>(7)?,
-                        r.get::<_, u32>(8)?,
-                        r.get::<_, Option<u32>>(9)?,
-                        r.get::<_, Option<String>>(10)?,
-                    ))
-                })
-                .map_err(|e| e.to_string())?;
-
-            for row in rows.flatten() {
-                let (
-                    id,
-                    anilist_id,
-                    mal_id,
-                    romaji,
-                    english,
-                    native,
-                    syns_json,
-                    cover,
-                    prog,
-                    eps,
-                    cfolder,
-                ) = row;
-                let syns: Vec<String> = serde_json::from_str(&syns_json).unwrap_or_default();
-                let norms = Self::build_normalized_titles(
-                    &romaji,
-                    english.as_deref(),
-                    native.as_deref(),
-                    &syns,
-                );
-                let mut effective_season = extract_effective_season(&romaji);
-                if effective_season == 1 {
-                    if let Some(eng) = english.as_deref() {
-                        effective_season = extract_effective_season(eng);
-                    }
-                }
-
-                by_id.insert(id, (romaji, cover, prog, eps));
-                external_ids.insert(id, (anilist_id, mal_id, effective_season));
-                if let Some(aid) = anilist_id {
-                    by_anilist_id.insert(aid, id);
-                }
-                if let Some(mid) = mal_id {
-                    by_mal_id.insert(mid, id);
-                }
-                if let Some(cf) = cfolder.filter(|s| !s.trim().is_empty()) {
-                    custom_folders.push((cf.to_ascii_lowercase(), id));
-                }
-                for n in norms {
-                    if !n.is_empty() {
-                        let s = extract_effective_season(&n).max(effective_season);
-                        exact_norm.entry(n.clone()).or_insert(id);
-                        if n.len() >= 4 {
-                            norm_list.push((n, s, id));
-                        }
-                    }
-                }
+    /// Build the index from a consistent snapshot and return it with the generation that snapshot reflects.
+    fn build_matcher_index_snapshot(&self) -> Result<(u64, AnimeMatcherIndex), String> {
+        let start = std::time::Instant::now();
+        let (generation, index) = match &self.read_conn {
+            None => {
+                let conn = self.conn.lock().map_err(|e| e.to_string())?;
+                let generation = self.matcher_generation();
+                (generation, build_matcher_index_from(&conn)?)
             }
-        }
-
-        // Load explicit user title aliases (override exact_norm and include in norm_list)
-        {
-            let mut alias_stmt = conn
-                .prepare("SELECT normalized_alias, anime_id FROM title_aliases")
-                .map_err(|e| e.to_string())?;
-            let rows = alias_stmt
-                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
-                .map_err(|e| e.to_string())?;
-            for (alias, aid) in rows.flatten() {
-                if by_id.contains_key(&aid) {
-                    let entry_season = external_ids.get(&aid).map(|x| x.2).unwrap_or(1);
-                    let s = extract_effective_season(&alias).max(entry_season);
-                    user_aliases.insert(alias.clone(), aid);
-                    exact_norm.insert(alias.clone(), aid);
-                    if alias.len() >= 4 {
-                        norm_list.push((alias, s, aid));
-                    }
-                }
+            Some(read_conn) => {
+                let reader = read_conn.lock().map_err(|e| e.to_string())?;
+                let tx = reader.unchecked_transaction().map_err(|e| e.to_string())?;
+                let generation = {
+                    // Pin the read snapshot while no write transaction is in flight. The update hook bumps the
+                    // generation *before* commit, so a snapshot taken mid-transaction could otherwise be cached
+                    // under the post-write generation while still missing the write.
+                    let _writer = self.conn.lock().map_err(|e| e.to_string())?;
+                    let generation = self.matcher_generation();
+                    tx.query_row("SELECT COUNT(*) FROM title_aliases", [], |r| r.get::<_, i64>(0))
+                        .map_err(|e| e.to_string())?;
+                    generation
+                };
+                let index = build_matcher_index_from(&tx)?;
+                drop(tx); // read-only transaction: rollback is a no-op
+                (generation, index)
             }
-        }
-
-        Ok(AnimeMatcherIndex {
-            by_id,
-            external_ids,
-            by_anilist_id,
-            by_mal_id,
-            user_aliases,
-            exact_norm,
-            custom_folders,
-            norm_list,
-        })
+        };
+        eprintln!(
+            "[matcher] built index: {} titles, {} norms in {}ms",
+            index.by_id.len(),
+            index.norm_list.len(),
+            start.elapsed().as_millis()
+        );
+        Ok((generation, index))
     }
 
     /// Save a title relation / alias for an anime entry so that subsequent episodes with this title
@@ -1887,7 +2366,7 @@ impl Database {
         normalized_title: &str,
         file_path: Option<&str>,
     ) -> Option<(i64, String, String, u32, Option<u32>)> {
-        let index = self.build_matcher_index().ok()?;
+        let index = self.matcher_index().ok()?;
         index.match_title(normalized_title, file_path)
     }
 
@@ -1898,34 +2377,40 @@ impl Database {
         parsed: &mut AnitomyElements,
         file_path: Option<&str>,
     ) -> Option<(i64, String, String, u32, Option<u32>)> {
-        let index = self.build_matcher_index().ok()?;
+        let index = self.matcher_index().ok()?;
         index.match_episode(parsed, file_path)
     }
 
     pub fn get_settings(&self) -> Result<AppSettings, String> {
+        const SELECT_SETTINGS: &str = "SELECT value_json FROM app_settings WHERE key = 'main'";
+        let raw: Option<String> = {
+            let reader = self.reader()?;
+            reader
+                .query_row(SELECT_SETTINGS, [], |r| r.get(0))
+                .optional()
+                .map_err(|e| e.to_string())?
+        };
+        if let Some(json) = raw {
+            return Ok(serde_json::from_str(&json).unwrap_or_default());
+        }
+
+        // First run: persist the defaults on the write connection (re-check under the writer lock).
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let raw: Option<String> = conn
-            .query_row(
-                "SELECT value_json FROM app_settings WHERE key = 'main'",
-                [],
-                |r| r.get(0),
-            )
+            .query_row(SELECT_SETTINGS, [], |r| r.get(0))
             .optional()
             .map_err(|e| e.to_string())?;
-
-        match raw {
-            Some(json) => Ok(serde_json::from_str(&json).unwrap_or_default()),
-            None => {
-                let def = AppSettings::default();
-                let json = serde_json::to_string(&def).map_err(|e| e.to_string())?;
-                conn.execute(
-                    "INSERT OR REPLACE INTO app_settings (key, value_json) VALUES ('main', ?1)",
-                    params![json],
-                )
-                .map_err(|e| e.to_string())?;
-                Ok(def)
-            }
+        if let Some(json) = raw {
+            return Ok(serde_json::from_str(&json).unwrap_or_default());
         }
+        let def = AppSettings::default();
+        let json = serde_json::to_string(&def).map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT OR REPLACE INTO app_settings (key, value_json) VALUES ('main', ?1)",
+            params![json],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(def)
     }
 
     pub fn save_settings(&self, settings: &AppSettings) -> Result<(), String> {
@@ -2463,7 +2948,7 @@ pub(crate) fn test_fixture_entries() -> Vec<AnimeEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::detection::anitomy::parse_filename;
+    use crate::detection::anitomy::{normalize_anime_title, parse_filename};
 
     fn fixture_db(name: &str) -> (Database, std::path::PathBuf) {
         let tmp_dir = std::env::temp_dir().join(name);
@@ -2746,6 +3231,15 @@ mod tests {
         assert_eq!(stats.kept_local, 2);
         assert_eq!(stats.deleted, 1);
         assert_eq!(stats.deletion_skipped_reason, None);
+        // Delta ids: 1 (remote won + synonyms), 3 (renamed, pending), 8 (new). 2 / 9 had nothing to write.
+        let mut changed = stats.changed_ids.clone();
+        changed.sort_unstable();
+        assert_eq!(changed, vec![1, 3, 8]);
+        assert_eq!(stats.new_ids, vec![8]);
+        assert_eq!(stats.removed_ids, vec![4]);
+        let mut rematch = stats.rematch_ids.clone();
+        rematch.sort_unstable();
+        assert_eq!(rematch, vec![1, 3, 8]);
 
         // Remote newer -> remote wins; custom_folder preserved; synonyms merged; list entry id stored
         let a = db.get_anime_entry_by_id(1).unwrap();
@@ -2786,6 +3280,254 @@ mod tests {
             .unwrap();
         assert_eq!(stats.deleted, 0);
         assert!(db.get_anime_entry_by_id(2).is_ok());
+    }
+
+    fn insert_episode(db: &Database, anime_id: Option<i64>, file: &str, ep: u32, watched: bool) {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO library_folders (id, path, label, drive_root) VALUES (1, 'C:/lib', 'lib', 'C:')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO local_episodes (folder_id, file_path, file_name, drive_root, parsed_title, normalized_title, episode_number, matched_anime_id, watched)
+             VALUES (1, ?1, ?1, 'C:', 'x', 'x', ?2, ?3, ?4)",
+            params![file, ep, anime_id, watched as i64],
+        )
+        .unwrap();
+    }
+
+    fn watched_of(db: &Database, file: &str) -> bool {
+        let conn = db.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT watched FROM local_episodes WHERE file_path = ?1",
+            params![file],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+            != 0
+    }
+
+    fn total_changes(db: &Database) -> u64 {
+        db.conn.lock().unwrap().total_changes()
+    }
+
+    fn remote_of(local: &AnimeEntry) -> AnimeEntry {
+        let mut r = local.clone();
+        r.custom_folder = None;
+        r.sync_pending = false;
+        r
+    }
+
+    #[test]
+    fn test_merge_unchanged_remote_writes_nothing() {
+        let db = Database::open_in_memory().expect("db");
+        let mut a = test_entry(1, "Alpha");
+        a.user_status = "CURRENT".into();
+        a.user_progress = 4;
+        a.updated_at = 100;
+        a.synonyms = vec!["Alpha Syn".into()];
+        a.cover_image = "https://img/a.jpg".into();
+        a.cover_color = Some("#fff".into());
+        a.anilist_list_entry_id = Some(11);
+        a.custom_folder = Some("D:/Anime/Alpha".into());
+        let mut b = test_entry(2, "Beta");
+        b.next_airing_episode = Some(5);
+        b.next_airing_at = Some(1_900_000_000);
+        b.updated_at = 100;
+        db.upsert_anime_entries_batch(&[a.clone(), b.clone()]).unwrap();
+
+        // Remote: same user state (a bit newer updatedAt), no synonyms, empty cover / color -> nothing to write
+        let mut ra = remote_of(&a);
+        ra.updated_at = 150;
+        ra.synonyms = vec![];
+        ra.cover_image = String::new();
+        ra.cover_color = None;
+        let rb = remote_of(&b);
+        let remote = vec![ra, rb];
+
+        let changes_before = total_changes(&db);
+        let gen_before = db.matcher_generation();
+        let stats = db.merge_remote_list(&remote, &HashSet::new(), true).unwrap();
+        assert_eq!(total_changes(&db), changes_before, "no row may be written");
+        assert_eq!(db.matcher_generation(), gen_before, "matcher index stays valid");
+        assert_eq!(
+            stats,
+            MergeStats::default(),
+            "nothing added / changed / removed"
+        );
+        let a_now = db.get_anime_entry_by_id(1).unwrap();
+        assert_eq!(a_now.updated_at, 100);
+        assert_eq!(a_now.cover_image, "https://img/a.jpg");
+        assert_eq!(a_now.custom_folder.as_deref(), Some("D:/Anime/Alpha"));
+
+        // Changing one field writes exactly that entry; a repeat merge is a no-op again
+        let mut remote2 = remote.clone();
+        remote2[1].next_airing_episode = Some(6);
+        let stats = db.merge_remote_list(&remote2, &HashSet::new(), true).unwrap();
+        assert_eq!(stats.changed_ids, vec![2]);
+        assert!(stats.rematch_ids.is_empty(), "airing change needs no rematch");
+        assert_eq!(stats.updated_from_remote, 0);
+        assert_eq!(db.get_anime_entry_by_id(2).unwrap().next_airing_episode, Some(6));
+        let changes_before = total_changes(&db);
+        let stats = db.merge_remote_list(&remote2, &HashSet::new(), true).unwrap();
+        assert!(stats.changed_ids.is_empty());
+        assert_eq!(total_changes(&db), changes_before);
+    }
+
+    #[test]
+    fn test_merge_progress_change_updates_watched_flags_and_delta_rows() {
+        let db = Database::open_in_memory().expect("db");
+        let mut a = test_entry(1, "Alpha");
+        a.user_status = "CURRENT".into();
+        a.user_progress = 1;
+        a.updated_at = 100;
+        let mut b = test_entry(2, "Beta");
+        b.user_status = "CURRENT".into();
+        b.user_progress = 0;
+        b.updated_at = 100;
+        db.upsert_anime_entries_batch(&[a.clone(), b.clone()]).unwrap();
+        insert_episode(&db, Some(1), "C:/lib/a1.mkv", 1, true);
+        insert_episode(&db, Some(1), "C:/lib/a2.mkv", 2, false);
+        insert_episode(&db, Some(1), "C:/lib/a3.mkv", 3, false);
+        // Deliberately inconsistent flag on another anime: must not be touched
+        insert_episode(&db, Some(2), "C:/lib/b1.mkv", 1, true);
+
+        let mut ra = remote_of(&a);
+        ra.user_progress = 2;
+        ra.updated_at = 200;
+        let rb = remote_of(&b);
+        let stats = db.merge_remote_list(&[ra, rb], &HashSet::new(), true).unwrap();
+        assert_eq!(stats.updated_from_remote, 1);
+        assert_eq!(stats.changed_ids, vec![1]);
+        assert!(stats.rematch_ids.is_empty());
+
+        assert!(watched_of(&db, "C:/lib/a1.mkv"));
+        assert!(watched_of(&db, "C:/lib/a2.mkv"));
+        assert!(!watched_of(&db, "C:/lib/a3.mkv"));
+        assert!(watched_of(&db, "C:/lib/b1.mkv"));
+
+        let rows = db.get_anime_entries_by_ids(&[2, 1, 999, 2]).unwrap();
+        assert_eq!(rows.iter().map(|e| e.id).collect::<Vec<_>>(), vec![2, 1]);
+        assert_eq!(rows[1].user_progress, 2);
+        assert_eq!(rows[1].updated_at, 200);
+        assert_eq!(rows[1].available_episodes, vec![1, 2, 3]);
+        assert_eq!(rows[1].local_episode_count, 3);
+        assert_eq!(rows[0].available_episodes, vec![1]);
+        assert!(db.get_anime_entries_by_ids(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_merge_title_change_rebuilds_normalized_titles_and_rematches() {
+        let db = Database::open_in_memory().expect("db");
+        let mut a = test_entry(1, "Old Show Name");
+        a.updated_at = 100;
+        let mut b = test_entry(2, "Second Show");
+        b.updated_at = 100;
+        db.upsert_anime_entries_batch(&[a.clone(), b.clone()]).unwrap();
+        assert_eq!(
+            db.match_title_to_anime(&normalize_anime_title("Old Show Name"), None)
+                .map(|m| m.0),
+            Some(1)
+        );
+
+        let mut ra = remote_of(&a);
+        ra.title_romaji = "Brand New Show Name".into();
+        let mut rb = remote_of(&b);
+        rb.synonyms = vec!["Another Alias Title".into()];
+        let stats = db.merge_remote_list(&[ra, rb], &HashSet::new(), true).unwrap();
+        let mut rematch = stats.rematch_ids.clone();
+        rematch.sort_unstable();
+        assert_eq!(rematch, vec![1, 2]);
+        assert_eq!(stats.updated_from_remote, 0);
+
+        let norm_json = |id: i64| -> String {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT normalized_titles_json FROM anime_entries WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let n1: Vec<String> = serde_json::from_str(&norm_json(1)).unwrap();
+        assert!(n1.contains(&normalize_anime_title("Brand New Show Name")));
+        assert!(!n1.contains(&normalize_anime_title("Old Show Name")));
+        let n2: Vec<String> = serde_json::from_str(&norm_json(2)).unwrap();
+        assert!(n2.contains(&normalize_anime_title("Another Alias Title")));
+
+        assert_eq!(
+            db.match_title_to_anime(&normalize_anime_title("Brand New Show Name"), None)
+                .map(|m| m.0),
+            Some(1)
+        );
+        assert_eq!(
+            db.match_title_to_anime(&normalize_anime_title("Another Alias Title"), None)
+                .map(|m| m.0),
+            Some(2)
+        );
+        let syns = db.get_anime_entry_by_id(2).unwrap().synonyms;
+        assert_eq!(syns, vec!["Another Alias Title".to_string()]);
+    }
+
+    #[test]
+    fn test_light_merge_keeps_heavy_metadata() {
+        let db = Database::open_in_memory().expect("db");
+        let mut full = test_entry(1, "Heavy");
+        full.updated_at = 100;
+        full.mal_id = Some(77);
+        full.synopsis = "A long synopsis.".into();
+        full.genres = vec!["Action".into(), "Drama".into()];
+        full.studios = vec!["Madhouse".into()];
+        full.banner_image = Some("https://img/banner.jpg".into());
+        full.trailer_url = Some("https://www.youtube.com/watch?v=x".into());
+        full.source_material = Some("MANGA".into());
+        full.duration = Some(24);
+        full.site_url = Some("https://anilist.co/anime/1".into());
+        db.upsert_anime_entry(&full).unwrap();
+
+        // What a light list fetch yields: heavy fields at their parse defaults
+        let mut light = remote_of(&full);
+        light.mal_id = None;
+        light.synopsis = String::new();
+        light.genres = vec![];
+        light.studios = vec![];
+        light.banner_image = None;
+        light.trailer_url = None;
+        light.source_material = None;
+        light.duration = None;
+        light.site_url = Some("https://anilist.co/anime/1".into());
+        light.episodes = Some(13);
+        light.user_progress = 3;
+        light.user_status = "CURRENT".into();
+        light.updated_at = 200;
+        let stats = db.merge_remote_list(&[light], &HashSet::new(), true).unwrap();
+        assert_eq!(stats.changed_ids, vec![1]);
+
+        let e = db.get_anime_entry_by_id(1).unwrap();
+        assert_eq!(e.episodes, Some(13));
+        assert_eq!(e.user_progress, 3);
+        assert_eq!(e.mal_id, Some(77));
+        assert_eq!(e.synopsis, "A long synopsis.");
+        assert_eq!(e.genres, vec!["Action".to_string(), "Drama".to_string()]);
+        assert_eq!(e.studios, vec!["Madhouse".to_string()]);
+        assert_eq!(e.banner_image.as_deref(), Some("https://img/banner.jpg"));
+        assert_eq!(e.trailer_url.as_deref(), Some("https://www.youtube.com/watch?v=x"));
+        assert_eq!(e.source_material.as_deref(), Some("MANGA"));
+        assert_eq!(e.duration, Some(24));
+
+        // Details for existing rows are written without touching user state; unknown ids are never inserted
+        let mut details = full.clone();
+        details.synopsis = "Updated synopsis.".into();
+        details.user_progress = 0;
+        details.user_status = "PLANNING".into();
+        let ghost = test_entry(55, "Ghost");
+        assert_eq!(db.refresh_existing_entries_metadata(&[details, ghost]).unwrap(), 1);
+        let e = db.get_anime_entry_by_id(1).unwrap();
+        assert_eq!(e.synopsis, "Updated synopsis.");
+        assert_eq!(e.user_progress, 3);
+        assert_eq!(e.updated_at, 200);
+        assert!(db.get_anime_entry_by_id(55).is_err());
     }
 
     #[test]
@@ -2846,5 +3588,178 @@ mod tests {
         let hist = db.list_watch_history(10).unwrap();
         assert_eq!(hist[0].id, hid);
         assert!(hist[0].scrobbled_to_tracker);
+    }
+
+    #[test]
+    fn test_matcher_cache_reuse_and_invalidation() {
+        let (db, tmp_dir) = fixture_db("tora_test_db_matcher_cache");
+        assert!(db.read_conn.is_some(), "file databases use a dedicated read connection");
+
+        // Repeated lookups reuse the same cached index while nothing changes
+        let first = db.matcher_index().unwrap();
+        let mut ep = parse_filename("[SubsPlease] Sousou no Frieren - 25 (1080p).mkv");
+        let m = db.match_episode_to_anime(&mut ep, None).expect("frieren match");
+        assert_eq!(m.0, 154587);
+        assert_eq!(m.3, 24);
+        let mut ep = parse_filename("[SubsPlease] Sousou no Frieren - 26 (1080p).mkv");
+        assert!(db.match_episode_to_anime(&mut ep, None).is_some());
+        assert!(db.match_title_to_anime("dandadan", None).is_some());
+        assert!(Arc::ptr_eq(&first, &db.matcher_index().unwrap()));
+
+        // A user-state write bumps the generation; the next lookup sees the new progress
+        let g0 = db.matcher_generation();
+        db.update_anime_user_state(
+            154587, "CURRENT", 26, 0.0, 0, "", None, None, None, None, false,
+        )
+        .unwrap();
+        assert_ne!(db.matcher_generation(), g0);
+        let m = db
+            .match_title_to_anime("sousou no frieren", None)
+            .expect("frieren match");
+        assert_eq!(m.3, 26, "cached match reflects the just-changed progress");
+        let second = db.matcher_index().unwrap();
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert!(Arc::ptr_eq(&second, &db.matcher_index().unwrap()));
+
+        // Linking an alias invalidates it
+        let g1 = db.matcher_generation();
+        db.link_alias_to_anime(171018, "Dan Da Dan Custom Alias").unwrap();
+        assert_ne!(db.matcher_generation(), g1);
+        let third = db.matcher_index().unwrap();
+        assert!(!Arc::ptr_eq(&second, &third));
+        assert_eq!(
+            third.user_aliases.get("dan da dan custom alias").copied(),
+            Some(171018)
+        );
+
+        // Binding a title alias (scanner path) invalidates it
+        let g2 = db.matcher_generation();
+        db.bind_title_alias("Some Other Dungeon Alias", 153518).unwrap();
+        assert_ne!(db.matcher_generation(), g2);
+        let fourth = db.matcher_index().unwrap();
+        assert!(!Arc::ptr_eq(&third, &fourth));
+        assert_eq!(
+            fourth.user_aliases.get("some other dungeon alias").copied(),
+            Some(153518)
+        );
+
+        // Deleting entries invalidates it and drops them from the index
+        let g3 = db.matcher_generation();
+        db.batch_delete_anime_entries(&[171018]).unwrap();
+        assert_ne!(db.matcher_generation(), g3);
+        let fifth = db.matcher_index().unwrap();
+        assert!(!Arc::ptr_eq(&fourth, &fifth));
+        assert!(!fifth.by_id.contains_key(&171018));
+        assert!(db.match_title_to_anime("dandadan", None).is_none());
+
+        drop(db);
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_update_hook_covers_every_write_kind() {
+        let db = Database::open_in_memory().expect("db");
+        let bumped = |f: &dyn Fn()| {
+            let before = db.matcher_generation();
+            f();
+            db.matcher_generation() != before
+        };
+        // INSERT ... ON CONFLICT DO UPDATE (insert and update paths)
+        assert!(bumped(&|| db.upsert_anime_entry(&test_entry(1, "Alpha")).unwrap()));
+        assert!(bumped(&|| db.upsert_anime_entry(&test_entry(1, "Alpha 2")).unwrap()));
+        // INSERT OR REPLACE / DELETE ... WHERE on title_aliases, inside an explicit transaction
+        assert!(bumped(&|| {
+            let mut conn = db.conn.lock().unwrap();
+            let tx = conn.transaction().unwrap();
+            tx.execute(
+                "INSERT OR REPLACE INTO title_aliases (normalized_alias, anime_id) VALUES ('a', 1)",
+                [],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }));
+        assert!(bumped(&|| {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO title_aliases (normalized_alias, anime_id) VALUES ('a', 1)",
+                [],
+            )
+            .unwrap();
+        }));
+        assert!(bumped(&|| {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("DELETE FROM title_aliases WHERE anime_id = 1", [])
+                .unwrap();
+        }));
+        // Unrelated tables never invalidate the matcher
+        assert!(!bumped(&|| {
+            db.record_watch_history(Some(1), "Alpha", 1, "mpv", "a.mkv", false)
+                .unwrap();
+        }));
+        // Plain UPDATE and DELETE on anime_entries
+        assert!(bumped(&|| db.set_sync_result(1, true, None, None).unwrap()));
+        assert!(bumped(&|| db.delete_anime_entry(1).unwrap()));
+    }
+
+    #[test]
+    fn test_matcher_snapshot_waits_for_open_write_transaction() {
+        let (db, tmp_dir) = fixture_db("tora_test_db_matcher_snapshot");
+        let before = db.matcher_index().unwrap();
+        assert_eq!(before.by_id.get(&171018).map(|e| e.2), Some(8));
+
+        std::thread::scope(|scope| {
+            let mut conn = db.conn.lock().unwrap();
+            let tx = conn.transaction().unwrap();
+            tx.execute(
+                "UPDATE anime_entries SET user_progress = 11 WHERE id = 171018",
+                [],
+            )
+            .unwrap();
+            // The hook already bumped the generation, but the write is not committed yet.
+            let builder = scope.spawn(|| db.matcher_index().unwrap());
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            tx.commit().unwrap();
+            drop(conn);
+            let built = builder.join().unwrap();
+            assert_eq!(
+                built.by_id.get(&171018).map(|e| e.2),
+                Some(11),
+                "an index built during a write transaction must not miss that write"
+            );
+        });
+        let after = db.matcher_index().unwrap();
+        assert_eq!(after.by_id.get(&171018).map(|e| e.2), Some(11));
+
+        drop(db);
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_read_connection_is_query_only_and_sees_commits() {
+        let tmp_dir = std::env::temp_dir().join("tora_test_db_read_conn");
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        let db = Database::open(&tmp_dir.join("test.db")).expect("open test db");
+
+        // First call inserts defaults through the writer; later calls read them through the reader
+        let defaults = db.get_settings().unwrap();
+        assert_eq!(defaults.theme, AppSettings::default().theme);
+        let mut changed = defaults.clone();
+        changed.theme = "custom-theme".into();
+        db.save_settings(&changed).unwrap();
+        assert_eq!(db.get_settings().unwrap().theme, "custom-theme");
+
+        db.upsert_anime_entry(&test_entry(42, "Visible")).unwrap();
+        assert_eq!(db.get_anime_entry_by_id(42).unwrap().title_romaji, "Visible");
+        assert_eq!(db.list_anime_entries().unwrap().len(), 1);
+
+        {
+            let reader = db.reader().unwrap();
+            assert!(reader
+                .execute("DELETE FROM anime_entries WHERE id = 42", [])
+                .is_err());
+        }
+
+        drop(db);
+        let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 }

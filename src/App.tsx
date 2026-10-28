@@ -106,6 +106,9 @@ export const App: React.FC = () => {
   >("updated");
 
   const [animeList, setAnimeList] = useState<AnimeEntry[]>([]);
+  // Latest list for listeners registered once on mount (e.g. the sync "up to date" toast count)
+  const animeListRef = useRef<AnimeEntry[]>(animeList);
+  animeListRef.current = animeList;
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [selectedAnime, setSelectedAnime] = useState<AnimeEntry | null>(null);
   const [selectedAnimeIds, setSelectedAnimeIds] = useState<number[]>([]);
@@ -194,18 +197,71 @@ export const App: React.FC = () => {
   };
 
   const refreshAnimeList = async (overrideList?: AnimeEntry[]) => {
-    if (overrideList) {
-      setAnimeList(overrideList);
-      setSelectedAnime((prev) =>
-        prev ? overrideList.find((a) => a.id === prev.id) ?? prev : null
-      );
-      return;
-    }
-    const list = await toraApi.getAnimeList();
+    const list = overrideList ?? (await toraApi.getAnimeList());
     setAnimeList(list);
     setSelectedAnime((prev) =>
       prev ? list.find((a) => a.id === prev.id) ?? prev : null
     );
+  };
+
+  // Apply an AniList sync delta in place (idempotent, no full-list refetch).
+  // Changed entries with an in-flight optimistic +1/-1 are left alone; their debounced save pushes again.
+  const applySyncDelta = (summary: SyncSummary) => {
+    const changed = summary.changed.filter(
+      (entry) => !pendingStepRef.current[entry.id]
+    );
+    const removed = new Set(summary.removed_ids);
+    if (changed.length === 0 && removed.size === 0) return;
+
+    // A removed entry's pending step would save to a row that no longer exists
+    if (removed.size > 0) {
+      let droppedPending = false;
+      for (const id of removed) {
+        const pending = pendingStepRef.current[id];
+        if (!pending) continue;
+        clearTimeout(pending.timer);
+        delete pendingStepRef.current[id];
+        droppedPending = true;
+      }
+      if (droppedPending) {
+        setPendingStepSnapshots((prev) => {
+          const next = { ...prev };
+          for (const id of removed) delete next[id];
+          return next;
+        });
+      }
+    }
+
+    const changedById = new Map(changed.map((entry) => [entry.id, entry]));
+    setAnimeList((prev) => {
+      const seen = new Set<number>();
+      const next: AnimeEntry[] = [];
+      for (const a of prev) {
+        if (removed.has(a.id)) continue;
+        const replacement = changedById.get(a.id);
+        if (replacement) seen.add(a.id);
+        next.push(replacement ?? a);
+      }
+      for (const entry of changed) {
+        if (!seen.has(entry.id) && !removed.has(entry.id)) next.push(entry);
+      }
+      return next;
+    });
+    setSelectedAnime((prev) => {
+      if (!prev) return prev;
+      if (removed.has(prev.id)) return null;
+      return changedById.get(prev.id) ?? prev;
+    });
+    if (removed.size > 0) {
+      setSelectedAnimeIds((prev) =>
+        prev.some((id) => removed.has(id))
+          ? prev.filter((id) => !removed.has(id))
+          : prev
+      );
+      setQuickMenuAnimeId((prev) =>
+        prev !== null && removed.has(prev) ? null : prev
+      );
+    }
   };
 
   useEffect(() => {
@@ -250,7 +306,7 @@ export const App: React.FC = () => {
         const summary = event.payload;
         setIsSyncing(false);
         setLastSyncedAt(Math.floor(Date.now() / 1000));
-        await refreshAnimeList(summary.entries);
+        applySyncDelta(summary);
 
         // Stay quiet at startup when nothing changed; manual / post-auth syncs always confirm
         const msg = describeSyncSummary(summary);
@@ -258,7 +314,7 @@ export const App: React.FC = () => {
           showToast(msg, summary.push_failed > 0 ? "error" : "success");
         } else if (lastSyncReasonRef.current !== "startup") {
           showToast(
-            `AniList sync: up to date (${summary.entries.length} entries)`,
+            `AniList sync: up to date (${animeListRef.current.length} entries)`,
             "info"
           );
         }
@@ -614,10 +670,11 @@ export const App: React.FC = () => {
     setIsSyncing(true);
     const failureSeq = syncFailureSeqRef.current;
     try {
-      // The tracker-list-synced event owns the summary toast; just apply the entries here
+      // The tracker-list-synced event owns the summary toast; just apply the delta here
+      // (idempotent, so applying it again after the event is harmless)
       const summary = await toraApi.syncTrackerList();
       setLastSyncedAt(Math.floor(Date.now() / 1000));
-      await refreshAnimeList(summary.entries);
+      applySyncDelta(summary);
     } catch (err: any) {
       if (syncFailureSeqRef.current === failureSeq) {
         showToast(`AniList sync failed: ${String(err)}`, "error");

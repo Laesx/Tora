@@ -266,6 +266,167 @@ fn parse_and_match_video_file(
     }
 }
 
+/// One `local_episodes` row loaded for rematching.
+#[derive(Debug, Clone)]
+struct RematchRow {
+    id: i64,
+    parsed_title: String,
+    normalized_title: String,
+    file_path: String,
+    episode_number: Option<u32>,
+    anime_season: Option<u32>,
+    matched_anime_id: Option<i64>,
+    watched: i32,
+}
+
+/// New state of a `local_episodes` row whose match changed.
+#[derive(Debug, Clone, PartialEq)]
+struct RematchUpdate {
+    id: i64,
+    matched_anime_id: Option<i64>,
+    watched: i32,
+    episode_number: Option<u32>,
+    anime_season: Option<u32>,
+    parsed_title: String,
+    normalized_title: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct RematchOutcome {
+    /// The file resolved to an entry (and, in targeted mode, to one of the targets).
+    matched: bool,
+    update: Option<RematchUpdate>,
+}
+
+/// Elements a stored row is re-matched with (title re-normalized from `parsed_title`).
+fn rematch_elements(row: &RematchRow) -> AnitomyElements {
+    let mut elements = AnitomyElements {
+        anime_title: row.parsed_title.clone(),
+        normalized_title: normalize_anime_title(&row.parsed_title),
+        episode_number: row.episode_number,
+        anime_season: row.anime_season,
+        ..Default::default()
+    };
+    if elements.normalized_title.is_empty() {
+        elements.normalized_title = row.normalized_title.clone();
+    }
+    elements
+}
+
+/// Turn a resolved match `(anime_id, user_progress)` into the row's outcome. In targeted mode, a file whose
+/// match is not one of `targets` is skipped entirely.
+fn finish_rematch(
+    row: &RematchRow,
+    elements: AnitomyElements,
+    resolved: Option<(i64, u32)>,
+    targets: Option<&HashSet<i64>>,
+) -> RematchOutcome {
+    if let Some(targets) = targets {
+        if !resolved.map_or(false, |(aid, _)| targets.contains(&aid)) {
+            return RematchOutcome {
+                matched: false,
+                update: None,
+            };
+        }
+    }
+
+    let (new_aid, new_watched) = match resolved {
+        Some((aid, prog)) => {
+            let w = elements
+                .episode_number
+                .map(|n| n <= prog)
+                .unwrap_or(false) as i32;
+            (Some(aid), w)
+        }
+        None => (None, 0),
+    };
+
+    let changed = row.matched_anime_id != new_aid
+        || row.watched != new_watched
+        || elements.episode_number != row.episode_number
+        || elements.anime_season != row.anime_season
+        || elements.normalized_title != row.normalized_title;
+
+    RematchOutcome {
+        matched: resolved.is_some(),
+        update: changed.then(|| RematchUpdate {
+            id: row.id,
+            matched_anime_id: new_aid,
+            watched: new_watched,
+            episode_number: elements.episode_number,
+            anime_season: elements.anime_season,
+            parsed_title: elements.anime_title,
+            normalized_title: elements.normalized_title,
+        }),
+    }
+}
+
+/// Fallback to the row's previous match while that entry still exists.
+fn previous_match(matcher: &AnimeMatcherIndex, row: &RematchRow) -> Option<(i64, u32)> {
+    row.matched_anime_id.and_then(|aid| {
+        matcher
+            .by_id
+            .get(&aid)
+            .map(|(_t, _c, prog, _eps)| (aid, *prog))
+    })
+}
+
+/// Memoized, parallel equivalent of running `matcher.match_episode` on every row:
+/// 1. per file (parallel): elements + custom-folder prefix match (per-file, wins over titles);
+/// 2. per distinct normalized title of the files outside custom folders (parallel): the title-only match;
+/// 3. per file (parallel): episode validation / relations redirection on the (memoized) title match.
+fn compute_rematch_outcomes(
+    matcher: &AnimeMatcherIndex,
+    episodes: &[RematchRow],
+    targets: Option<&HashSet<i64>>,
+) -> Vec<RematchOutcome> {
+    let prepared: Vec<(AnitomyElements, Option<i64>)> = episodes
+        .par_iter()
+        .map(|row| {
+            (
+                rematch_elements(row),
+                matcher.match_custom_folder(&row.file_path),
+            )
+        })
+        .collect();
+
+    let distinct_titles: Vec<String> = prepared
+        .iter()
+        .filter(|(_, folder_aid)| folder_aid.is_none())
+        .map(|(elements, _)| elements.normalized_title.as_str())
+        .collect::<HashSet<&str>>()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let title_memo: HashMap<String, Option<i64>> = distinct_titles
+        .into_par_iter()
+        .map(|title| {
+            let aid = matcher.match_title_only(&title);
+            (title, aid)
+        })
+        .collect();
+
+    prepared
+        .into_par_iter()
+        .zip(episodes.par_iter())
+        .map(|((mut elements, folder_aid), row)| {
+            let title_match = folder_aid
+                .or_else(|| {
+                    title_memo
+                        .get(elements.normalized_title.as_str())
+                        .copied()
+                        .flatten()
+                })
+                .and_then(|aid| matcher.title_match_for(aid));
+            let resolved = title_match
+                .and_then(|m| matcher.resolve_episode(m, &mut elements, Some(&row.file_path)))
+                .map(|(aid, _t, _c, prog, _eps)| (aid, prog))
+                .or_else(|| previous_match(matcher, row));
+            finish_rematch(row, elements, resolved, targets)
+        })
+        .collect()
+}
+
 /// Parses a directory name (`parse_path = false`) to bind `custom_folder` on matching anime.
 fn match_directory_to_anime(dir_path: &Path, matcher: &AnimeMatcherIndex) -> Option<(i64, String)> {
     let dir_name = dir_path.file_name()?.to_str()?;
@@ -541,7 +702,7 @@ impl Database {
             rows.flatten().collect()
         };
 
-        let matcher = self.build_matcher_index()?;
+        let matcher = self.matcher_index()?;
         let mut seen_ids: HashSet<i64> = HashSet::with_capacity(existing_cache.len());
         let mut to_parse: Vec<(i64, String, PathBuf, PathBuf, u64, i64, Option<i64>)> = Vec::new();
         let mut discovered_dirs: HashMap<i64, String> = HashMap::new();
@@ -742,7 +903,7 @@ impl Database {
             return Ok(None);
         }
         let start = std::time::Instant::now();
-        let matcher = self.build_matcher_index()?;
+        let matcher = self.matcher_index()?;
 
         let mut removed_paths: Vec<String> = Vec::new();
         let mut added_rows: Vec<ParsedEpisodeRow> = Vec::new();
@@ -948,33 +1109,32 @@ impl Database {
         }
     }
 
-    /// Re-run title matching across indexed local episodes using the O(1) in-memory `AnimeMatcherIndex`.
+    /// Re-run title matching across indexed local episodes using the cached `AnimeMatcherIndex`.
     pub fn rematch_all_local_episodes(&self) -> Result<usize, String> {
         self.rematch_episodes_internal(None)
     }
 
     /// Targeted matching for a single newly added anime entry against only unmatched local episodes.
     pub fn match_unmatched_episodes_for_anime(&self, anime_id: i64) -> Result<usize, String> {
-        self.rematch_episodes_internal(Some(anime_id))
+        self.match_unmatched_episodes_for_ids(&[anime_id])
     }
 
-    fn rematch_episodes_internal(
-        &self,
-        target_unmatched_anime_id: Option<i64>,
-    ) -> Result<usize, String> {
-        let matcher = self.build_matcher_index()?;
-        let episodes: Vec<(
-            i64,
-            String,
-            String,
-            String,
-            Option<u32>,
-            Option<u32>,
-            Option<i64>,
-            i32,
-        )> = {
+    /// Targeted matching for several entries in one pass over the unmatched local episodes: a file is bound
+    /// only if it matches one of `ids`. Already matched files are never touched. Returns the number bound.
+    pub fn match_unmatched_episodes_for_ids(&self, ids: &[i64]) -> Result<usize, String> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let targets: HashSet<i64> = ids.iter().copied().collect();
+        self.rematch_episodes_internal(Some(&targets))
+    }
+
+    fn rematch_episodes_internal(&self, targets: Option<&HashSet<i64>>) -> Result<usize, String> {
+        let start = std::time::Instant::now();
+        let matcher = self.matcher_index()?;
+        let episodes: Vec<RematchRow> = {
             let conn = self.conn.lock().map_err(|e| e.to_string())?;
-            let sql = if target_unmatched_anime_id.is_some() {
+            let sql = if targets.is_some() {
                 "SELECT id, parsed_title, normalized_title, file_path, episode_number, anime_season, matched_anime_id, watched
                  FROM local_episodes WHERE matched_anime_id IS NULL"
             } else {
@@ -984,93 +1144,24 @@ impl Database {
             let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
             let rows = stmt
                 .query_map([], |r| {
-                    Ok((
-                        r.get(0)?,
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                        r.get(4)?,
-                        r.get(5)?,
-                        r.get(6)?,
-                        r.get(7)?,
-                    ))
+                    Ok(RematchRow {
+                        id: r.get(0)?,
+                        parsed_title: r.get(1)?,
+                        normalized_title: r.get(2)?,
+                        file_path: r.get(3)?,
+                        episode_number: r.get(4)?,
+                        anime_season: r.get(5)?,
+                        matched_anime_id: r.get(6)?,
+                        watched: r.get(7)?,
+                    })
                 })
                 .map_err(|e| e.to_string())?;
             rows.flatten().collect()
         };
 
-        let mut updates = Vec::new();
-        let mut matched_count = 0usize;
-
-        for (
-            ep_id,
-            parsed_title,
-            norm_title,
-            file_path,
-            ep_num,
-            season_num,
-            old_aid,
-            old_watched,
-        ) in &episodes
-        {
-            let mut ep_elements = AnitomyElements {
-                anime_title: parsed_title.clone(),
-                normalized_title: normalize_anime_title(parsed_title),
-                episode_number: *ep_num,
-                anime_season: *season_num,
-                ..Default::default()
-            };
-            if ep_elements.normalized_title.is_empty() {
-                ep_elements.normalized_title = norm_title.clone();
-            }
-
-            let resolved = matcher
-                .match_episode(&mut ep_elements, Some(file_path))
-                .map(|(aid, _t, _c, prog, _eps)| (aid, prog))
-                .or_else(|| {
-                    old_aid.and_then(|aid| {
-                        matcher
-                            .by_id
-                            .get(&aid)
-                            .map(|(_t, _c, prog, _eps)| (aid, *prog))
-                    })
-                });
-
-            if let Some(target_aid) = target_unmatched_anime_id {
-                if resolved.map(|(aid, _)| aid) != Some(target_aid) {
-                    continue;
-                }
-            }
-
-            let (new_aid, new_watched) = match resolved {
-                Some((aid, prog)) => {
-                    matched_count += 1;
-                    let w = ep_elements
-                        .episode_number
-                        .map(|n| n <= prog)
-                        .unwrap_or(false) as i32;
-                    (Some(aid), w)
-                }
-                None => (None, 0),
-            };
-
-            if *old_aid != new_aid
-                || *old_watched != new_watched
-                || ep_elements.episode_number != *ep_num
-                || ep_elements.anime_season != *season_num
-                || &ep_elements.normalized_title != norm_title
-            {
-                updates.push((
-                    *ep_id,
-                    new_aid,
-                    new_watched,
-                    ep_elements.episode_number,
-                    ep_elements.anime_season,
-                    ep_elements.anime_title,
-                    ep_elements.normalized_title,
-                ));
-            }
-        }
+        let outcomes = compute_rematch_outcomes(&matcher, &episodes, targets);
+        let matched_count = outcomes.iter().filter(|o| o.matched).count();
+        let updates: Vec<&RematchUpdate> = outcomes.iter().filter_map(|o| o.update.as_ref()).collect();
 
         if !updates.is_empty() {
             let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
@@ -1085,14 +1176,29 @@ impl Database {
                     )
                     .map_err(|e| e.to_string())?;
                 for u in &updates {
-                    stmt.execute(params![u.1, u.2, u.3, u.4, u.5, u.6, u.0])
-                        .map_err(|e| e.to_string())?;
+                    stmt.execute(params![
+                        u.matched_anime_id,
+                        u.watched,
+                        u.episode_number,
+                        u.anime_season,
+                        u.parsed_title,
+                        u.normalized_title,
+                        u.id
+                    ])
+                    .map_err(|e| e.to_string())?;
                 }
             }
             tx.commit().map_err(|e| e.to_string())?;
         }
 
-        Ok(if target_unmatched_anime_id.is_some() {
+        eprintln!(
+            "[matcher] rematch: {} files, {} updated in {}ms",
+            episodes.len(),
+            updates.len(),
+            start.elapsed().as_millis()
+        );
+
+        Ok(if targets.is_some() {
             updates.len()
         } else {
             matched_count
@@ -1103,7 +1209,7 @@ impl Database {
         &self,
         anime_id_filter: Option<i64>,
     ) -> Result<Vec<LocalEpisodeFile>, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let conn = self.reader()?;
         let sql = if anime_id_filter.is_some() {
             "SELECT
                 le.id, le.folder_id, le.file_path, le.file_name, le.drive_root, le.file_size,
@@ -1652,6 +1758,269 @@ mod tests {
         assert_eq!(s4.removed_files, 1);
         assert_eq!(db.list_local_episodes(None).unwrap().len(), 2);
 
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    /// Copy of the original sequential `rematch_episodes_internal` loop (one full `match_episode` per file),
+    /// kept as the reference the memoized / parallel implementation must reproduce exactly.
+    fn reference_rematch_outcomes(
+        matcher: &AnimeMatcherIndex,
+        episodes: &[RematchRow],
+        targets: Option<&HashSet<i64>>,
+    ) -> Vec<RematchOutcome> {
+        let mut out = Vec::new();
+        for row in episodes {
+            let mut ep_elements = AnitomyElements {
+                anime_title: row.parsed_title.clone(),
+                normalized_title: normalize_anime_title(&row.parsed_title),
+                episode_number: row.episode_number,
+                anime_season: row.anime_season,
+                ..Default::default()
+            };
+            if ep_elements.normalized_title.is_empty() {
+                ep_elements.normalized_title = row.normalized_title.clone();
+            }
+            let resolved = matcher
+                .match_episode(&mut ep_elements, Some(&row.file_path))
+                .map(|(aid, _t, _c, prog, _eps)| (aid, prog))
+                .or_else(|| {
+                    row.matched_anime_id.and_then(|aid| {
+                        matcher
+                            .by_id
+                            .get(&aid)
+                            .map(|(_t, _c, prog, _eps)| (aid, *prog))
+                    })
+                });
+            if let Some(t) = targets {
+                if !resolved.map_or(false, |(aid, _)| t.contains(&aid)) {
+                    out.push(RematchOutcome {
+                        matched: false,
+                        update: None,
+                    });
+                    continue;
+                }
+            }
+            let (new_aid, new_watched) = match resolved {
+                Some((aid, prog)) => (
+                    Some(aid),
+                    ep_elements
+                        .episode_number
+                        .map(|n| n <= prog)
+                        .unwrap_or(false) as i32,
+                ),
+                None => (None, 0),
+            };
+            let update = (row.matched_anime_id != new_aid
+                || row.watched != new_watched
+                || ep_elements.episode_number != row.episode_number
+                || ep_elements.anime_season != row.anime_season
+                || ep_elements.normalized_title != row.normalized_title)
+                .then(|| RematchUpdate {
+                    id: row.id,
+                    matched_anime_id: new_aid,
+                    watched: new_watched,
+                    episode_number: ep_elements.episode_number,
+                    anime_season: ep_elements.anime_season,
+                    parsed_title: ep_elements.anime_title.clone(),
+                    normalized_title: ep_elements.normalized_title.clone(),
+                });
+            out.push(RematchOutcome {
+                matched: resolved.is_some(),
+                update,
+            });
+        }
+        out
+    }
+
+    fn rematch_fixture_db(name: &str) -> (Database, PathBuf) {
+        let tmp_dir = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        let db = Database::open(&tmp_dir.join("test.db")).expect("open test db");
+        db.upsert_anime_entries_batch(&crate::db::test_fixture_entries())
+            .expect("load fixtures");
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO library_folders (id, path, label, drive_root) VALUES (1, 'C:\\lib', 'lib', 'C:\\')",
+                [],
+            )
+            .unwrap();
+        }
+        (db, tmp_dir)
+    }
+
+    /// Insert a `local_episodes` row parsed from `file_path`'s file name.
+    fn seed_episode(db: &Database, file_path: &str, matched: Option<i64>, watched: i32) {
+        let file_name = file_path.rsplit('\\').next().unwrap();
+        let p = parse_filename(file_name);
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO local_episodes (folder_id, file_path, file_name, drive_root, parsed_title,
+                normalized_title, episode_number, anime_season, matched_anime_id, watched)
+             VALUES (1, ?1, ?2, 'C:\\', ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                file_path,
+                file_name,
+                p.anime_title,
+                p.normalized_title,
+                p.episode_number,
+                p.anime_season,
+                matched,
+                watched
+            ],
+        )
+        .unwrap();
+    }
+
+    fn load_rematch_rows(db: &Database) -> Vec<RematchRow> {
+        let conn = db.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, parsed_title, normalized_title, file_path, episode_number, anime_season, matched_anime_id, watched
+                 FROM local_episodes ORDER BY id",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(RematchRow {
+                    id: r.get(0)?,
+                    parsed_title: r.get(1)?,
+                    normalized_title: r.get(2)?,
+                    file_path: r.get(3)?,
+                    episode_number: r.get(4)?,
+                    anime_season: r.get(5)?,
+                    matched_anime_id: r.get(6)?,
+                    watched: r.get(7)?,
+                })
+            })
+            .unwrap();
+        rows.flatten().collect()
+    }
+
+    fn episode_state(db: &Database, file_path: &str) -> (Option<i64>, i32, Option<u32>, Option<u32>) {
+        let conn = db.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT matched_anime_id, watched, episode_number, anime_season FROM local_episodes WHERE file_path = ?1",
+            params![file_path],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap()
+    }
+
+    const FRIEREN_BD_DIR: &str = "C:\\lib\\Frieren BD";
+    const REMATCH_FILES: &[(&str, Option<i64>, i32)] = &[
+        // Custom folder binding wins over the (unrelated) file title, incl. an out-of-range episode
+        ("C:\\lib\\Frieren BD\\[BD] Totally Different Name - 03.mkv", None, 0),
+        ("C:\\lib\\Frieren BD\\[BD] Totally Different Name - 30.mkv", None, 0),
+        // Same title outside the custom folder: memoized title path
+        ("C:\\lib\\[SubsPlease] Sousou no Frieren - 01 (1080p).mkv", None, 0),
+        ("C:\\lib\\[SubsPlease] Sousou no Frieren - 27 (1080p).mkv", None, 1),
+        // Relations redirects (continuous numbering, English title, canonical season)
+        ("C:\\lib\\[SubsPlease] Kusuriya no Hitorigoto - 26 (1080p).mkv", None, 0),
+        ("C:\\lib\\[SubsPlease] Kusuriya no Hitorigoto - 05 (1080p).mkv", None, 0),
+        ("C:\\lib\\[SubsPlease] The Apothecary Diaries - 26 (1080p).mkv", None, 0),
+        ("C:\\lib\\[Judas] Kusuriya - S03E03.mkv", None, 0),
+        // Season isolation
+        ("C:\\lib\\[EMBER] Bocchi the Rock! - S01E12 [1080p].mkv", None, 0),
+        ("C:\\lib\\[EMBER] Bocchi the Rock! - S02E12 [1080p].mkv", None, 1),
+        // Many files sharing one title
+        ("C:\\lib\\[SubsPlease] Dandadan - 01 (1080p).mkv", None, 0),
+        ("C:\\lib\\[SubsPlease] Dandadan - 08 (1080p).mkv", None, 0),
+        ("C:\\lib\\[SubsPlease] Dandadan - 09 (1080p).mkv", Some(171018), 1),
+        ("C:\\lib\\[SubsPlease] Dandadan - 10 (1080p).mkv", None, 0),
+        // Old-id fallback (still existing / deleted entry)
+        ("C:\\lib\\[X] Totally Unknown Show - 01.mkv", Some(4224), 0),
+        ("C:\\lib\\[X] Another Unknown Show - 02.mkv", Some(999999), 1),
+    ];
+
+    #[test]
+    fn test_memoized_rematch_equals_sequential_reference() {
+        let (db, tmp_dir) = rematch_fixture_db("tora_test_scanner_rematch_equiv");
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE anime_entries SET custom_folder = ?1 WHERE id = 154587",
+                params![FRIEREN_BD_DIR],
+            )
+            .unwrap();
+        }
+        for (path, matched, watched) in REMATCH_FILES {
+            seed_episode(&db, path, *matched, *watched);
+        }
+
+        let rows = load_rematch_rows(&db);
+        let matcher = db.matcher_index().unwrap();
+        let expected = reference_rematch_outcomes(&matcher, &rows, None);
+        assert_eq!(compute_rematch_outcomes(&matcher, &rows, None), expected);
+        let targets: HashSet<i64> = [176301, 171018, 4224].into_iter().collect();
+        assert_eq!(
+            compute_rematch_outcomes(&matcher, &rows, Some(&targets)),
+            reference_rematch_outcomes(&matcher, &rows, Some(&targets))
+        );
+
+        // The fixture really exercises the interesting paths
+        let state_of = |path: &str| {
+            let (i, row) = rows.iter().enumerate().find(|(_, r)| r.file_path == path).unwrap();
+            match &expected[i].update {
+                Some(u) => (u.matched_anime_id, u.watched, u.episode_number, u.anime_season),
+                None => (row.matched_anime_id, row.watched, row.episode_number, row.anime_season),
+            }
+        };
+        assert_eq!(state_of(REMATCH_FILES[0].0).0, Some(154587));
+        assert_eq!(state_of(REMATCH_FILES[1].0).0, Some(154587));
+        assert_eq!(state_of(REMATCH_FILES[4].0).0, Some(176301));
+        assert_eq!(state_of(REMATCH_FILES[4].0).2, Some(2));
+        assert_eq!(state_of(REMATCH_FILES[9].0).0, None);
+        assert_eq!(state_of(REMATCH_FILES[12].0), (Some(171018), 0, Some(9), None));
+        assert_eq!(state_of(REMATCH_FILES[14].0).0, Some(4224));
+        assert_eq!(state_of(REMATCH_FILES[15].0).0, None);
+
+        // The DB rematch writes exactly the reference result
+        let matched = db.rematch_all_local_episodes().unwrap();
+        assert_eq!(matched, expected.iter().filter(|o| o.matched).count());
+        for (path, _, _) in REMATCH_FILES {
+            assert_eq!(episode_state(&db, path), state_of(path), "{}", path);
+        }
+        // A second run is a no-op
+        let rows = load_rematch_rows(&db);
+        let matcher = db.matcher_index().unwrap();
+        assert!(compute_rematch_outcomes(&matcher, &rows, None)
+            .iter()
+            .all(|o| o.update.is_none()));
+
+        drop(db);
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_match_unmatched_episodes_for_ids_only_binds_targets() {
+        let (db, tmp_dir) = rematch_fixture_db("tora_test_scanner_match_for_ids");
+        let frieren = "C:\\lib\\[SubsPlease] Sousou no Frieren - 01 (1080p).mkv";
+        let dandadan = "C:\\lib\\[SubsPlease] Dandadan - 02 (1080p).mkv";
+        let kusuriya = "C:\\lib\\[Judas] Kusuriya - S03E03.mkv";
+        let pre_matched = "C:\\lib\\[SubsPlease] Dandadan - 03 (1080p).mkv";
+        seed_episode(&db, frieren, None, 0);
+        seed_episode(&db, dandadan, None, 0);
+        seed_episode(&db, kusuriya, None, 0);
+        seed_episode(&db, pre_matched, Some(4224), 0);
+
+        assert_eq!(db.match_unmatched_episodes_for_ids(&[]).unwrap(), 0);
+        assert_eq!(
+            db.match_unmatched_episodes_for_ids(&[154587, 171018]).unwrap(),
+            2
+        );
+        assert_eq!(episode_state(&db, frieren).0, Some(154587));
+        assert_eq!(episode_state(&db, frieren).1, 1);
+        assert_eq!(episode_state(&db, dandadan).0, Some(171018));
+        assert_eq!(episode_state(&db, kusuriya).0, None);
+        // Already matched files are never re-matched by targeted matching
+        assert_eq!(episode_state(&db, pre_matched).0, Some(4224));
+
+        assert_eq!(db.match_unmatched_episodes_for_anime(195516).unwrap(), 1);
+        assert_eq!(episode_state(&db, kusuriya).0, Some(195516));
+        assert_eq!(db.match_unmatched_episodes_for_anime(195516).unwrap(), 0);
+
+        drop(db);
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 }

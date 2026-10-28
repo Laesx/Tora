@@ -22,7 +22,7 @@ use crate::torrents::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager, State};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -36,6 +36,9 @@ pub struct AppState {
     pub oauth_listener_active: Arc<AtomicBool>,
     /// Single owner of user-list mutations and AniList push/pull.
     pub sync: Arc<TrackerSyncService>,
+    /// `Database::matcher_generation` at the last match attempt for the active (unmatched) session.
+    /// A continuing unmatched session is only re-matched once the matcher data changed since then.
+    pub unmatched_check_generation: AtomicU64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -575,13 +578,18 @@ async fn poll_media_recognition(
     let Some((snapshot_matched_id, mut session_parsed)) = continuing else {
         // New playback session detected
         let db = state.db.clone();
-        let (parsed, matched) = tokio::task::spawn_blocking(move || {
+        let (parsed, matched, generation) = tokio::task::spawn_blocking(move || {
             let mut parsed = parsed;
+            // Read before matching: a change that lands meanwhile triggers one more attempt later.
+            let generation = db.matcher_generation();
             let matched = db.match_episode_to_anime(&mut parsed, None);
-            (parsed, matched)
+            (parsed, matched, generation)
         })
         .await
         .map_err(|e| e.to_string())?;
+        state
+            .unmatched_check_generation
+            .store(generation, Ordering::SeqCst);
         let (
             matched_anime_id,
             matched_anime_title,
@@ -619,9 +627,14 @@ async fn poll_media_recognition(
 
     // Same session continuing: re-check an unmatched session (the user may have just added the anime or
     // bound an alias) and load the matched entry's current progress, off the async worker.
+    // Only re-run matching when the matcher data (entries / aliases) changed since the last attempt.
     let db = state.db.clone();
-    let (rematch, entry) = tokio::task::spawn_blocking(move || {
-        let rematch = if snapshot_matched_id.is_none() {
+    let last_checked_generation = state.unmatched_check_generation.load(Ordering::SeqCst);
+    let (rematch, entry, checked_generation) = tokio::task::spawn_blocking(move || {
+        let generation = db.matcher_generation();
+        let mut checked_generation = None;
+        let rematch = if snapshot_matched_id.is_none() && generation != last_checked_generation {
+            checked_generation = Some(generation);
             db.match_episode_to_anime(&mut session_parsed, None)
                 .map(|m| (m, session_parsed))
         } else {
@@ -629,7 +642,7 @@ async fn poll_media_recognition(
         };
         let aid = snapshot_matched_id.or_else(|| rematch.as_ref().map(|(m, _)| m.0));
         let entry = aid.and_then(|id| db.get_anime_entry_by_id(id).ok());
-        (rematch, entry)
+        (rematch, entry, checked_generation)
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -642,6 +655,11 @@ async fn poll_media_recognition(
             // The session changed while we were querying; report whatever is current.
             return Ok(guard.clone());
         };
+        if let Some(generation) = checked_generation {
+            state
+                .unmatched_check_generation
+                .store(generation, Ordering::SeqCst);
+        }
 
         if existing.matched_anime_id.is_none() {
             if let Some(((id, title, cover, prog, total), new_parsed)) = rematch {
@@ -1297,6 +1315,7 @@ pub fn run() {
                 simulated_session: Mutex::new(None),
                 oauth_listener_active,
                 sync: sync.clone(),
+                unmatched_check_generation: AtomicU64::new(u64::MAX),
             });
 
             // Startup two-way sync. Without a token `pull` returns early (before emitting any event),

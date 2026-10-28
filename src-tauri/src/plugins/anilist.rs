@@ -1,7 +1,7 @@
 use crate::db::AnimeEntry;
 use crate::plugins::{
     BoxFuture, RemoteEntryState, RemoteListSnapshot, TrackerEntryUpdate, TrackerError,
-    TrackerPlugin, TrackerPluginDescriptor, TrackerUserProfile,
+    TrackerPlugin, TrackerPluginDescriptor, TrackerUserProfile, MEDIA_DETAILS_CHUNK,
 };
 use reqwest::Client;
 use serde_json::{json, Value};
@@ -492,6 +492,32 @@ const MEDIA_FRAGMENT: &str = r#"
     }
 "#;
 
+/// Light media fields for the list fetch: only what a sync compares / what can change between syncs.
+/// Heavy metadata (`MEDIA_FRAGMENT`) is fetched separately for newly added entries only.
+const MEDIA_LIST_FRAGMENT: &str = r#"
+    id
+    title {
+        romaji
+        english
+        native
+    }
+    synonyms
+    format
+    status
+    episodes
+    season
+    seasonYear
+    averageScore
+    coverImage {
+        large
+        color
+    }
+    nextAiringEpisode {
+        episode
+        airingAt
+    }
+"#;
+
 impl TrackerPlugin for AniListPlugin {
     fn descriptor(&self) -> TrackerPluginDescriptor {
         TrackerPluginDescriptor {
@@ -663,7 +689,7 @@ impl TrackerPlugin for AniListPlugin {
                                 }}
                                 updatedAt
                                 media {{
-                                    {MEDIA_FRAGMENT}
+                                    {MEDIA_LIST_FRAGMENT}
                                 }}
                             }}
                         }}
@@ -709,6 +735,43 @@ impl TrackerPlugin for AniListPlugin {
                 }
             }
             Ok(RemoteListSnapshot { viewer_id, entries })
+        })
+    }
+
+    fn fetch_media_details<'a>(
+        &'a self,
+        ids: &'a [i64],
+    ) -> BoxFuture<'a, Result<Vec<AnimeEntry>, TrackerError>> {
+        Box::pin(async move {
+            let query = format!(
+                r#"
+                query ($ids: [Int]) {{
+                    Page(perPage: {MEDIA_DETAILS_CHUNK}) {{
+                        media(id_in: $ids, type: ANIME) {{
+                            {MEDIA_FRAGMENT}
+                        }}
+                    }}
+                }}
+                "#
+            );
+            let mut out = Vec::with_capacity(ids.len());
+            for chunk in ids.chunks(MEDIA_DETAILS_CHUNK) {
+                let data = self
+                    .graphql_request(&query, json!({ "ids": chunk }), None)
+                    .await?;
+                if let Some(media_arr) = data
+                    .get("Page")
+                    .and_then(|p| p.get("media"))
+                    .and_then(|m| m.as_array())
+                {
+                    out.extend(
+                        media_arr
+                            .iter()
+                            .filter_map(|m| Self::parse_media_node(m, None)),
+                    );
+                }
+            }
+            Ok(out)
         })
     }
 
@@ -950,6 +1013,35 @@ mod tests {
             classify_graphql_response(200, None, r#"{"data":{"Viewer":{"id":5}}}"#),
             Ok(json!({"Viewer":{"id":5}}))
         );
+    }
+
+    #[test]
+    fn light_list_media_parses_with_heavy_fields_defaulted() {
+        let media = json!({
+            "id": 21, "title": { "romaji": "One Piece", "english": null, "native": "ONE PIECE" },
+            "synonyms": ["OP"], "format": "TV", "status": "RELEASING", "episodes": null,
+            "season": "FALL", "seasonYear": 1999, "averageScore": 88,
+            "coverImage": { "large": "https://img/op.jpg", "color": "#e4a15d" },
+            "nextAiringEpisode": { "episode": 1100, "airingAt": 1900000000 }
+        });
+        let entry_node = json!({
+            "id": 900, "status": "CURRENT", "score": 90, "progress": 1099, "repeat": 0, "notes": null,
+            "startedAt": { "year": 2020, "month": 1, "day": 2 }, "completedAt": { "year": null },
+            "updatedAt": 1800000000, "media": media
+        });
+        let e = AniListPlugin::parse_media_node(&entry_node["media"], Some(&entry_node)).unwrap();
+        assert_eq!(e.id, 21);
+        assert_eq!(e.synonyms, vec!["OP".to_string()]);
+        assert_eq!(e.cover_image, "https://img/op.jpg");
+        assert_eq!(e.next_airing_episode, Some(1100));
+        assert_eq!(e.user_progress, 1099);
+        assert_eq!(e.user_started_at.as_deref(), Some("2020-01-02"));
+        assert_eq!(e.user_completed_at, None);
+        assert_eq!(e.anilist_list_entry_id, Some(900));
+        assert_eq!(e.updated_at, 1_800_000_000);
+        // Heavy metadata is absent in the light fetch (the merge never writes these for existing rows)
+        assert!(e.synopsis.is_empty() && e.genres.is_empty() && e.studios.is_empty());
+        assert_eq!((e.mal_id, e.banner_image, e.trailer_url), (None, None, None));
     }
 
     #[test]

@@ -261,7 +261,10 @@ export interface SyncSummary {
   push_failed: number;
   remote_deleted: number;
   deletion_skipped_reason: string | null;
-  entries: AnimeEntry[];
+  // Entries added or changed by this sync (full rows)
+  changed: AnimeEntry[];
+  // Local entry ids deleted by this sync (missing on AniList)
+  removed_ids: number[];
 }
 
 export interface SyncStatus {

@@ -73,7 +73,7 @@ pub fn parse_rss_xml(
     db: &Database,
     rules: &[TorrentRule],
 ) -> Vec<TorrentItem> {
-    let matcher = db.build_matcher_index().ok();
+    let matcher = db.matcher_index().ok();
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
 

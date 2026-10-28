@@ -32,6 +32,9 @@ pub struct TrackerUserProfile {
     pub authenticated: bool,
 }
 
+/// Max media ids per [`TrackerPlugin::fetch_media_details`] request (AniList `Page.perPage` limit).
+pub const MEDIA_DETAILS_CHUNK: usize = 50;
+
 /// Boxed, `Send` future used by the object-safe [`TrackerPlugin`] trait.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -132,11 +135,22 @@ pub trait TrackerPlugin: Send + Sync {
         token: Option<&'a str>,
     ) -> BoxFuture<'a, Result<TrackerUserProfile, String>>;
 
-    /// Fetch the authenticated viewer's full anime list.
+    /// Fetch the authenticated viewer's full anime list. Media carry only the "light" fields
+    /// (titles, synonyms, format, status, episodes, season, score, cover, next airing); heavy metadata
+    /// (synopsis, genres, studios, banner, trailer, source, duration, site url, MAL id) is left at its
+    /// defaults and must be fetched with [`fetch_media_details`](Self::fetch_media_details).
     fn fetch_user_list<'a>(
         &'a self,
         token: &'a str,
     ) -> BoxFuture<'a, Result<RemoteListSnapshot, TrackerError>>;
+
+    /// Fetch full media metadata for `ids` (no user-list fields). Callers should pass at most
+    /// [`MEDIA_DETAILS_CHUNK`] ids per call (one request each); larger inputs are split into
+    /// sequential requests. Unknown ids are simply missing from the result.
+    fn fetch_media_details<'a>(
+        &'a self,
+        ids: &'a [i64],
+    ) -> BoxFuture<'a, Result<Vec<AnimeEntry>, TrackerError>>;
 
     fn search_anime<'a>(
         &'a self,
@@ -195,6 +209,14 @@ impl TrackerPlugin for StubTrackerPlugin {
         &'a self,
         _token: &'a str,
     ) -> BoxFuture<'a, Result<RemoteListSnapshot, TrackerError>> {
+        let err = self.not_configured();
+        Box::pin(async move { Err(err) })
+    }
+
+    fn fetch_media_details<'a>(
+        &'a self,
+        _ids: &'a [i64],
+    ) -> BoxFuture<'a, Result<Vec<AnimeEntry>, TrackerError>> {
         let err = self.not_configured();
         Box::pin(async move { Err(err) })
     }

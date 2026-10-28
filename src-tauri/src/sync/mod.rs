@@ -12,13 +12,17 @@
 //! - `tracker-sync-error`    `{ anime_id, media_id, title, kind, message, operation: "save" | "delete" }`
 //! - `tracker-auth-invalid`  `{ message }`
 //! - `tracker-entry-synced`  `{ entry }`
+//! - `library-changed`       `ScanSummary` (after a pull, when background matching bound new local files)
 //!
 //! Without an AniList token the service does nothing remote: edits are written locally but not queued,
 //! deletes create no tombstones, and `pull` fails with "Not signed in to AniList".
 
 use crate::db::{AnimeEntry, AppSettings, BatchAnimeUpdatePatch, Database};
 use crate::detection::anisthesia::DetectedMediaSession;
-use crate::plugins::{PluginManager, TrackerEntryUpdate, TrackerError, TrackerPlugin};
+use crate::library::scanner::ScanSummary;
+use crate::plugins::{
+    PluginManager, TrackerEntryUpdate, TrackerError, TrackerPlugin, MEDIA_DETAILS_CHUNK,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -39,6 +43,8 @@ pub const EVENT_SYNC_FAILED: &str = "tracker-sync-failed";
 pub const EVENT_SYNC_ERROR: &str = "tracker-sync-error";
 pub const EVENT_AUTH_INVALID: &str = "tracker-auth-invalid";
 pub const EVENT_ENTRY_SYNCED: &str = "tracker-entry-synced";
+/// Same event (and `ScanSummary` payload) the library scanner / watcher emits.
+pub const EVENT_LIBRARY_CHANGED: &str = "library-changed";
 
 /// Plugin id used for all sync traffic (login is always AniList OAuth).
 const TRACKER_PLUGIN_ID: &str = "anilist";
@@ -430,6 +436,8 @@ pub fn write_batch_change(
 // Summaries
 // ---------------------------------------------------------------------------------------------
 
+/// Result of a pull, sent as the `sync_tracker_list` result and the `tracker-list-synced` payload.
+/// It is a delta: the frontend upserts `changed` and drops `removed_ids` instead of reloading the list.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SyncSummary {
     pub added: usize,
@@ -440,7 +448,10 @@ pub struct SyncSummary {
     pub push_failed: usize,
     pub remote_deleted: usize,
     pub deletion_skipped_reason: Option<String>,
-    pub entries: Vec<AnimeEntry>,
+    /// Entries inserted or whose stored row changed in this sync (full rows incl. local episodes).
+    pub changed: Vec<AnimeEntry>,
+    /// Local entry ids deleted because they are missing on the tracker.
+    pub removed_ids: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -964,9 +975,11 @@ impl TrackerSyncService {
     }
 
     /// Full two-way sync: flush queued deletions and pushes, fetch the AniList list and merge it
-    /// (newest wins; remote-missing entries are deleted unless pending). Never runs two pulls at once:
-    /// a pull requested while one is running waits for it and returns the resulting list without
-    /// fetching again (counts are zero).
+    /// (newest wins; remote-missing entries are deleted unless pending). Only changed rows are written and
+    /// returned (delta). Local files are matched afterwards in the background, and only for new entries or
+    /// entries whose titles changed (`library-changed` is emitted if anything matched).
+    /// Never runs two pulls at once: a pull requested while one is running waits for it and returns an
+    /// empty delta (the running pull's `tracker-list-synced` event carries the changes).
     pub async fn pull(&self, reason: &str) -> Result<SyncSummary, String> {
         let settings = self.blocking(|db| db.get_settings()).await?;
         let token = settings.anilist_token.trim().to_string();
@@ -980,22 +993,20 @@ impl TrackerSyncService {
             .is_err()
         {
             let _op = self.op_lock.lock().await;
-            let entries = self.blocking(|db| db.list_anime_entries()).await?;
-            return Ok(SyncSummary {
-                entries,
-                ..Default::default()
-            });
+            return Ok(SyncSummary::default());
         }
         let progress_guard = InProgressGuard(&self.in_progress);
         self.emit(EVENT_SYNC_STARTED, json!({ "reason": reason }));
 
         let op = self.op_lock.lock().await;
-        let result = self.pull_inner(&token, settings.anilist_user_id).await;
+        let result = self
+            .pull_inner(&token, settings.anilist_user_id, reason)
+            .await;
         drop(op);
         drop(progress_guard);
 
         match result {
-            Ok(summary) => {
+            Ok((summary, rematch_ids)) => {
                 if let Ok(mut last) = self.last_synced_at.lock() {
                     *last = Some(chrono::Utc::now().timestamp());
                 }
@@ -1003,6 +1014,7 @@ impl TrackerSyncService {
                     EVENT_LIST_SYNCED,
                     serde_json::to_value(&summary).unwrap_or(Value::Null),
                 );
+                self.spawn_targeted_matching(rematch_ids);
                 Ok(summary)
             }
             Err(PullFailure {
@@ -1022,19 +1034,27 @@ impl TrackerSyncService {
         }
     }
 
+    /// Returns the delta summary plus the ids whose local files should be matched in the background.
     async fn pull_inner(
         &self,
         token: &str,
         expected_user_id: Option<i64>,
-    ) -> Result<SyncSummary, PullFailure> {
+        reason: &str,
+    ) -> Result<(SyncSummary, Vec<i64>), PullFailure> {
+        let started = Instant::now();
+
+        let phase = Instant::now();
         let deletions = self.flush_deletions_inner(token).await;
+        let flush_del_ms = phase.elapsed().as_millis();
         if let Some(error) = deletions.auth_error {
             return Err(PullFailure {
                 error,
                 auth_reported: true,
             });
         }
+        let phase = Instant::now();
         let pushes = self.flush_pending_inner(token).await;
+        let flush_push_ms = phase.elapsed().as_millis();
         if let Some(error) = pushes.auth_error {
             return Err(PullFailure {
                 error,
@@ -1046,6 +1066,7 @@ impl TrackerSyncService {
             error,
             auth_reported: false,
         })?;
+        let phase = Instant::now();
         let snapshot = self
             .limiter
             .run(|| plugin.fetch_user_list(token))
@@ -1054,6 +1075,8 @@ impl TrackerSyncService {
                 error,
                 auth_reported: false,
             })?;
+        let fetch_ms = phase.elapsed().as_millis();
+        let fetched = snapshot.entries.len();
 
         let mut delete_missing = true;
         let mut skipped_reason = None;
@@ -1068,26 +1091,100 @@ impl TrackerSyncService {
         }
 
         let remote_entries = snapshot.entries;
-        let (stats, entries) = self
+        let phase = Instant::now();
+        let stats = self
             .blocking(move |db| {
                 let skip: HashSet<i64> = db
                     .list_pending_deletions()?
                     .into_iter()
                     .map(|t| t.media_id)
                     .collect();
-                let stats = db.merge_remote_list(&remote_entries, &skip, delete_missing)?;
-                let _ = db.rematch_all_local_episodes();
-                Ok((stats, db.list_anime_entries()?))
+                db.merge_remote_list(&remote_entries, &skip, delete_missing)
             })
             .await
             .map_err(|m| PullFailure {
                 error: TrackerError::Api(format!("Failed to merge AniList list: {}", m)),
                 auth_reported: false,
             })?;
+        let merge_ms = phase.elapsed().as_millis();
 
-        self.sync_active_session(&entries);
+        // Heavy metadata (synopsis, genres, studios, …) only for entries new to the local list.
+        // Best effort: a failure leaves the light metadata in place and never fails the sync.
+        let phase = Instant::now();
+        let mut details_written = 0usize;
+        if !stats.new_ids.is_empty() {
+            let mut details: Vec<AnimeEntry> = Vec::with_capacity(stats.new_ids.len());
+            for chunk in stats.new_ids.chunks(MEDIA_DETAILS_CHUNK) {
+                match self
+                    .limiter
+                    .run(|| plugin.fetch_media_details(chunk))
+                    .await
+                {
+                    Ok(mut part) => details.append(&mut part),
+                    Err(e) => {
+                        eprintln!(
+                            "[sync] fetching details for {} new entries failed: {}",
+                            stats.new_ids.len(),
+                            e
+                        );
+                        break;
+                    }
+                }
+            }
+            let new_set: HashSet<i64> = stats.new_ids.iter().copied().collect();
+            details.retain(|d| new_set.contains(&d.id));
+            if !details.is_empty() {
+                match self
+                    .blocking(move |db| db.refresh_existing_entries_metadata(&details))
+                    .await
+                {
+                    Ok(n) => details_written = n,
+                    Err(e) => eprintln!("[sync] writing details for new entries failed: {}", e),
+                }
+            }
+        }
+        let details_ms = phase.elapsed().as_millis();
 
-        Ok(SyncSummary {
+        let phase = Instant::now();
+        let changed_ids = stats.changed_ids.clone();
+        let changed = self
+            .blocking(move |db| db.get_anime_entries_by_ids(&changed_ids))
+            .await
+            .map_err(|m| PullFailure {
+                error: TrackerError::Api(format!("Failed to load synced entries: {}", m)),
+                auth_reported: false,
+            })?;
+        let delta_ms = phase.elapsed().as_millis();
+
+        self.sync_active_session(&changed);
+        self.unmatch_active_session(&stats.removed_ids);
+
+        eprintln!(
+            "[sync] pull({}): flush-del {}ms ({}/{}) · flush-push {}ms ({}/{}) · fetch {}ms ({} entries) · merge {}ms (+{} ~{} -{}, {} kept, {} rematch) · details {}ms ({}/{}) · delta {}ms ({}) · total {}ms",
+            reason,
+            flush_del_ms,
+            deletions.succeeded,
+            deletions.failed,
+            flush_push_ms,
+            pushes.succeeded,
+            pushes.failed,
+            fetch_ms,
+            fetched,
+            merge_ms,
+            stats.added,
+            stats.changed_ids.len().saturating_sub(stats.added),
+            stats.deleted,
+            stats.kept_local,
+            stats.rematch_ids.len(),
+            details_ms,
+            details_written,
+            stats.new_ids.len(),
+            delta_ms,
+            changed.len(),
+            started.elapsed().as_millis(),
+        );
+
+        let summary = SyncSummary {
             added: stats.added,
             updated_from_remote: stats.updated_from_remote,
             kept_local: stats.kept_local,
@@ -1096,8 +1193,52 @@ impl TrackerSyncService {
             push_failed: pushes.failed,
             remote_deleted: deletions.succeeded,
             deletion_skipped_reason: skipped_reason.or(stats.deletion_skipped_reason),
-            entries,
-        })
+            changed,
+            removed_ids: stats.removed_ids,
+        };
+        Ok((summary, stats.rematch_ids))
+    }
+
+    /// Match still-unmatched local files against `ids` (new entries / changed titles) in the background.
+    /// Already matched files are never touched. Emits `library-changed` when something was bound.
+    fn spawn_targeted_matching(&self, ids: Vec<i64>) {
+        if ids.is_empty() {
+            return;
+        }
+        let db = self.db.clone();
+        let emit = self.emit.clone();
+        tokio::spawn(async move {
+            let started = Instant::now();
+            let count = ids.len();
+            let result =
+                tokio::task::spawn_blocking(move || db.match_unmatched_episodes_for_ids(&ids)).await;
+            match result {
+                Ok(Ok(matched)) => {
+                    eprintln!(
+                        "[sync] matched {} local files for {} entries in {}ms",
+                        matched,
+                        count,
+                        started.elapsed().as_millis()
+                    );
+                    if matched > 0 {
+                        let summary = ScanSummary {
+                            folders_scanned: 0,
+                            total_files_indexed: 0,
+                            newly_parsed: 0,
+                            removed_files: 0,
+                            matched_files: matched,
+                            elapsed_ms: started.elapsed().as_millis(),
+                        };
+                        emit(
+                            EVENT_LIBRARY_CHANGED,
+                            serde_json::to_value(&summary).unwrap_or(Value::Null),
+                        );
+                    }
+                }
+                Ok(Err(e)) => eprintln!("[sync] matching local files after sync failed: {}", e),
+                Err(e) => eprintln!("[sync] matching task panicked: {}", e),
+            }
+        });
     }
 
     /// Current sync state. Does two quick COUNT queries on the DB connection.
@@ -1391,6 +1532,8 @@ mod tests {
         deletes: Mutex<Vec<(i64, Option<i64>)>>,
         save_error: Mutex<Option<TrackerError>>,
         fetch_error: Mutex<Option<TrackerError>>,
+        /// Ids passed to every `fetch_media_details` call.
+        details_calls: Mutex<Vec<Vec<i64>>>,
     }
 
     impl TrackerPlugin for MockTracker {
@@ -1416,6 +1559,28 @@ mod tests {
                     viewer_id: self.viewer_id,
                     entries: self.remote.lock().unwrap().clone(),
                 })
+            })
+        }
+        fn fetch_media_details<'a>(
+            &'a self,
+            ids: &'a [i64],
+        ) -> BoxFuture<'a, Result<Vec<AnimeEntry>, TrackerError>> {
+            Box::pin(async move {
+                self.details_calls.lock().unwrap().push(ids.to_vec());
+                Ok(self
+                    .remote
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|e| ids.contains(&e.id))
+                    .map(|e| {
+                        let mut d = e.clone();
+                        d.synopsis = format!("Details {}", e.id);
+                        d.genres = vec!["Action".into()];
+                        d.anilist_list_entry_id = None;
+                        d
+                    })
+                    .collect())
             })
         }
         fn search_anime<'a>(
@@ -1537,7 +1702,16 @@ mod tests {
         assert_eq!(e1.user_progress, 3);
         assert_eq!(e1.anilist_list_entry_id, Some(5001));
         assert!(db.get_anime_entry_by_id(2).is_err());
-        assert_eq!(summary.entries.len(), 3);
+        // Delta: entry 1 kept local and had nothing to write; 3 and 4 were inserted; 2 removed
+        let mut changed: Vec<i64> = summary.changed.iter().map(|e| e.id).collect();
+        changed.sort_unstable();
+        assert_eq!(changed, vec![3, 4]);
+        assert_eq!(summary.removed_ids, vec![2]);
+        assert_eq!(summary.kept_local, 1);
+        let mut detail_ids: Vec<i64> = mock.details_calls.lock().unwrap().concat();
+        detail_ids.sort_unstable();
+        assert_eq!(detail_ids, vec![3, 4]);
+        assert!(summary.changed.iter().all(|e| e.synopsis.starts_with("Details ")));
 
         let n = names(&events);
         assert_eq!(n.first().map(String::as_str), Some(EVENT_SYNC_STARTED));
@@ -1548,6 +1722,115 @@ mod tests {
         assert!(status.last_synced_at.is_some());
         assert_eq!(status.pending_count, 0);
         assert_eq!(status.pending_deletions, 0);
+    }
+
+    fn insert_local_file(db: &Database, file: &str, title: &str, ep: u32, matched: Option<i64>) {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO library_folders (id, path, label, drive_root) VALUES (1, 'C:/lib', 'lib', 'C:')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO local_episodes (folder_id, file_path, file_name, drive_root, parsed_title, normalized_title, episode_number, matched_anime_id)
+             VALUES (1, ?1, ?1, 'C:', ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                file,
+                title,
+                crate::detection::anitomy::normalize_anime_title(title),
+                ep,
+                matched
+            ],
+        )
+        .unwrap();
+    }
+
+    fn matched_of(db: &Database, file: &str) -> Option<i64> {
+        db.conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT matched_anime_id FROM local_episodes WHERE file_path = ?1",
+                [file],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn pull_returns_delta_and_matches_only_new_entries_in_background() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        sign_in(&db, 42);
+        let mut alpha = test_entry(1, "Alpha Show");
+        alpha.user_status = "CURRENT".into();
+        alpha.user_progress = 2;
+        alpha.updated_at = 100;
+        alpha.synopsis = "Stored synopsis".into();
+        db.upsert_anime_entries_batch(&[alpha.clone(), test_entry(5, "Old Entry")])
+            .unwrap();
+        // Already matched file (deliberately "matched" to an id its title would not pick) + unmatched files
+        insert_local_file(&db, "C:/lib/alpha-01.mkv", "Brand New Show", 1, Some(1));
+        insert_local_file(&db, "C:/lib/new-02.mkv", "Brand New Show", 2, None);
+        insert_local_file(&db, "C:/lib/other-01.mkv", "Unrelated Thing", 1, None);
+
+        let mock = Arc::new(MockTracker {
+            viewer_id: 42,
+            ..Default::default()
+        });
+        let mut remote_alpha = alpha.clone();
+        remote_alpha.synopsis = String::new(); // light fetch carries no synopsis
+        let mut remote_new = test_entry(2, "Brand New Show");
+        remote_new.user_status = "CURRENT".into();
+        remote_new.updated_at = 1_000;
+        *mock.remote.lock().unwrap() = vec![remote_alpha.clone(), remote_new];
+        let (svc, events) = service(db.clone(), mock.clone());
+
+        let summary = svc.pull("manual").await.unwrap();
+        assert_eq!(summary.added, 1);
+        assert_eq!(summary.deleted, 1);
+        assert_eq!(summary.changed.len(), 1);
+        assert_eq!(summary.changed[0].id, 2);
+        assert_eq!(summary.changed[0].synopsis, "Details 2");
+        assert_eq!(summary.removed_ids, vec![5]);
+        assert_eq!(*mock.details_calls.lock().unwrap(), vec![vec![2]]);
+        assert_eq!(db.get_anime_entry_by_id(1).unwrap().synopsis, "Stored synopsis");
+
+        // The event carries the same delta
+        let synced = events
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(n, _)| n == EVENT_LIST_SYNCED)
+            .map(|(_, v)| v.clone())
+            .unwrap();
+        assert_eq!(synced["changed"][0]["id"], 2);
+        assert_eq!(synced["removed_ids"], json!([5]));
+        assert!(synced.get("entries").is_none());
+
+        // Background matching binds the unmatched file to the new entry; matched files are untouched
+        wait_until(|| names(&events).iter().any(|n| n == EVENT_LIBRARY_CHANGED)).await;
+        assert_eq!(matched_of(&db, "C:/lib/new-02.mkv"), Some(2));
+        assert_eq!(matched_of(&db, "C:/lib/alpha-01.mkv"), Some(1));
+        assert_eq!(matched_of(&db, "C:/lib/other-01.mkv"), None);
+        let lib_event = events
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(n, _)| n == EVENT_LIBRARY_CHANGED)
+            .map(|(_, v)| v.clone())
+            .unwrap();
+        assert_eq!(lib_event["matched_files"], 1);
+        assert_eq!(lib_event["newly_parsed"], 0);
+
+        // Second pull with an unchanged remote list: empty delta, no detail fetch, no matching
+        events.lock().unwrap().clear();
+        let summary = svc.pull("manual").await.unwrap();
+        assert!(summary.changed.is_empty());
+        assert!(summary.removed_ids.is_empty());
+        assert_eq!(summary.added + summary.updated_from_remote + summary.deleted, 0);
+        assert_eq!(mock.details_calls.lock().unwrap().len(), 1);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!names(&events).iter().any(|n| n == EVENT_LIBRARY_CHANGED));
     }
 
     #[tokio::test]
