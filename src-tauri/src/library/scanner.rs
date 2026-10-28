@@ -1587,6 +1587,8 @@ mod tests {
 
         let db_path = tmp_dir.join("test.db");
         let db = Database::open(&db_path).expect("open test db");
+        db.upsert_anime_entries_batch(&crate::db::test_fixture_entries())
+            .expect("load fixtures");
         let folder_str = media_dir.to_string_lossy().to_string();
         let lib_folder = db
             .add_library_folder(&folder_str, Some("Test Media".to_string()))

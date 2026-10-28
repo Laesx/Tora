@@ -22,6 +22,7 @@ import {
   LogIn,
   ExternalLink,
   User,
+  RefreshCw,
 } from "lucide-react";
 import {
   AnimeEntry,
@@ -29,6 +30,11 @@ import {
   BatchAnimeUpdatePatch,
   DetectedMediaSession,
   ScanSummary,
+  SyncSummary,
+  TrackerEntrySyncedEvent,
+  TrackerSyncErrorEvent,
+  TrackerSyncFailedEvent,
+  TrackerSyncStartedEvent,
 } from "./types";
 import {
   THEME_PRESETS,
@@ -53,6 +59,33 @@ type NavTab =
   | "recognition"
   | "testing"
   | "settings";
+
+// Unix timestamp (seconds or milliseconds) -> short relative label for the sync button tooltip
+const formatLastSynced = (ts: number) => {
+  const ms = ts > 1e12 ? ts : ts * 1000;
+  const diffSec = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  if (diffSec < 60) return "just now";
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)} min ago`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)} h ago`;
+  return new Date(ms).toLocaleString();
+};
+
+// Short human-readable AniList sync summary for the toast (null when nothing changed)
+const describeSyncSummary = (summary: SyncSummary) => {
+  const parts: string[] = [];
+  if (summary.added > 0) parts.push(`${summary.added} added`);
+  if (summary.updated_from_remote > 0)
+    parts.push(`${summary.updated_from_remote} updated`);
+  if (summary.deleted > 0) parts.push(`${summary.deleted} removed`);
+  if (summary.pushed > 0) parts.push(`${summary.pushed} pushed`);
+  if (summary.remote_deleted > 0)
+    parts.push(`${summary.remote_deleted} deleted on AniList`);
+  if (summary.push_failed > 0)
+    parts.push(`${summary.push_failed} failed to push (will retry)`);
+  if (summary.deletion_skipped_reason)
+    parts.push(`removals skipped: ${summary.deletion_skipped_reason}`);
+  return parts.length > 0 ? `AniList sync: ${parts.join(", ")}` : null;
+};
 
 const STATUS_TABS = [
   { id: "CURRENT", label: "Watching" },
@@ -84,6 +117,13 @@ export const App: React.FC = () => {
   const [signOutModalOpen, setSignOutModalOpen] = useState(false);
   const [isAuthorizingAnilist, setIsAuthorizingAnilist] = useState(false);
   const [libraryRefreshTick, setLibraryRefreshTick] = useState(0);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
+  // Bumped by every tracker sync lifecycle event so a stale get_sync_status response can't override it
+  const syncEventSeqRef = useRef(0);
+  // Bumped by tracker-sync-failed so the manual sync button doesn't double-toast the same failure
+  const syncFailureSeqRef = useRef(0);
+  const lastSyncReasonRef = useRef<string>("startup");
   const [toast, setToast] = useState<{
     msg: string;
     type: "success" | "info" | "error";
@@ -112,8 +152,19 @@ export const App: React.FC = () => {
       applyThemeToDocument(s.theme, s.accent_color);
       setAnimeList(list);
 
+      // Seed the sync spinner in case the backend startup pull is already running
+      const statusSeq = syncEventSeqRef.current;
+      toraApi
+        .getSyncStatus()
+        .then((status) => {
+          if (syncEventSeqRef.current !== statusSeq) return;
+          setIsSyncing(status.in_progress);
+          setLastSyncedAt(status.last_synced_at);
+        })
+        .catch(() => { });
+
       // Hydrate AniList profile picture/username in background if signed in without cached avatar
-      if ((s.anilist_token || s.anilist_username) && (!s.anilist_avatar || !s.anilist_username)) {
+      if (s.anilist_token && (!s.anilist_avatar || !s.anilist_username)) {
         toraApi
           .verifyTrackerAccount(
             s.active_tracker_plugin || "anilist",
@@ -158,54 +209,116 @@ export const App: React.FC = () => {
   };
 
   useEffect(() => {
-    loadInitialData();
+    // Register every Tauri listener BEFORE loading initial data so a backend startup sync
+    // that finishes early is never missed. Handles unmount before the listen promises resolve.
+    let disposed = false;
+    const unlisteners: Array<() => void> = [];
 
-    // Listen for live folder watcher events when new episodes are downloaded or removed
-    let unlistenLibrary: (() => void) | null = null;
-    let unlistenAuth: (() => void) | null = null;
-    let unlistenSync: (() => void) | null = null;
+    const registrations = [
+      // Live folder watcher events when new episodes are downloaded or removed
+      listen<ScanSummary>("library-changed", async (event) => {
+        await refreshAnimeList();
+        setLibraryRefreshTick((t) => t + 1);
+        if (event.payload.newly_parsed > 0) {
+          showToast(
+            `Detected ${event.payload.newly_parsed} new episode${event.payload.newly_parsed === 1 ? "" : "s"
+            } in library folders`,
+            "success"
+          );
+        }
+      }),
 
-    listen<ScanSummary>("library-changed", async (event) => {
-      await refreshAnimeList();
-      setLibraryRefreshTick((t) => t + 1);
-      if (event.payload.newly_parsed > 0) {
+      listen<AppSettings>("tracker-auth-updated", (event) => {
+        setSettings(event.payload);
+        setIsAuthorizingAnilist(false);
+        if (event.payload.anilist_username) {
+          showToast(
+            `Signed in to AniList as @${event.payload.anilist_username}!`,
+            "success"
+          );
+        }
+      }),
+
+      listen<TrackerSyncStartedEvent>("tracker-sync-started", (event) => {
+        syncEventSeqRef.current += 1;
+        lastSyncReasonRef.current = event.payload.reason;
+        setIsSyncing(true);
+      }),
+
+      listen<SyncSummary>("tracker-list-synced", async (event) => {
+        syncEventSeqRef.current += 1;
+        const summary = event.payload;
+        setIsSyncing(false);
+        setLastSyncedAt(Math.floor(Date.now() / 1000));
+        await refreshAnimeList(summary.entries);
+
+        // Stay quiet at startup when nothing changed; manual / post-auth syncs always confirm
+        const msg = describeSyncSummary(summary);
+        if (msg) {
+          showToast(msg, summary.push_failed > 0 ? "error" : "success");
+        } else if (lastSyncReasonRef.current !== "startup") {
+          showToast(
+            `AniList sync: up to date (${summary.entries.length} entries)`,
+            "info"
+          );
+        }
+      }),
+
+      listen<TrackerSyncFailedEvent>("tracker-sync-failed", (event) => {
+        syncEventSeqRef.current += 1;
+        syncFailureSeqRef.current += 1;
+        setIsSyncing(false);
+        showToast(`AniList sync failed: ${event.payload.message}`, "error");
+      }),
+
+      // A background push/delete failed; the entry stays queued and retries on next sync
+      listen<TrackerSyncErrorEvent>("tracker-sync-error", (event) => {
+        const { operation, title, message } = event.payload;
         showToast(
-          `Detected ${event.payload.newly_parsed} new episode${event.payload.newly_parsed === 1 ? "" : "s"
-          } in library folders`,
-          "success"
+          `AniList ${operation} failed for "${title}": ${message} — will retry on next sync`,
+          "error"
         );
-      }
-    }).then((fn) => {
-      unlistenLibrary = fn;
-    });
+      }),
 
-    listen<AppSettings>("tracker-auth-updated", (event) => {
-      setSettings(event.payload);
-      setIsAuthorizingAnilist(false);
-      if (event.payload.anilist_username) {
+      listen<{ message: string }>("tracker-auth-invalid", () => {
         showToast(
-          `Signed in to AniList as @${event.payload.anilist_username}!`,
-          "success"
+          "AniList session expired or was revoked — please sign in again",
+          "error"
         );
-      }
-    }).then((fn) => {
-      unlistenAuth = fn;
-    });
+        // Pick up any token the backend cleared
+        toraApi
+          .getAppSettings()
+          .then(setSettings)
+          .catch(() => { });
+      }),
 
-    listen<AnimeEntry[]>("tracker-list-synced", async (event) => {
-      await refreshAnimeList(event.payload);
-      showToast(
-        `Synced ${event.payload.length} anime entries from AniList!`,
-        "success"
-      );
-    }).then((fn) => {
-      unlistenSync = fn;
+      // A background push succeeded: replace the entry (clears sync_pending)
+      listen<TrackerEntrySyncedEvent>("tracker-entry-synced", (event) => {
+        const { entry } = event.payload;
+        // Never clobber an in-flight optimistic +1/-1; its debounced save will push again
+        if (pendingStepRef.current[entry.id]) return;
+        setAnimeList((prev) =>
+          prev.map((a) => (a.id === entry.id ? entry : a))
+        );
+        setSelectedAnime((prev) => (prev?.id === entry.id ? entry : prev));
+      }),
+    ];
+
+    Promise.allSettled(registrations).then((results) => {
+      for (const r of results) {
+        if (r.status === "fulfilled") {
+          if (disposed) r.value();
+          else unlisteners.push(r.value);
+        } else {
+          console.error("Failed to register Tauri listener:", r.reason);
+        }
+      }
+      if (!disposed) loadInitialData();
     });
 
     return () => {
-      if (unlistenLibrary) unlistenLibrary();
-      if (unlistenAuth) unlistenAuth();
-      if (unlistenSync) unlistenSync();
+      disposed = true;
+      unlisteners.forEach((fn) => fn());
     };
   }, []);
 
@@ -493,9 +606,26 @@ export const App: React.FC = () => {
     [animeList]
   );
 
-  const isSignedIn = Boolean(
-    settings && (settings.anilist_username.trim() || settings.anilist_token.trim())
-  );
+  // Sync requires an OAuth token; a bare username no longer counts as signed in
+  const isSignedIn = Boolean(settings?.anilist_token?.trim());
+
+  const handleSyncFromAnilist = async () => {
+    if (isSyncing || !isSignedIn) return;
+    setIsSyncing(true);
+    const failureSeq = syncFailureSeqRef.current;
+    try {
+      // The tracker-list-synced event owns the summary toast; just apply the entries here
+      const summary = await toraApi.syncTrackerList();
+      setLastSyncedAt(Math.floor(Date.now() / 1000));
+      await refreshAnimeList(summary.entries);
+    } catch (err: any) {
+      if (syncFailureSeqRef.current === failureSeq) {
+        showToast(`AniList sync failed: ${String(err)}`, "error");
+      }
+    } finally {
+      setIsSyncing(false);
+    }
+  };
 
   const handleStartAnilistLogin = async () => {
     try {
@@ -1027,6 +1157,24 @@ export const App: React.FC = () => {
                     title="Pick Random Anime from Current List"
                   >
                     <Shuffle className="w-3.5 h-3.5" />
+                  </button>
+
+                  <button
+                    onClick={handleSyncFromAnilist}
+                    disabled={isSyncing || !isSignedIn}
+                    className="p-2 rounded-xl bg-bg-secondary hover:bg-bg-tertiary border border-border-subtle text-text-secondary hover:text-text-primary transition disabled:opacity-50 disabled:cursor-not-allowed"
+                    title={
+                      !isSignedIn
+                        ? "Sign in to AniList to sync your list"
+                        : isSyncing
+                          ? "Syncing with AniList…"
+                          : `Sync from AniList${lastSyncedAt ? ` • Last synced ${formatLastSynced(lastSyncedAt)}` : ""
+                          }`
+                    }
+                  >
+                    <RefreshCw
+                      className={`w-3.5 h-3.5 ${isSyncing ? "animate-spin" : ""}`}
+                    />
                   </button>
 
                   {settings && (

@@ -9,6 +9,8 @@ import {
   LibraryFolder,
   LocalEpisodeFile,
   ScanSummary,
+  SyncStatus,
+  SyncSummary,
   ThemePreset,
   TorrentItem,
   TorrentRule,
@@ -200,11 +202,10 @@ export const toraApi = {
       token: token || null,
     }),
 
-  syncTrackerList: (params?: {
-    pluginId?: string;
-    username?: string;
-    token?: string;
-  }) => invoke<AnimeEntry[]>("sync_tracker_list", params || {}),
+  // Flushes queued pushes/deletes, then pulls the signed-in user's AniList list
+  syncTrackerList: () => invoke<SyncSummary>("sync_tracker_list"),
+
+  getSyncStatus: () => invoke<SyncStatus>("get_sync_status"),
 
   searchRemoteAnime: (params: {
     query: string;

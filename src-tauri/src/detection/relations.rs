@@ -519,6 +519,8 @@ mod tests {
             std::env::temp_dir().join(format!("tora_test_relations_{}.db", std::process::id()));
         let _ = std::fs::remove_file(&tmp_db_path);
         let db = Database::open(&tmp_db_path).expect("open test db");
+        db.upsert_anime_entries_batch(&crate::db::test_fixture_entries())
+            .expect("load fixtures");
 
         // 1. Bocchi the Rock! S01E12 should match Season 1 (id 130003)
         let mut bocchi_s1 = parse_filename(

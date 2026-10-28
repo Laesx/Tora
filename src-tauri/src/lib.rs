@@ -2,6 +2,7 @@ pub mod db;
 pub mod detection;
 pub mod library;
 pub mod plugins;
+pub mod sync;
 pub mod torrents;
 
 use crate::db::{
@@ -12,10 +13,14 @@ use crate::detection::anisthesia::{detect_active_media_player, DetectedMediaSess
 use crate::detection::anitomy::{parse_filename, AnitomyElements};
 use crate::library::scanner::{DriveStorageSummary, LibraryMonitorHandle, ScanSummary};
 use crate::plugins::{PluginManager, TrackerPluginDescriptor, TrackerUserProfile};
+use crate::sync::{
+    ChangeSource, SyncEmitter, SyncStatus, SyncSummary, TrackerSyncService, UserStateChange,
+};
 use crate::torrents::{
     search_torrents, send_to_qbittorrent, test_qbittorrent_connection, TorrentItem,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -26,9 +31,11 @@ pub struct AppState {
     pub db: Arc<Database>,
     pub plugins: Arc<PluginManager>,
     pub monitor: LibraryMonitorHandle,
-    pub active_session: Mutex<Option<DetectedMediaSession>>,
+    pub active_session: Arc<Mutex<Option<DetectedMediaSession>>>,
     pub simulated_session: Mutex<Option<(String, String)>>, // (player_name, window_title)
     pub oauth_listener_active: Arc<AtomicBool>,
+    /// Single owner of user-list mutations and AniList push/pull.
+    pub sync: Arc<TrackerSyncService>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,61 +68,23 @@ async fn update_anime_entry(
     user_started_at: Option<String>,
     user_completed_at: Option<String>,
 ) -> Result<AnimeEntry, String> {
-    let db = state.db.clone();
-    let (updated, settings) = tokio::task::spawn_blocking(move || -> Result<(AnimeEntry, AppSettings), String> {
-        let (mut entry, needs_full_rematch) = db.update_anime_user_state(
-            anime_id,
-            &user_status,
-            user_progress,
-            user_score,
-            user_repeats,
-            &user_notes,
-            custom_folder,
+    // The sync service validates, derives status/dates, writes SQLite, refreshes the active playback
+    // session and pushes to AniList in the background.
+    state
+        .sync
+        .apply_local_update(UserStateChange {
+            status: Some(user_status),
+            progress: Some(user_progress),
+            score: Some(user_score),
+            repeats: Some(user_repeats),
+            notes: Some(user_notes),
+            started_at: user_started_at,
+            completed_at: user_completed_at,
+            custom_folder: Some(custom_folder),
             synonyms,
-            user_started_at,
-            user_completed_at,
-        )?;
-
-        if needs_full_rematch {
-            let _ = db.rematch_all_local_episodes();
-            entry = db.get_anime_entry_by_id(anime_id)?;
-        }
-
-        let settings = db.get_settings()?;
-        Ok((entry, settings))
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-
-    // Keep active media recognition session's current progress in sync if it matches this anime
-    if let Ok(mut active_guard) = state.active_session.lock() {
-        if let Some(existing) = active_guard.as_mut() {
-            if existing.matched_anime_id == Some(updated.id) {
-                existing.matched_current_progress = Some(updated.user_progress);
-            }
-        }
-    }
-
-    // Push update to tracker plugin asynchronously in the background so UI returns in <1ms
-    if settings.auto_sync_tracker && !settings.anilist_token.trim().is_empty() {
-        if let Some(plugin) = state.plugins.get(&settings.active_tracker_plugin) {
-            if let Some(media_id) = updated.anilist_id {
-                let tok = settings.anilist_token.clone();
-                let st = updated.user_status.clone();
-                let prog = updated.user_progress;
-                let sc = updated.user_score;
-                let rep = updated.user_repeats;
-                let nts = updated.user_notes.clone();
-                tokio::spawn(async move {
-                    let _ = plugin
-                        .update_list_entry(&tok, media_id, &st, prog, sc, rep, &nts)
-                        .await;
-                });
-            }
-        }
-    }
-
-    Ok(updated)
+            ..UserStateChange::new(anime_id, ChangeSource::Manual)
+        })
+        .await
 }
 
 #[tauri::command]
@@ -123,59 +92,7 @@ async fn batch_update_anime_entries(
     state: State<'_, AppState>,
     patch: BatchAnimeUpdatePatch,
 ) -> Result<Vec<AnimeEntry>, String> {
-    let db = state.db.clone();
-    let (updated_list, settings) =
-        tokio::task::spawn_blocking(move || -> Result<(Vec<AnimeEntry>, AppSettings), String> {
-            let updated = db.batch_update_anime_entries(&patch)?;
-            let settings = db.get_settings()?;
-            Ok((updated, settings))
-        })
-        .await
-        .map_err(|e| e.to_string())??;
-
-    // Keep active media recognition session's current progress in sync if it matches any updated anime
-    if let Ok(mut active_guard) = state.active_session.lock() {
-        if let Some(existing) = active_guard.as_mut() {
-            if let Some(matched_id) = existing.matched_anime_id {
-                if let Some(found) = updated_list.iter().find(|e| e.id == matched_id) {
-                    existing.matched_current_progress = Some(found.user_progress);
-                }
-            }
-        }
-    }
-
-    // Push updates to tracker plugin asynchronously in the background
-    if settings.auto_sync_tracker && !settings.anilist_token.trim().is_empty() {
-        if let Some(plugin) = state.plugins.get(&settings.active_tracker_plugin) {
-            let tok = settings.anilist_token.clone();
-            let to_sync: Vec<(i64, String, u32, f64, u32, String)> = updated_list
-                .iter()
-                .filter_map(|e| {
-                    e.anilist_id.map(|mid| {
-                        (
-                            mid,
-                            e.user_status.clone(),
-                            e.user_progress,
-                            e.user_score,
-                            e.user_repeats,
-                            e.user_notes.clone(),
-                        )
-                    })
-                })
-                .collect();
-            if !to_sync.is_empty() {
-                tokio::spawn(async move {
-                    for (media_id, st, prog, sc, rep, nts) in to_sync {
-                        let _ = plugin
-                            .update_list_entry(&tok, media_id, &st, prog, sc, rep, &nts)
-                            .await;
-                    }
-                });
-            }
-        }
-    }
-
-    Ok(updated_list)
+    state.sync.apply_batch(patch).await
 }
 
 #[tauri::command]
@@ -183,63 +100,15 @@ async fn batch_delete_anime_entries(
     state: State<'_, AppState>,
     anime_ids: Vec<i64>,
 ) -> Result<Vec<AnimeEntry>, String> {
-    let db = state.db.clone();
-    tokio::task::spawn_blocking(move || {
-        db.batch_delete_anime_entries(&anime_ids)?;
-        db.list_anime_entries()
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    state.sync.delete_entries(anime_ids).await
 }
 
 #[tauri::command]
 async fn add_or_upsert_anime(
     state: State<'_, AppState>,
-    mut entry: AnimeEntry,
+    entry: AnimeEntry,
 ) -> Result<Vec<AnimeEntry>, String> {
-    let db = state.db.clone();
-    let anime_id = entry.id;
-    let anilist_id = entry.anilist_id;
-    let user_status = entry.user_status.clone();
-    let user_progress = entry.user_progress;
-    let user_score = entry.user_score;
-    let user_repeats = entry.user_repeats;
-    let user_notes = entry.user_notes.clone();
-
-    let (list, settings) = tokio::task::spawn_blocking(move || {
-        entry.updated_at = chrono::Utc::now().timestamp();
-        db.upsert_anime_entry(&entry)?;
-        let _ = db.match_unmatched_episodes_for_anime(anime_id);
-        let list = db.list_anime_entries()?;
-        let settings = db.get_settings()?;
-        Ok::<_, String>((list, settings))
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-
-    // Push update to tracker plugin asynchronously in the background so UI returns in <1ms
-    if settings.auto_sync_tracker && !settings.anilist_token.trim().is_empty() {
-        if let Some(plugin) = state.plugins.get(&settings.active_tracker_plugin) {
-            if let Some(media_id) = anilist_id {
-                let tok = settings.anilist_token.clone();
-                tokio::spawn(async move {
-                    let _ = plugin
-                        .update_list_entry(
-                            &tok,
-                            media_id,
-                            &user_status,
-                            user_progress,
-                            user_score,
-                            user_repeats,
-                            &user_notes,
-                        )
-                        .await;
-                });
-            }
-        }
-    }
-
-    Ok(list)
+    state.sync.add_entry(entry).await
 }
 
 #[tauri::command]
@@ -247,13 +116,7 @@ async fn delete_anime_entry(
     state: State<'_, AppState>,
     anime_id: i64,
 ) -> Result<Vec<AnimeEntry>, String> {
-    let db = state.db.clone();
-    tokio::task::spawn_blocking(move || {
-        db.delete_anime_entry(anime_id)?;
-        db.list_anime_entries()
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    state.sync.delete_entries(vec![anime_id]).await
 }
 
 #[tauri::command]
@@ -290,37 +153,16 @@ async fn verify_tracker_account(
 }
 
 #[tauri::command]
-async fn sync_tracker_list(
-    state: State<'_, AppState>,
-    plugin_id: Option<String>,
-    username: Option<String>,
-    token: Option<String>,
-) -> Result<Vec<AnimeEntry>, String> {
-    let settings = state.db.get_settings()?;
-    let pid = plugin_id.unwrap_or_else(|| settings.active_tracker_plugin.clone());
-    let uname = username.unwrap_or_else(|| settings.anilist_username.clone());
-    let tok = token.or_else(|| {
-        if settings.anilist_token.trim().is_empty() {
-            None
-        } else {
-            Some(settings.anilist_token.clone())
-        }
-    });
+async fn sync_tracker_list(state: State<'_, AppState>) -> Result<SyncSummary, String> {
+    state.sync.pull("manual").await
+}
 
-    let plugin = state
-        .plugins
-        .get(&pid)
-        .ok_or_else(|| "Tracker plugin not found".to_string())?;
-    let remote_entries = plugin.fetch_user_list(&uname, tok.as_deref()).await?;
-
-    let db = state.db.clone();
-    tokio::task::spawn_blocking(move || {
-        db.upsert_anime_entries_batch(&remote_entries)?;
-        let _ = db.rematch_all_local_episodes();
-        db.list_anime_entries()
-    })
-    .await
-    .map_err(|e| e.to_string())?
+#[tauri::command]
+async fn get_sync_status(state: State<'_, AppState>) -> Result<SyncStatus, String> {
+    let sync = state.sync.clone();
+    tokio::task::spawn_blocking(move || sync.status())
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -654,11 +496,18 @@ async fn simulate_playback_session(
     poll_media_recognition(state).await
 }
 
+/// A scrobble decided under the `active_session` lock and executed after it is released:
+/// `(anime_id, episode, title, player_name, cleaned_media_title)`.
+type PendingScrobble = (i64, u32, String, String, String);
+
 #[tauri::command]
 async fn poll_media_recognition(
     state: State<'_, AppState>,
 ) -> Result<Option<DetectedMediaSession>, String> {
-    let settings = state.db.get_settings()?;
+    let db = state.db.clone();
+    let settings = tokio::task::spawn_blocking(move || db.get_settings())
+        .await
+        .map_err(|e| e.to_string())??;
     if !settings.recognition_enabled {
         let mut active = state.active_session.lock().map_err(|e| e.to_string())?;
         *active = None;
@@ -703,156 +552,195 @@ async fn poll_media_recognition(
     .await
     .map_err(|e| e.to_string())?;
 
-    let mut active_guard = state.active_session.lock().map_err(|e| e.to_string())?;
-
-    let Some((player_id, player_name, pid, exe_path, raw_title, cleaned_title, mut parsed)) =
+    let Some((player_id, player_name, pid, exe_path, raw_title, cleaned_title, parsed)) =
         detected_candidate
     else {
-        *active_guard = None;
+        *state.active_session.lock().map_err(|e| e.to_string())? = None;
         return Ok(None);
     };
 
-    // Check if it's the same session continuing
-    if let Some(existing) = active_guard.as_mut() {
-        if existing.cleaned_media_title == cleaned_title && existing.player_name == player_name {
-            // If previously unmatched, re-check in case the user just added the anime or bound an alias
-            if existing.matched_anime_id.is_none() {
-                if let Some((id, title, cover, prog, total)) =
-                    state.db.match_episode_to_anime(&mut existing.parsed, None)
-                {
-                    existing.matched_anime_id = Some(id);
-                    existing.matched_anime_title = Some(title);
-                    existing.matched_cover_image = Some(cover);
-                    existing.matched_current_progress = Some(prog);
-                    existing.matched_total_episodes = total;
-                    existing.detected_at_unix = now;
-                    existing.elapsed_seconds = 0;
-                    existing.auto_synced = false;
-                }
+    let is_same_session = |s: &DetectedMediaSession| {
+        s.cleaned_media_title == cleaned_title && s.player_name == player_name
+    };
+
+    // Snapshot the continuing session (if any). DB work happens without holding the lock.
+    let continuing: Option<(Option<i64>, AnitomyElements)> = {
+        let guard = state.active_session.lock().map_err(|e| e.to_string())?;
+        guard
+            .as_ref()
+            .filter(|s| is_same_session(s))
+            .map(|s| (s.matched_anime_id, s.parsed.clone()))
+    };
+
+    let Some((snapshot_matched_id, mut session_parsed)) = continuing else {
+        // New playback session detected
+        let db = state.db.clone();
+        let (parsed, matched) = tokio::task::spawn_blocking(move || {
+            let mut parsed = parsed;
+            let matched = db.match_episode_to_anime(&mut parsed, None);
+            (parsed, matched)
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        let (
+            matched_anime_id,
+            matched_anime_title,
+            matched_cover_image,
+            matched_current_progress,
+            matched_total_episodes,
+        ) = match matched {
+            Some((id, title, cover, prog, total)) => {
+                (Some(id), Some(title), Some(cover), Some(prog), total)
+            }
+            None => (None, None, None, None, None),
+        };
+
+        let new_session = DetectedMediaSession {
+            player_id,
+            player_name,
+            process_id: pid,
+            executable_path: exe_path,
+            raw_window_title: raw_title,
+            cleaned_media_title: cleaned_title,
+            parsed,
+            matched_anime_id,
+            matched_anime_title,
+            matched_cover_image,
+            matched_current_progress,
+            matched_total_episodes,
+            detected_at_unix: now,
+            elapsed_seconds: 0,
+            auto_synced: false,
+        };
+
+        *state.active_session.lock().map_err(|e| e.to_string())? = Some(new_session.clone());
+        return Ok(Some(new_session));
+    };
+
+    // Same session continuing: re-check an unmatched session (the user may have just added the anime or
+    // bound an alias) and load the matched entry's current progress, off the async worker.
+    let db = state.db.clone();
+    let (rematch, entry) = tokio::task::spawn_blocking(move || {
+        let rematch = if snapshot_matched_id.is_none() {
+            db.match_episode_to_anime(&mut session_parsed, None)
+                .map(|m| (m, session_parsed))
+        } else {
+            None
+        };
+        let aid = snapshot_matched_id.or_else(|| rematch.as_ref().map(|(m, _)| m.0));
+        let entry = aid.and_then(|id| db.get_anime_entry_by_id(id).ok());
+        (rematch, entry)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // Under the lock: update countdown state and only DECIDE whether to scrobble.
+    let mut scrobble: Option<PendingScrobble> = None;
+    let session_now = {
+        let mut guard = state.active_session.lock().map_err(|e| e.to_string())?;
+        let Some(existing) = guard.as_mut().filter(|s| is_same_session(s)) else {
+            // The session changed while we were querying; report whatever is current.
+            return Ok(guard.clone());
+        };
+
+        if existing.matched_anime_id.is_none() {
+            if let Some(((id, title, cover, prog, total), new_parsed)) = rematch {
+                existing.parsed = new_parsed;
+                existing.matched_anime_id = Some(id);
+                existing.matched_anime_title = Some(title);
+                existing.matched_cover_image = Some(cover);
+                existing.matched_current_progress = Some(prog);
+                existing.matched_total_episodes = total;
+                existing.detected_at_unix = now;
+                existing.elapsed_seconds = 0;
+                existing.auto_synced = false;
+            }
+        }
+
+        if let Some(aid) = existing.matched_anime_id {
+            // Ignore the loaded entry if the match changed concurrently (e.g. linked meanwhile).
+            let entry = entry.filter(|e| e.id == aid);
+            if let Some(entry) = entry.as_ref() {
+                existing.matched_current_progress = Some(entry.user_progress);
+                existing.matched_total_episodes = entry.episodes;
             }
 
-            if let Some(aid) = existing.matched_anime_id {
-                if let Ok(entry) = state.db.get_anime_entry_by_id(aid) {
-                    existing.matched_current_progress = Some(entry.user_progress);
-                    existing.matched_total_episodes = entry.episodes;
-                }
+            let is_already_seen = match (
+                existing.parsed.episode_number,
+                existing.matched_current_progress,
+            ) {
+                (Some(ep), Some(cur_prog)) => ep <= cur_prog,
+                _ => false,
+            };
 
-                let is_already_seen = match (
-                    existing.parsed.episode_number,
-                    existing.matched_current_progress,
-                ) {
-                    (Some(ep), Some(cur_prog)) => ep <= cur_prog,
-                    _ => false,
-                };
+            if !existing.auto_synced && is_already_seen {
+                // If the currently detected episode is the last one seen (or earlier),
+                // do not count down or auto-update progress.
+                existing.elapsed_seconds = 0;
+            } else {
+                existing.elapsed_seconds = (now - existing.detected_at_unix).max(0) as u64;
 
-                if !existing.auto_synced && is_already_seen {
-                    // If the currently detected episode is the last one seen (or earlier),
-                    // do not count down or auto-update progress.
-                    existing.elapsed_seconds = 0;
-                } else {
-                    existing.elapsed_seconds = (now - existing.detected_at_unix).max(0) as u64;
-
-                    // Only auto-update when matched to an anime entry and delay threshold is met
-                    if !existing.auto_synced
-                        && existing.elapsed_seconds >= settings.recognition_delay_seconds
-                    {
+                // Only auto-update when matched to an anime entry and delay threshold is met
+                if !existing.auto_synced
+                    && existing.elapsed_seconds >= settings.recognition_delay_seconds
+                {
+                    if let Some(entry) = entry.as_ref() {
                         existing.auto_synced = true;
                         if let Some(ep) = existing.parsed.episode_number {
-                            if let Ok(entry) = state.db.get_anime_entry_by_id(aid) {
-                                if ep > entry.user_progress {
-                                    let new_prog = ep;
-                                    let new_status = if let Some(total) = entry.episodes {
-                                        if new_prog >= total && total > 0 {
-                                            "COMPLETED".to_string()
-                                        } else if entry.user_status == "PLANNING" {
-                                            "CURRENT".to_string()
-                                        } else {
-                                            entry.user_status.clone()
-                                        }
-                                    } else if entry.user_status == "PLANNING" {
-                                        "CURRENT".to_string()
-                                    } else {
-                                        entry.user_status.clone()
-                                    };
-
-                                    if let Ok((updated, _)) = state.db.update_anime_user_state(
-                                        aid,
-                                        &new_status,
-                                        new_prog,
-                                        entry.user_score,
-                                        entry.user_repeats,
-                                        &entry.user_notes,
-                                        entry.custom_folder,
-                                        None,
-                                        None,
-                                        None,
-                                    ) {
-                                        existing.matched_current_progress =
-                                            Some(updated.user_progress);
-                                    }
-
-                                    let _ = state.db.record_watch_history(
-                                        Some(aid),
-                                        existing
-                                            .matched_anime_title
-                                            .as_deref()
-                                            .unwrap_or(&existing.parsed.anime_title),
-                                        ep,
-                                        &existing.player_name,
-                                        &existing.cleaned_media_title,
-                                        true,
-                                    );
-                                }
+                            if ep > entry.user_progress {
+                                scrobble = Some((
+                                    aid,
+                                    ep,
+                                    existing
+                                        .matched_anime_title
+                                        .clone()
+                                        .unwrap_or_else(|| existing.parsed.anime_title.clone()),
+                                    existing.player_name.clone(),
+                                    existing.cleaned_media_title.clone(),
+                                ));
                             }
                         }
                     }
                 }
-            } else {
-                existing.elapsed_seconds = 0;
-                existing.auto_synced = false;
             }
-
-            return Ok(Some(existing.clone()));
+        } else {
+            existing.elapsed_seconds = 0;
+            existing.auto_synced = false;
         }
+
+        existing.clone()
+    }; // active_session lock released here: never held across an `.await`.
+
+    let Some((aid, ep, title, player, file)) = scrobble else {
+        return Ok(Some(session_now));
+    };
+
+    // Record the watch as not-yet-scrobbled; the sync service marks it scrobbled once AniList accepts it.
+    let db = state.db.clone();
+    let history_id = tokio::task::spawn_blocking(move || {
+        db.record_watch_history(Some(aid), &title, ep, &player, &file, false)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| eprintln!("[scrobble] failed to record watch history: {}", e))
+    .ok();
+
+    // The service derives status (PLANNING -> CURRENT, COMPLETED at total) and dates, writes SQLite,
+    // refreshes `active_session.matched_current_progress` and pushes to AniList in the background.
+    let change = UserStateChange {
+        progress: Some(ep),
+        ..UserStateChange::new(aid, ChangeSource::Scrobble)
+    };
+    if let Err(e) = state
+        .sync
+        .apply_local_update_with_history(change, history_id)
+        .await
+    {
+        eprintln!("[scrobble] failed to update anime {}: {}", aid, e);
     }
 
-    // New playback session detected
-    let matched = state
-        .db
-        .match_episode_to_anime(&mut parsed, None);
-    let (
-        matched_anime_id,
-        matched_anime_title,
-        matched_cover_image,
-        matched_current_progress,
-        matched_total_episodes,
-    ) = match matched {
-        Some((id, title, cover, prog, total)) => {
-            (Some(id), Some(title), Some(cover), Some(prog), total)
-        }
-        None => (None, None, None, None, None),
-    };
-
-    let new_session = DetectedMediaSession {
-        player_id,
-        player_name,
-        process_id: pid,
-        executable_path: exe_path,
-        raw_window_title: raw_title,
-        cleaned_media_title: cleaned_title,
-        parsed,
-        matched_anime_id,
-        matched_anime_title,
-        matched_cover_image,
-        matched_current_progress,
-        matched_total_episodes,
-        detected_at_unix: now,
-        elapsed_seconds: 0,
-        auto_synced: false,
-    };
-
-    *active_guard = Some(new_session.clone());
-    Ok(Some(new_session))
+    let current = state.active_session.lock().map_err(|e| e.to_string())?.clone();
+    Ok(current)
 }
 
 #[tauri::command]
@@ -1188,6 +1076,7 @@ async fn handle_oauth_http_stream(
     app_handle: tauri::AppHandle,
     db: Arc<Database>,
     plugins: Arc<PluginManager>,
+    sync: Arc<TrackerSyncService>,
 ) {
     let mut buf = vec![0u8; 8192];
     let n = match tokio::time::timeout(
@@ -1259,29 +1148,10 @@ async fn handle_oauth_http_stream(
                         let _ = win.set_focus();
                     }
 
-                    // Automatically fetch and sync the user's AniList library in the background
-                    let app_clone = app_handle.clone();
-                    let db_clone = db.clone();
-                    let plugins_clone = plugins.clone();
-                    let uname = profile.username.clone();
-                    let tok = token.clone();
+                    // Two-way sync with the newly linked account in the background. The service emits
+                    // `tracker-sync-started` and `tracker-list-synced` (SyncSummary) / `tracker-sync-failed`.
                     tokio::spawn(async move {
-                        if let Some(plugin) = plugins_clone.get("anilist") {
-                            if let Ok(remote_entries) =
-                                plugin.fetch_user_list(&uname, Some(&tok)).await
-                            {
-                                if let Ok(Ok(updated_list)) =
-                                    tokio::task::spawn_blocking(move || -> Result<Vec<AnimeEntry>, String> {
-                                        db_clone.upsert_anime_entries_batch(&remote_entries)?;
-                                        let _ = db_clone.rematch_all_local_episodes();
-                                        db_clone.list_anime_entries()
-                                    })
-                                    .await
-                                {
-                                    let _ = app_clone.emit("tracker-list-synced", &updated_list);
-                                }
-                            }
-                        }
+                        let _ = sync.pull("post_auth").await;
                     });
                     return;
                 }
@@ -1319,6 +1189,7 @@ fn ensure_oauth_callback_listener(
     app_handle: tauri::AppHandle,
     db: Arc<Database>,
     plugins: Arc<PluginManager>,
+    sync: Arc<TrackerSyncService>,
     active_flag: Arc<AtomicBool>,
 ) {
     if active_flag
@@ -1335,8 +1206,9 @@ fn ensure_oauth_callback_listener(
                     let app_c = app_handle.clone();
                     let db_c = db.clone();
                     let plugins_c = plugins.clone();
+                    let sync_c = sync.clone();
                     tokio::spawn(async move {
-                        handle_oauth_http_stream(stream, app_c, db_c, plugins_c).await;
+                        handle_oauth_http_stream(stream, app_c, db_c, plugins_c, sync_c).await;
                     });
                 }
                 active_flag.store(false, Ordering::SeqCst);
@@ -1357,6 +1229,7 @@ async fn start_anilist_oauth(
         app.clone(),
         state.db.clone(),
         state.plugins.clone(),
+        state.sync.clone(),
         state.oauth_listener_active.clone(),
     );
 
@@ -1392,11 +1265,27 @@ pub fn run() {
 
             let monitor = start_library_monitor(app.handle().clone(), db.clone());
             let oauth_listener_active = Arc::new(AtomicBool::new(false));
+            let active_session: Arc<Mutex<Option<DetectedMediaSession>>> =
+                Arc::new(Mutex::new(None));
+
+            // The sync service shares the same active-session handle as AppState so it can mirror
+            // progress changes into the live playback session.
+            let emit_handle = app.handle().clone();
+            let emit: SyncEmitter = Arc::new(move |name: &str, payload: Value| {
+                let _ = emit_handle.emit(name, payload);
+            });
+            let sync = Arc::new(TrackerSyncService::new(
+                db.clone(),
+                plugins.clone(),
+                emit,
+                active_session.clone(),
+            ));
 
             ensure_oauth_callback_listener(
                 app.handle().clone(),
                 db.clone(),
                 plugins.clone(),
+                sync.clone(),
                 oauth_listener_active.clone(),
             );
 
@@ -1404,9 +1293,16 @@ pub fn run() {
                 db,
                 plugins,
                 monitor,
-                active_session: Mutex::new(None),
+                active_session,
                 simulated_session: Mutex::new(None),
                 oauth_listener_active,
+                sync: sync.clone(),
+            });
+
+            // Startup two-way sync. Without a token `pull` returns early (before emitting any event),
+            // so a signed-out user sees no failure toast.
+            tauri::async_runtime::spawn(async move {
+                let _ = sync.pull("startup").await;
             });
 
             Ok(())
@@ -1421,6 +1317,7 @@ pub fn run() {
             get_tracker_plugins,
             verify_tracker_account,
             sync_tracker_list,
+            get_sync_status,
             search_remote_anime,
             get_library_folders,
             add_library_folder,

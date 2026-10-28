@@ -56,6 +56,9 @@ export interface AnimeEntry {
   user_completed_at?: string | null;
   custom_folder: string | null;
   updated_at: number;
+  // AniList sync state (true while a local change is queued for push / retry)
+  sync_pending: boolean;
+  anilist_list_entry_id: number | null;
   // Local library state
   local_episode_count: number;
   available_episodes: number[];
@@ -238,7 +241,6 @@ export interface AppSettings {
   anilist_avatar: string | null;
   recognition_enabled: boolean;
   recognition_delay_seconds: number;
-  auto_sync_tracker: boolean;
   custom_media_player_path: string;
   torrent_provider: string;
   qbittorrent_enabled: boolean;
@@ -248,6 +250,47 @@ export interface AppSettings {
   qbittorrent_category: string;
   qbittorrent_save_path: string;
   players: PlayerDefinition[];
+}
+
+export interface SyncSummary {
+  added: number;
+  updated_from_remote: number;
+  kept_local: number;
+  deleted: number;
+  pushed: number;
+  push_failed: number;
+  remote_deleted: number;
+  deletion_skipped_reason: string | null;
+  entries: AnimeEntry[];
+}
+
+export interface SyncStatus {
+  in_progress: boolean;
+  last_synced_at: number | null;
+  pending_count: number;
+  pending_deletions: number;
+}
+
+export interface TrackerSyncStartedEvent {
+  reason: "startup" | "manual" | "post_auth" | string;
+}
+
+export interface TrackerSyncFailedEvent {
+  reason: string;
+  message: string;
+}
+
+export interface TrackerSyncErrorEvent {
+  anime_id: number | null;
+  media_id: number | null;
+  title: string;
+  kind: "network" | "rate_limited" | "unauthorized" | "not_found" | "api" | string;
+  message: string;
+  operation: "save" | "delete" | string;
+}
+
+export interface TrackerEntrySyncedEvent {
+  entry: AnimeEntry;
 }
 
 export interface ThemePreset {

@@ -8,7 +8,8 @@ Core capabilities:
 - **Anime Filename Parsing & Relations (`erengy/anitomy` + `erengy/anime-relations`)**: Direct C++23 FFI bindings to upstream `anitomy` combined with Taiga's `ExtendAnimeTitle`, title normalization, season isolation, parent folder fallback for numeric filenames, fuzzy matching, and sequential episode redirection (`anime-relations.txt`).
 - **Multi-Drive Video Library Scanner & Native Win32 IOCP Watcher**: Two-tier filesystem scanner (full `scan_all_library_folders` and incremental `quick_scan_library_folders`) paired with a zero-polling native Win32 IOCP `ReadDirectoryChangesW` directory monitor (`LibraryMonitorHandle`, 0.00% idle CPU) that coalesces file bursts (250ms), auto-binds anime subfolders (`custom_folder`), and updates SQLite in microseconds.
 - **O(1) In-Memory Title Matcher Index (`AnimeMatcherIndex`)**: High-speed matching engine leveraging SQLite WAL persistence, season-isolated core title fuzzy matching, user-linked aliases (`title_aliases`), and custom folder overrides.
-- **Internal Tracker Plugin Architecture**: Modular `TrackerPlugin` trait (`src-tauri/src/plugins/mod.rs`) with full **AniList GraphQL v2** integration (`src-tauri/src/plugins/anilist.rs`), rate limiting, background synchronization, and extensible stubs for MyAnimeList and Kitsu.
+- **Internal Tracker Plugin Architecture**: Modular `TrackerPlugin` trait (`src-tauri/src/plugins/mod.rs`) with full **AniList GraphQL v2** integration (`src-tauri/src/plugins/anilist.rs`), typed `TrackerError`s, and extensible stubs for MyAnimeList and Kitsu.
+- **Unified Tracker Sync Service (`TrackerSyncService`)**: Single pipeline (`src-tauri/src/sync/mod.rs`) for every list mutation and every AniList sync — validation, status/date derivation, SQLite writes, retry queue (`sync_pending` + deletion tombstones), rate limiting, newest-wins pull merge, and error events.
 - **Torrent Search, RSS Rule Engine & qBittorrent WebUI Client**: Live Nyaa.si / AnimeTosho RSS search, Taiga-style episode filter rules (`highlight` / `auto_download` / `discard`), magnet launching, and qBittorrent WebUI API integration.
 - **High-Performance Virtualized UI**: Viewport-windowed virtual lists/grids (`VirtualWatchlist.tsx` for Grid, Compact, and Table modes; virtualized indexed episode explorer in `LibraryManagerView.tsx`), AniList CDN image downscaling (`getOptimizedCoverUrl`), and optimistic debounced episode stepping (+1 button) with sort position preservation.
 
@@ -95,7 +96,8 @@ Tora/
         │   └── scanner.rs                # Fast filesystem scanner, Win32 IOCP directory watcher & batch episode matcher
         ├── plugins/
         │   ├── mod.rs                    # `TrackerPlugin` trait & `PluginManager`
-        │   └── anilist.rs                # AniList GraphQL v2 search, user list import & progress mutation
+        │   └── anilist.rs                # AniList GraphQL v2 search, user list fetch, save & delete mutations
+        ├── sync/mod.rs                   # `TrackerSyncService`: unified push/pull/delete pipeline, `normalize_change`, rate limiter
         └── torrents/mod.rs               # Nyaa/AnimeTosho RSS parser, rule evaluator & qBittorrent WebUI client
 ```
 
@@ -151,7 +153,8 @@ When a filename or media player window title is parsed (`parse_filename` in `src
   - Once `elapsed_seconds >= settings.recognition_delay_seconds`:
     - If `new_progress >= total_episodes`, the status automatically transitions to `COMPLETED`.
     - If the entry was in `PLANNING`, it transitions to `CURRENT`.
-    - The watch history entry is recorded and AniList is notified if auto-sync is enabled.
+    - The watch history entry is recorded (`scrobbled_to_tracker = false`) and the change goes through `TrackerSyncService::apply_local_update_with_history`, which pushes to AniList and marks the history row scrobbled only after the push succeeds.
+    - The `active_session` lock is only held to decide; it is released before any DB write or `.await`.
 - **Optimistic Episode Stepping (+1 Button) with Debounce**:
   - In React (`handleStepEpisode` in `src/App.tsx`), clicking `+1` on an anime card applies an instant 0ms optimistic UI update to the badge count.
   - Card sorting position in the watchlist is locked using `pendingStepSnapshots` during rapid successive clicks to prevent jarring layout jumps.
@@ -161,7 +164,7 @@ When a filename or media player window title is parsed (`parse_filename` in `src
 ### 6. Database Performance & In-Memory Matching (`src-tauri/src/db/mod.rs`)
 - Use `AnimeMatcherIndex` (`db.build_matcher_index()`) for any batch matching (library scans, torrent RSS evaluation). It loads all titles, synonyms, and aliases in a single SQL query and performs matching in memory in O(1) / microsecond time.
 - Single-entry mutations (`update_anime_user_state`) must query only the target `anime_id` (`get_anime_entry_by_id`) and only trigger `rematch_all_local_episodes()` if `custom_folder` or `synonyms` actually changed.
-- Adding anime (`add_or_upsert_anime`) must never block on `rematch_all_local_episodes()`. Instead, run targeted background matching for unmatched episodes via `match_unmatched_episodes_for_anime(anime_id)` and provide instant 0ms optimistic UI updates in React.
+- Adding anime (`add_or_upsert_anime` → `TrackerSyncService::add_entry`) must never block on `rematch_all_local_episodes()`. Instead, run targeted background matching for unmatched episodes via `match_unmatched_episodes_for_anime(anime_id)` and provide instant 0ms optimistic UI updates in React.
 - **SQLite Page Cache & WAL**:
   - Keep `PRAGMA journal_mode = WAL`, `PRAGMA synchronous = NORMAL`, and `PRAGMA cache_size = -4000` (4 MB) in `Database::open` to minimize native memory consumption while providing high concurrent read performance.
 
@@ -172,3 +175,11 @@ When a filename or media player window title is parsed (`parse_filename` in `src
   - **Never** use AniList `/cover/extraLarge/` URLs (up to 6 MB RGBA per decoded bitmap) in lists, cards, or grids.
   - Use `getOptimizedCoverUrl(url, "medium")` (230x325, ~299 KB) for small thumbnails (`w-7` to `w-24`, table rows, compact cards, search selectors).
   - Use `getOptimizedCoverUrl(url, "large")` (460x650, ~1.19 MB) for poster cards and the detail drawer.
+
+### 8. Tracker Sync Service (`src-tauri/src/sync/mod.rs`)
+- **Single entry point**: Every user-state mutation (`update_anime_entry`, `batch_update_anime_entries`, `add_or_upsert_anime`, `delete_anime_entry` / `batch_delete_anime_entries`, scrobbling) and every pull (startup, manual "Sync from AniList" button, post-OAuth) goes through `TrackerSyncService`. **Never** call `TrackerPlugin::save_list_entry` / `delete_list_entry` / `fetch_user_list` or write user fields directly from commands.
+- **`normalize_change`** (pure, unit-tested) owns validation and derivation: status enum, progress clamp to `episodes`, score 0–100, `YYYY-MM-DD` dates, PLANNING→CURRENT on progress ≥ 1, →COMPLETED at total, REPEATING→COMPLETED increments `user_repeats`, `user_started_at = today` on first watched episode (if empty), `user_completed_at = today` on transition into COMPLETED. Explicit dates in the same change win.
+- **Push**: local write happens first with `sync_pending = 1`, then a background push. Success clears `sync_pending` (only if the row still equals what was pushed) and stores AniList's `updatedAt` and list-entry id. Failure keeps it pending and emits `tracker-sync-error`; `Unauthorized` also emits `tracker-auth-invalid`.
+- **Delete**: local delete is immediate and writes a tombstone in `tracker_pending_deletions`; the AniList delete is retried until it succeeds, and tombstoned media are never re-added by a pull.
+- **Pull**: serialized by `op_lock`; flushes tombstones and pending pushes first, then fetches the viewer's list and calls `Database::merge_remote_list` (newest `updated_at` wins per entry, pending entries keep local state, `custom_folder` preserved, remote-missing entries deleted locally unless pending — skipped on viewer mismatch or empty remote list). Emits `tracker-sync-started` / `tracker-list-synced` (`SyncSummary`) / `tracker-sync-failed`. No background polling.
+- **Invariants**: every `anime_entries` row has an `anilist_id`; there is no seed data. A signed-in AniList OAuth token is required for any push/pull.

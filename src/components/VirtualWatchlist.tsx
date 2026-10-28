@@ -418,6 +418,10 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
                   />
                   <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/15 to-transparent" />
 
+                  {anime.sync_pending && (
+                    <PendingSyncDot className="absolute top-2.5 right-2.5 ring-2 ring-black/60" />
+                  )}
+
                   {/* Top Left Badges: Disk Episodes & Airing Countdown */}
                   <div className="absolute top-2.5 left-2.5 flex flex-col gap-1 max-w-[calc(100%-20px)]">
                     {anime.local_episode_count > 0 && (
@@ -541,6 +545,9 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
                     decoding="async"
                     className="w-20 h-28 object-cover rounded-xl"
                   />
+                  {anime.sync_pending && (
+                    <PendingSyncDot className="absolute top-1.5 right-1.5 ring-2 ring-black/60" />
+                  )}
                 </div>
 
                 <div className="flex-1 min-w-0 flex flex-col justify-between">
@@ -662,6 +669,9 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
                       className={`font-semibold truncate max-w-md ${isSelected ? "text-accent" : "text-text-primary"
                         }`}
                     >
+                      {anime.sync_pending && (
+                        <PendingSyncDot className="inline-block mr-1.5 align-middle" />
+                      )}
                       {anime.title_romaji}
                     </div>
                     <div className="text-[10px] text-text-muted truncate max-w-md">
@@ -738,6 +748,19 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
     </div>
   );
 };
+
+/**
+ * Tiny amber dot marking an entry with a local change still queued for AniList.
+ */
+function PendingSyncDot({ className = "" }: { className?: string }) {
+  return (
+    <span
+      title="Waiting to sync to AniList"
+      aria-label="Waiting to sync to AniList"
+      className={`w-2 h-2 rounded-full bg-amber-400 shrink-0 ${className}`}
+    />
+  );
+}
 
 /**
  * Formats an array of episode numbers into compact ranges (e.g., [1, 2, 3, 5, 8] -> "Ep 1–3, 5, 8").

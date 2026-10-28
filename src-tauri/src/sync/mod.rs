@@ -1,0 +1,1674 @@
+//! Unified tracker (AniList) sync service.
+//!
+//! `TrackerSyncService` is the single owner of user-list state changes:
+//! validation and status/date derivation ([`normalize_change`]), local SQLite writes, keeping the active
+//! playback session in sync, pushing to AniList (save + delete through tombstones), pulling the remote
+//! list with newest-wins conflict resolution, retries and error reporting via events.
+//!
+//! Events emitted (names are a frontend contract):
+//! - `tracker-sync-started`  `{ reason }`
+//! - `tracker-list-synced`   [`SyncSummary`]
+//! - `tracker-sync-failed`   `{ reason, message }`
+//! - `tracker-sync-error`    `{ anime_id, media_id, title, kind, message, operation: "save" | "delete" }`
+//! - `tracker-auth-invalid`  `{ message }`
+//! - `tracker-entry-synced`  `{ entry }`
+//!
+//! Without an AniList token the service does nothing remote: edits are written locally but not queued,
+//! deletes create no tombstones, and `pull` fails with "Not signed in to AniList".
+
+use crate::db::{AnimeEntry, AppSettings, BatchAnimeUpdatePatch, Database};
+use crate::detection::anisthesia::DetectedMediaSession;
+use crate::plugins::{PluginManager, TrackerEntryUpdate, TrackerError, TrackerPlugin};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::collections::HashSet;
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+pub use crate::db::ResolvedState;
+
+/// Event sink, decoupled from Tauri so the service is testable. In the app:
+/// `Arc::new(move |name, payload| { let _ = app.emit(name, payload); })`.
+pub type SyncEmitter = Arc<dyn Fn(&str, Value) + Send + Sync>;
+
+pub const EVENT_SYNC_STARTED: &str = "tracker-sync-started";
+pub const EVENT_LIST_SYNCED: &str = "tracker-list-synced";
+pub const EVENT_SYNC_FAILED: &str = "tracker-sync-failed";
+pub const EVENT_SYNC_ERROR: &str = "tracker-sync-error";
+pub const EVENT_AUTH_INVALID: &str = "tracker-auth-invalid";
+pub const EVENT_ENTRY_SYNCED: &str = "tracker-entry-synced";
+
+/// Plugin id used for all sync traffic (login is always AniList OAuth).
+const TRACKER_PLUGIN_ID: &str = "anilist";
+const MIN_REQUEST_INTERVAL: Duration = Duration::from_millis(700);
+const MAX_RETRY_AFTER_SECS: u64 = 90;
+
+pub const STATUS_CURRENT: &str = "CURRENT";
+pub const STATUS_PLANNING: &str = "PLANNING";
+pub const STATUS_COMPLETED: &str = "COMPLETED";
+pub const STATUS_DROPPED: &str = "DROPPED";
+pub const STATUS_PAUSED: &str = "PAUSED";
+pub const STATUS_REPEATING: &str = "REPEATING";
+pub const VALID_STATUSES: [&str; 6] = [
+    STATUS_CURRENT,
+    STATUS_PLANNING,
+    STATUS_COMPLETED,
+    STATUS_DROPPED,
+    STATUS_PAUSED,
+    STATUS_REPEATING,
+];
+
+// ---------------------------------------------------------------------------------------------
+// Rate limiter
+// ---------------------------------------------------------------------------------------------
+
+/// Serializes tracker requests with a minimum spacing and waits out one `RateLimited` response.
+pub struct RateLimiter {
+    min_interval: Duration,
+    last_request: tokio::sync::Mutex<Option<Instant>>,
+}
+
+impl RateLimiter {
+    pub fn new(min_interval: Duration) -> Self {
+        Self {
+            min_interval,
+            last_request: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    async fn wait_turn(&self) {
+        let mut last = self.last_request.lock().await;
+        if let Some(prev) = *last {
+            let elapsed = prev.elapsed();
+            if elapsed < self.min_interval {
+                tokio::time::sleep(self.min_interval - elapsed).await;
+            }
+        }
+        *last = Some(Instant::now());
+    }
+
+    /// Run `op` after waiting for our turn. On `RateLimited`, sleep `retry_after_secs` (capped at 90s)
+    /// and retry exactly once.
+    pub async fn run<T, F, Fut>(&self, mut op: F) -> Result<T, TrackerError>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<T, TrackerError>>,
+    {
+        self.wait_turn().await;
+        match op().await {
+            Err(TrackerError::RateLimited { retry_after_secs }) => {
+                let wait = retry_after_secs.clamp(1, MAX_RETRY_AFTER_SECS);
+                tokio::time::sleep(Duration::from_secs(wait)).await;
+                self.wait_turn().await;
+                op().await
+            }
+            other => other,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Change model + pure normalization
+// ---------------------------------------------------------------------------------------------
+
+/// Where a user-state change came from. Scrobble/Step always get status derivation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ChangeSource {
+    #[default]
+    Manual,
+    Step,
+    Batch,
+    Add,
+    Scrobble,
+}
+
+/// A requested change to one entry's user state. `None` fields are left unchanged.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct UserStateChange {
+    pub anime_id: i64,
+    pub status: Option<String>,
+    /// Absolute progress (wins over `progress_delta`).
+    pub progress: Option<u32>,
+    pub progress_delta: Option<i32>,
+    /// Set progress to the episode total (when known).
+    pub mark_completed_progress: bool,
+    /// 0..=100.
+    pub score: Option<f64>,
+    pub repeats: Option<u32>,
+    pub notes: Option<String>,
+    /// Append `notes` on a new line instead of replacing.
+    pub notes_mode_append: bool,
+    /// `Some("")` clears, `Some("YYYY-MM-DD")` sets.
+    pub started_at: Option<String>,
+    /// `Some("")` clears, `Some("YYYY-MM-DD")` sets.
+    pub completed_at: Option<String>,
+    /// `Some(None)` clears, `Some(Some(path))` sets.
+    pub custom_folder: Option<Option<String>>,
+    /// Replaces the synonym list.
+    pub synonyms: Option<Vec<String>>,
+    pub source: ChangeSource,
+}
+
+impl UserStateChange {
+    pub fn new(anime_id: i64, source: ChangeSource) -> Self {
+        Self {
+            anime_id,
+            source,
+            ..Default::default()
+        }
+    }
+
+    /// One entry's slice of a batch patch.
+    pub fn from_batch_patch(patch: &BatchAnimeUpdatePatch, anime_id: i64) -> Self {
+        Self {
+            anime_id,
+            status: patch.user_status.clone(),
+            progress: patch.user_progress,
+            progress_delta: patch.progress_delta,
+            mark_completed_progress: patch.mark_completed_progress == Some(true),
+            score: patch.user_score,
+            repeats: patch.user_repeats,
+            notes: patch.user_notes.clone(),
+            notes_mode_append: patch.notes_mode.as_deref() == Some("append"),
+            started_at: patch.user_started_at.clone(),
+            completed_at: patch.user_completed_at.clone(),
+            custom_folder: None,
+            synonyms: None,
+            source: ChangeSource::Batch,
+        }
+    }
+}
+
+fn is_valid_date(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok()
+}
+
+/// `None` = not provided, `Some(None)` = clear, `Some(Some(d))` = set.
+fn parse_date_change(value: Option<&str>, field: &str) -> Result<Option<Option<String>>, String> {
+    match value {
+        None => Ok(None),
+        Some(raw) => {
+            let t = raw.trim();
+            if t.is_empty() {
+                Ok(Some(None))
+            } else if is_valid_date(t) {
+                Ok(Some(Some(t.to_string())))
+            } else {
+                Err(format!(
+                    "Invalid {} date '{}': expected YYYY-MM-DD",
+                    field, raw
+                ))
+            }
+        }
+    }
+}
+
+fn clean_opt(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+/// Validate a change and resolve the final user state. PURE (no I/O); `today` is `YYYY-MM-DD`.
+///
+/// Rules:
+/// - status must be one of [`VALID_STATUSES`];
+/// - progress = explicit or current + delta, clamped to `[0, episodes]` when the total is known;
+///   `mark_completed_progress` sets it to the total; score is clamped to `0..=100`;
+/// - dates must be `YYYY-MM-DD` (empty clears);
+/// - when progress changes and the caller did not explicitly change the status (always for Scrobble/Step):
+///   reaching the total → COMPLETED, else PLANNING with progress ≥ 1 → CURRENT;
+/// - REPEATING → COMPLETED increments repeats (unless the caller changed repeats explicitly);
+/// - an explicit date (one that differs from the stored value) always wins; otherwise the first watched
+///   episode (0 → ≥1) sets an empty `started_at` to today, and entering COMPLETED sets `completed_at` to
+///   today (and an empty `started_at` to today too).
+pub fn normalize_change(
+    current: &AnimeEntry,
+    change: &UserStateChange,
+    today: &str,
+) -> Result<ResolvedState, String> {
+    let requested_status = match &change.status {
+        Some(s) => {
+            let up = s.trim().to_ascii_uppercase();
+            if !VALID_STATUSES.contains(&up.as_str()) {
+                return Err(format!(
+                    "Invalid list status '{}' (expected one of {})",
+                    s,
+                    VALID_STATUSES.join(", ")
+                ));
+            }
+            Some(up)
+        }
+        None => None,
+    };
+    let started_req = parse_date_change(change.started_at.as_deref(), "start")?;
+    let completed_req = parse_date_change(change.completed_at.as_deref(), "completion")?;
+    if let Some(score) = change.score {
+        if !score.is_finite() {
+            return Err("Score must be a finite number".into());
+        }
+    }
+
+    // Progress
+    let total = current.episodes.filter(|&e| e > 0);
+    let old_progress = current.user_progress;
+    let mut progress: i64 = old_progress as i64;
+    if let Some(p) = change.progress {
+        progress = p as i64;
+    } else if let Some(delta) = change.progress_delta {
+        progress = old_progress as i64 + delta as i64;
+    }
+    if change.mark_completed_progress {
+        if let Some(t) = total {
+            progress = t as i64;
+        }
+    }
+    progress = progress.max(0);
+    if let Some(t) = total {
+        progress = progress.min(t as i64);
+    }
+    let progress = progress.min(u32::MAX as i64) as u32;
+
+    // Status
+    let prev_status = current.user_status.as_str();
+    let derives_always = matches!(change.source, ChangeSource::Scrobble | ChangeSource::Step);
+    let status_explicit = !derives_always
+        && requested_status
+            .as_deref()
+            .map_or(false, |s| s != prev_status);
+    let mut status = requested_status.unwrap_or_else(|| prev_status.to_string());
+    if !status_explicit && progress != old_progress {
+        if total.map_or(false, |t| progress >= t) {
+            status = STATUS_COMPLETED.to_string();
+        } else if status == STATUS_PLANNING && progress >= 1 {
+            status = STATUS_CURRENT.to_string();
+        }
+    }
+    let entering_completed = status == STATUS_COMPLETED && prev_status != STATUS_COMPLETED;
+
+    // Repeats
+    let repeats_explicit = change
+        .repeats
+        .map_or(false, |r| r != current.user_repeats);
+    let mut repeats = change.repeats.unwrap_or(current.user_repeats);
+    if entering_completed && prev_status == STATUS_REPEATING && !repeats_explicit {
+        repeats = repeats.saturating_add(1);
+    }
+
+    // Score / notes
+    let score = change.score.unwrap_or(current.user_score).clamp(0.0, 100.0);
+    let notes = match &change.notes {
+        Some(new_text) if change.notes_mode_append => {
+            let trimmed_new = new_text.trim();
+            if trimmed_new.is_empty() {
+                current.user_notes.clone()
+            } else if current.user_notes.trim().is_empty() {
+                trimmed_new.to_string()
+            } else {
+                format!("{}\n{}", current.user_notes.trim(), trimmed_new)
+            }
+        }
+        Some(new_text) => new_text.clone(),
+        None => current.user_notes.clone(),
+    };
+
+    // Dates
+    let cur_started = clean_opt(current.user_started_at.as_deref());
+    let cur_completed = clean_opt(current.user_completed_at.as_deref());
+    let started_explicit = started_req.as_ref().map_or(false, |v| *v != cur_started);
+    let completed_explicit = completed_req.as_ref().map_or(false, |v| *v != cur_completed);
+    let mut started_at = match started_req {
+        Some(v) if started_explicit => v,
+        _ => cur_started,
+    };
+    let mut completed_at = match completed_req {
+        Some(v) if completed_explicit => v,
+        _ => cur_completed,
+    };
+    if !started_explicit && started_at.is_none() && old_progress == 0 && progress >= 1 {
+        started_at = Some(today.to_string());
+    }
+    if entering_completed {
+        if !completed_explicit {
+            completed_at = Some(today.to_string());
+        }
+        if !started_explicit && started_at.is_none() {
+            started_at = Some(today.to_string());
+        }
+    }
+
+    let custom_folder = match &change.custom_folder {
+        Some(v) => clean_opt(v.as_deref()),
+        None => current.custom_folder.clone(),
+    };
+
+    Ok(ResolvedState {
+        user_status: status,
+        user_progress: progress,
+        user_score: score,
+        user_repeats: repeats,
+        user_notes: notes,
+        user_started_at: started_at,
+        user_completed_at: completed_at,
+        custom_folder,
+        synonyms: change.synonyms.clone(),
+    })
+}
+
+/// Local calendar date (`YYYY-MM-DD`) used for automatic start/completion dates.
+pub fn today_string() -> String {
+    chrono::Local::now().format("%Y-%m-%d").to_string()
+}
+
+fn has_token(settings: &AppSettings) -> bool {
+    !settings.anilist_token.trim().is_empty()
+}
+
+/// Blocking: normalize + write one change. Rematches local episodes if folder/synonyms changed.
+/// `sync_pending` only takes effect when a user field actually changed.
+pub fn write_local_change(
+    db: &Database,
+    change: &UserStateChange,
+    today: &str,
+    sync_pending: bool,
+) -> Result<AnimeEntry, String> {
+    let current = db.get_anime_entry_by_id(change.anime_id)?;
+    let st = normalize_change(&current, change, today)?;
+    let (mut entry, needs_rematch) = db.update_anime_user_state(
+        change.anime_id,
+        &st.user_status,
+        st.user_progress,
+        st.user_score,
+        st.user_repeats,
+        &st.user_notes,
+        st.custom_folder.clone(),
+        st.synonyms.clone(),
+        Some(st.user_started_at.clone().unwrap_or_default()),
+        Some(st.user_completed_at.clone().unwrap_or_default()),
+        sync_pending,
+    )?;
+    if needs_rematch {
+        let _ = db.rematch_all_local_episodes();
+        entry = db.get_anime_entry_by_id(change.anime_id)?;
+    }
+    Ok(entry)
+}
+
+/// Blocking: normalize every id of a batch patch and write all states in one transaction.
+/// Unknown ids are skipped; an invalid patch (bad status/date) rejects the whole batch.
+pub fn write_batch_change(
+    db: &Database,
+    patch: &BatchAnimeUpdatePatch,
+    today: &str,
+    sync_pending: bool,
+) -> Result<Vec<AnimeEntry>, String> {
+    let mut states = Vec::with_capacity(patch.anime_ids.len());
+    for &id in &patch.anime_ids {
+        let Ok(current) = db.get_anime_entry_by_id(id) else {
+            continue;
+        };
+        let change = UserStateChange::from_batch_patch(patch, id);
+        states.push((id, normalize_change(&current, &change, today)?));
+    }
+    if db.write_resolved_states(&states, sync_pending)? {
+        let _ = db.rematch_all_local_episodes();
+    }
+    Ok(states
+        .iter()
+        .filter_map(|(id, _)| db.get_anime_entry_by_id(*id).ok())
+        .collect())
+}
+
+// ---------------------------------------------------------------------------------------------
+// Summaries
+// ---------------------------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SyncSummary {
+    pub added: usize,
+    pub updated_from_remote: usize,
+    pub kept_local: usize,
+    pub deleted: usize,
+    pub pushed: usize,
+    pub push_failed: usize,
+    pub remote_deleted: usize,
+    pub deletion_skipped_reason: Option<String>,
+    pub entries: Vec<AnimeEntry>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SyncStatus {
+    pub in_progress: bool,
+    pub last_synced_at: Option<i64>,
+    pub pending_count: usize,
+    pub pending_deletions: usize,
+}
+
+#[derive(Debug, Default)]
+struct FlushOutcome {
+    succeeded: usize,
+    failed: usize,
+    /// Set when the token was rejected; flushing stops at the first such error.
+    auth_error: Option<TrackerError>,
+}
+
+struct PullFailure {
+    error: TrackerError,
+    /// `tracker-auth-invalid` was already emitted (from a per-entry error).
+    auth_reported: bool,
+}
+
+struct InProgressGuard<'a>(&'a AtomicBool);
+
+impl Drop for InProgressGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Service
+// ---------------------------------------------------------------------------------------------
+
+pub struct TrackerSyncService {
+    db: Arc<Database>,
+    plugins: Arc<PluginManager>,
+    emit: SyncEmitter,
+    active_session: Arc<Mutex<Option<DetectedMediaSession>>>,
+    /// Serializes everything that talks to the tracker (pushes, deletion flushes, pulls).
+    op_lock: tokio::sync::Mutex<()>,
+    limiter: RateLimiter,
+    in_progress: AtomicBool,
+    last_synced_at: Mutex<Option<i64>>,
+}
+
+impl TrackerSyncService {
+    pub fn new(
+        db: Arc<Database>,
+        plugins: Arc<PluginManager>,
+        emit: SyncEmitter,
+        active_session: Arc<Mutex<Option<DetectedMediaSession>>>,
+    ) -> Self {
+        Self {
+            db,
+            plugins,
+            emit,
+            active_session,
+            op_lock: tokio::sync::Mutex::new(()),
+            limiter: RateLimiter::new(MIN_REQUEST_INTERVAL),
+            in_progress: AtomicBool::new(false),
+            last_synced_at: Mutex::new(None),
+        }
+    }
+
+    /// Override the minimum spacing between tracker requests (tests).
+    pub fn with_min_request_interval(mut self, interval: Duration) -> Self {
+        self.limiter = RateLimiter::new(interval);
+        self
+    }
+
+    async fn blocking<T, F>(&self, f: F) -> Result<T, String>
+    where
+        F: FnOnce(&Database) -> Result<T, String> + Send + 'static,
+        T: Send + 'static,
+    {
+        let db = self.db.clone();
+        tokio::task::spawn_blocking(move || f(&db))
+            .await
+            .map_err(|e| e.to_string())?
+    }
+
+    async fn current_token(&self) -> Result<Option<String>, String> {
+        let settings = self.blocking(|db| db.get_settings()).await?;
+        let tok = settings.anilist_token.trim().to_string();
+        Ok(if tok.is_empty() { None } else { Some(tok) })
+    }
+
+    fn plugin(&self) -> Result<Arc<dyn TrackerPlugin>, TrackerError> {
+        self.plugins
+            .get(TRACKER_PLUGIN_ID)
+            .ok_or_else(|| TrackerError::Api("AniList tracker plugin is not registered".into()))
+    }
+
+    fn emit(&self, event: &str, payload: Value) {
+        (self.emit)(event, payload);
+    }
+
+    fn emit_entry_error(
+        &self,
+        anime_id: Option<i64>,
+        media_id: Option<i64>,
+        title: &str,
+        err: &TrackerError,
+        operation: &str,
+    ) {
+        self.emit(
+            EVENT_SYNC_ERROR,
+            json!({
+                "anime_id": anime_id,
+                "media_id": media_id,
+                "title": title,
+                "kind": err.kind(),
+                "message": err.to_string(),
+                "operation": operation,
+            }),
+        );
+        if matches!(err, TrackerError::Unauthorized(_)) {
+            self.emit(EVENT_AUTH_INVALID, json!({ "message": err.to_string() }));
+        }
+    }
+
+    /// Mirror updated entries into the active playback session. Locks `active_session` briefly:
+    /// callers must NOT hold that lock when calling any service method.
+    fn sync_active_session(&self, entries: &[AnimeEntry]) {
+        if let Ok(mut guard) = self.active_session.lock() {
+            if let Some(session) = guard.as_mut() {
+                if let Some(matched) = session.matched_anime_id {
+                    if let Some(e) = entries.iter().find(|e| e.id == matched) {
+                        session.matched_current_progress = Some(e.user_progress);
+                        session.matched_total_episodes = e.episodes;
+                    }
+                }
+            }
+        }
+    }
+
+    fn unmatch_active_session(&self, deleted_ids: &[i64]) {
+        if let Ok(mut guard) = self.active_session.lock() {
+            if let Some(session) = guard.as_mut() {
+                if session
+                    .matched_anime_id
+                    .map_or(false, |id| deleted_ids.contains(&id))
+                {
+                    session.matched_anime_id = None;
+                    session.matched_anime_title = None;
+                    session.matched_cover_image = None;
+                    session.matched_current_progress = None;
+                    session.matched_total_episodes = None;
+                    session.elapsed_seconds = 0;
+                    session.auto_synced = false;
+                }
+            }
+        }
+    }
+
+    // ----------------------------------------------------------------- local mutations (push)
+
+    /// Apply one user-state change locally and, when signed in, push it to AniList in the background.
+    /// Returns the updated entry immediately. Callers must not hold the `active_session` lock.
+    pub async fn apply_local_update(
+        self: &Arc<Self>,
+        change: UserStateChange,
+    ) -> Result<AnimeEntry, String> {
+        self.apply_local_update_with_history(change, None).await
+    }
+
+    /// Like [`apply_local_update`](Self::apply_local_update); on a successful push the given
+    /// `watch_history` row is marked as scrobbled (used by the auto-scrobbler).
+    pub async fn apply_local_update_with_history(
+        self: &Arc<Self>,
+        change: UserStateChange,
+        history_id: Option<i64>,
+    ) -> Result<AnimeEntry, String> {
+        let today = today_string();
+        let (entry, signed_in) = self
+            .blocking(move |db| {
+                let signed_in = has_token(&db.get_settings()?);
+                let entry = write_local_change(db, &change, &today, signed_in)?;
+                Ok((entry, signed_in))
+            })
+            .await?;
+
+        self.sync_active_session(std::slice::from_ref(&entry));
+
+        if signed_in && entry.sync_pending && entry.anilist_id.is_some() {
+            let this = Arc::clone(self);
+            let id = entry.id;
+            tokio::spawn(async move {
+                this.push_entry_with_history(id, history_id).await;
+            });
+        }
+        Ok(entry)
+    }
+
+    /// Apply a batch patch (all ids in one transaction), then push the changed entries sequentially.
+    pub async fn apply_batch(
+        self: &Arc<Self>,
+        patch: BatchAnimeUpdatePatch,
+    ) -> Result<Vec<AnimeEntry>, String> {
+        let today = today_string();
+        let (entries, signed_in) = self
+            .blocking(move |db| {
+                let signed_in = has_token(&db.get_settings()?);
+                let entries = write_batch_change(db, &patch, &today, signed_in)?;
+                Ok((entries, signed_in))
+            })
+            .await?;
+
+        self.sync_active_session(&entries);
+
+        if signed_in {
+            let ids: Vec<i64> = entries
+                .iter()
+                .filter(|e| e.sync_pending && e.anilist_id.is_some())
+                .map(|e| e.id)
+                .collect();
+            if !ids.is_empty() {
+                let this = Arc::clone(self);
+                tokio::spawn(async move {
+                    for id in ids {
+                        this.push_entry(id).await;
+                    }
+                });
+            }
+        }
+        Ok(entries)
+    }
+
+    /// Add an anime (e.g. from Discover). Requires an AniList id. If it is already in the list, its user
+    /// state is kept and only metadata is refreshed (no push). Otherwise it is inserted with normalized
+    /// status/dates and pushed. Returns the full list.
+    pub async fn add_entry(self: &Arc<Self>, entry: AnimeEntry) -> Result<Vec<AnimeEntry>, String> {
+        let media_id = entry
+            .anilist_id
+            .ok_or_else(|| "Cannot add an anime without an AniList id".to_string())?;
+        let today = today_string();
+        let (list, push_id) = self
+            .blocking(move |db| {
+                let signed_in = has_token(&db.get_settings()?);
+                let mut entry = entry;
+                let push_id = if let Some(existing_id) = db.find_entry_id_by_anilist_id(media_id)? {
+                    entry.id = existing_id;
+                    db.refresh_entry_metadata(&entry)?;
+                    None
+                } else {
+                    entry.id = media_id;
+                    let mut base = entry.clone();
+                    base.user_status = STATUS_PLANNING.into();
+                    base.user_progress = 0;
+                    base.user_score = 0.0;
+                    base.user_repeats = 0;
+                    base.user_notes = String::new();
+                    base.user_started_at = None;
+                    base.user_completed_at = None;
+                    let change = UserStateChange {
+                        anime_id: media_id,
+                        status: Some(entry.user_status.clone()),
+                        progress: Some(entry.user_progress),
+                        score: Some(entry.user_score),
+                        repeats: Some(entry.user_repeats),
+                        notes: Some(entry.user_notes.clone()),
+                        started_at: entry.user_started_at.clone(),
+                        completed_at: entry.user_completed_at.clone(),
+                        source: ChangeSource::Add,
+                        ..Default::default()
+                    };
+                    let st = normalize_change(&base, &change, &today)?;
+                    entry.user_status = st.user_status;
+                    entry.user_progress = st.user_progress;
+                    entry.user_score = st.user_score;
+                    entry.user_repeats = st.user_repeats;
+                    entry.user_notes = st.user_notes;
+                    entry.user_started_at = st.user_started_at;
+                    entry.user_completed_at = st.user_completed_at;
+                    entry.updated_at = chrono::Utc::now().timestamp();
+                    entry.sync_pending = signed_in;
+                    db.upsert_anime_entry(&entry)?;
+                    if signed_in {
+                        Some(media_id)
+                    } else {
+                        None
+                    }
+                };
+                let id = entry.id;
+                let _ = db.match_unmatched_episodes_for_anime(id);
+                Ok((db.list_anime_entries()?, push_id))
+            })
+            .await?;
+
+        if let Some(id) = push_id {
+            let this = Arc::clone(self);
+            tokio::spawn(async move {
+                this.push_entry(id).await;
+            });
+        }
+        Ok(list)
+    }
+
+    /// Delete entries locally right away. When signed in, a tombstone per entry queues the AniList delete
+    /// (flushed in the background now, retried on the next pull). Returns the full list.
+    pub async fn delete_entries(self: &Arc<Self>, ids: Vec<i64>) -> Result<Vec<AnimeEntry>, String> {
+        let deleted_ids = ids.clone();
+        let (list, queued) = self
+            .blocking(move |db| {
+                let signed_in = has_token(&db.get_settings()?);
+                let queued = if signed_in {
+                    !db.delete_entries_with_tombstones(&ids)?.is_empty()
+                } else {
+                    db.batch_delete_anime_entries(&ids)?;
+                    false
+                };
+                Ok((db.list_anime_entries()?, queued))
+            })
+            .await?;
+
+        self.unmatch_active_session(&deleted_ids);
+
+        if queued {
+            let this = Arc::clone(self);
+            tokio::spawn(async move {
+                let _ = this.flush_deletions().await;
+            });
+        }
+        Ok(list)
+    }
+
+    // ----------------------------------------------------------------- tracker I/O
+
+    /// Push one entry's current state to AniList. Returns `true` if a save succeeded.
+    /// Skips entries that are gone or no longer pending (already pushed by an earlier call).
+    pub async fn push_entry(&self, anime_id: i64) -> bool {
+        self.push_entry_with_history(anime_id, None).await
+    }
+
+    /// [`push_entry`](Self::push_entry) that also marks `history_id` as scrobbled once the state is on AniList.
+    pub async fn push_entry_with_history(&self, anime_id: i64, history_id: Option<i64>) -> bool {
+        let _op = self.op_lock.lock().await;
+        let Ok(Some(token)) = self.current_token().await else {
+            return false;
+        };
+        matches!(
+            self.push_entry_inner(anime_id, history_id, &token).await,
+            Ok(true)
+        )
+    }
+
+    /// `Ok(true)` pushed, `Ok(false)` nothing to do, `Err` failed (already reported via events).
+    async fn push_entry_inner(
+        &self,
+        anime_id: i64,
+        history_id: Option<i64>,
+        token: &str,
+    ) -> Result<bool, TrackerError> {
+        let Ok(entry) = self
+            .blocking(move |db| db.get_anime_entry_by_id(anime_id))
+            .await
+        else {
+            return Ok(false);
+        };
+
+        if !entry.sync_pending {
+            if let Some(h) = history_id {
+                let _ = self
+                    .blocking(move |db| db.mark_watch_history_scrobbled(h))
+                    .await;
+            }
+            return Ok(false);
+        }
+        let Some(media_id) = entry.anilist_id else {
+            let _ = self
+                .blocking(move |db| db.set_sync_result(anime_id, false, None, None))
+                .await;
+            return Ok(false);
+        };
+
+        let update = TrackerEntryUpdate {
+            media_id,
+            status: entry.user_status.clone(),
+            progress: entry.user_progress,
+            score: entry.user_score,
+            repeat: entry.user_repeats,
+            notes: entry.user_notes.clone(),
+            started_at: clean_opt(entry.user_started_at.as_deref()),
+            completed_at: clean_opt(entry.user_completed_at.as_deref()),
+        };
+
+        let result = match self.plugin() {
+            Ok(plugin) => {
+                self.limiter
+                    .run(|| plugin.save_list_entry(token, &update))
+                    .await
+            }
+            Err(e) => Err(e),
+        };
+
+        match result {
+            Ok(remote) => {
+                let pushed = entry.clone();
+                let refreshed = self
+                    .blocking(move |db| {
+                        db.finish_push(&pushed, remote.updated_at, remote.list_entry_id)?;
+                        if let Some(h) = history_id {
+                            db.mark_watch_history_scrobbled(h)?;
+                        }
+                        db.get_anime_entry_by_id(anime_id)
+                    })
+                    .await;
+                if let Ok(updated) = refreshed {
+                    self.emit(EVENT_ENTRY_SYNCED, json!({ "entry": updated }));
+                }
+                Ok(true)
+            }
+            Err(err) => {
+                let _ = self
+                    .blocking(move |db| db.set_sync_result(anime_id, true, None, None))
+                    .await;
+                self.emit_entry_error(
+                    Some(anime_id),
+                    Some(media_id),
+                    &entry.title_romaji,
+                    &err,
+                    "save",
+                );
+                Err(err)
+            }
+        }
+    }
+
+    async fn flush_pending_inner(&self, token: &str) -> FlushOutcome {
+        let mut out = FlushOutcome::default();
+        let ids = match self.blocking(|db| db.list_pending_sync_ids()).await {
+            Ok(ids) => ids,
+            Err(_) => return out,
+        };
+        let total = ids.len();
+        for (i, id) in ids.into_iter().enumerate() {
+            match self.push_entry_inner(id, None, token).await {
+                Ok(true) => out.succeeded += 1,
+                Ok(false) => {}
+                Err(e @ TrackerError::Unauthorized(_)) => {
+                    out.failed += total - i;
+                    out.auth_error = Some(e);
+                    break;
+                }
+                Err(_) => out.failed += 1,
+            }
+        }
+        out
+    }
+
+    async fn flush_deletions_inner(&self, token: &str) -> FlushOutcome {
+        let mut out = FlushOutcome::default();
+        let tombstones = match self.blocking(|db| db.list_pending_deletions()).await {
+            Ok(t) => t,
+            Err(_) => return out,
+        };
+        if tombstones.is_empty() {
+            return out;
+        }
+        let plugin = match self.plugin() {
+            Ok(p) => p,
+            Err(e) => {
+                out.failed = tombstones.len();
+                for t in &tombstones {
+                    self.emit_entry_error(None, Some(t.media_id), &t.title, &e, "delete");
+                }
+                return out;
+            }
+        };
+        let total = tombstones.len();
+        for (i, t) in tombstones.into_iter().enumerate() {
+            let res = self
+                .limiter
+                .run(|| plugin.delete_list_entry(token, t.media_id, t.list_entry_id))
+                .await;
+            match res {
+                Ok(()) => {
+                    let media_id = t.media_id;
+                    let _ = self
+                        .blocking(move |db| db.remove_pending_deletion(media_id))
+                        .await;
+                    out.succeeded += 1;
+                }
+                Err(err) => {
+                    self.emit_entry_error(None, Some(t.media_id), &t.title, &err, "delete");
+                    if matches!(err, TrackerError::Unauthorized(_)) {
+                        out.failed += total - i;
+                        out.auth_error = Some(err);
+                        break;
+                    }
+                    out.failed += 1;
+                }
+            }
+        }
+        out
+    }
+
+    /// Retry every entry with `sync_pending`. Returns `(pushed, failed)`.
+    pub async fn flush_pending(&self) -> Result<(usize, usize), String> {
+        let _op = self.op_lock.lock().await;
+        let token = self
+            .current_token()
+            .await?
+            .ok_or_else(|| "Not signed in to AniList".to_string())?;
+        let out = self.flush_pending_inner(&token).await;
+        Ok((out.succeeded, out.failed))
+    }
+
+    /// Retry every queued AniList deletion (tombstone). Returns `(deleted, failed)`.
+    pub async fn flush_deletions(&self) -> Result<(usize, usize), String> {
+        let _op = self.op_lock.lock().await;
+        let token = self
+            .current_token()
+            .await?
+            .ok_or_else(|| "Not signed in to AniList".to_string())?;
+        let out = self.flush_deletions_inner(&token).await;
+        Ok((out.succeeded, out.failed))
+    }
+
+    /// Full two-way sync: flush queued deletions and pushes, fetch the AniList list and merge it
+    /// (newest wins; remote-missing entries are deleted unless pending). Never runs two pulls at once:
+    /// a pull requested while one is running waits for it and returns the resulting list without
+    /// fetching again (counts are zero).
+    pub async fn pull(&self, reason: &str) -> Result<SyncSummary, String> {
+        let settings = self.blocking(|db| db.get_settings()).await?;
+        let token = settings.anilist_token.trim().to_string();
+        if token.is_empty() {
+            return Err("Not signed in to AniList".into());
+        }
+
+        if self
+            .in_progress
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            let _op = self.op_lock.lock().await;
+            let entries = self.blocking(|db| db.list_anime_entries()).await?;
+            return Ok(SyncSummary {
+                entries,
+                ..Default::default()
+            });
+        }
+        let progress_guard = InProgressGuard(&self.in_progress);
+        self.emit(EVENT_SYNC_STARTED, json!({ "reason": reason }));
+
+        let op = self.op_lock.lock().await;
+        let result = self.pull_inner(&token, settings.anilist_user_id).await;
+        drop(op);
+        drop(progress_guard);
+
+        match result {
+            Ok(summary) => {
+                if let Ok(mut last) = self.last_synced_at.lock() {
+                    *last = Some(chrono::Utc::now().timestamp());
+                }
+                self.emit(
+                    EVENT_LIST_SYNCED,
+                    serde_json::to_value(&summary).unwrap_or(Value::Null),
+                );
+                Ok(summary)
+            }
+            Err(PullFailure {
+                error,
+                auth_reported,
+            }) => {
+                let message = error.to_string();
+                self.emit(
+                    EVENT_SYNC_FAILED,
+                    json!({ "reason": reason, "message": message }),
+                );
+                if matches!(error, TrackerError::Unauthorized(_)) && !auth_reported {
+                    self.emit(EVENT_AUTH_INVALID, json!({ "message": message }));
+                }
+                Err(message)
+            }
+        }
+    }
+
+    async fn pull_inner(
+        &self,
+        token: &str,
+        expected_user_id: Option<i64>,
+    ) -> Result<SyncSummary, PullFailure> {
+        let deletions = self.flush_deletions_inner(token).await;
+        if let Some(error) = deletions.auth_error {
+            return Err(PullFailure {
+                error,
+                auth_reported: true,
+            });
+        }
+        let pushes = self.flush_pending_inner(token).await;
+        if let Some(error) = pushes.auth_error {
+            return Err(PullFailure {
+                error,
+                auth_reported: true,
+            });
+        }
+
+        let plugin = self.plugin().map_err(|error| PullFailure {
+            error,
+            auth_reported: false,
+        })?;
+        let snapshot = self
+            .limiter
+            .run(|| plugin.fetch_user_list(token))
+            .await
+            .map_err(|error| PullFailure {
+                error,
+                auth_reported: false,
+            })?;
+
+        let mut delete_missing = true;
+        let mut skipped_reason = None;
+        if let Some(uid) = expected_user_id {
+            if uid != snapshot.viewer_id {
+                delete_missing = false;
+                skipped_reason = Some(format!(
+                    "AniList account mismatch (signed-in viewer {} vs stored user {}); skipped deleting local entries",
+                    snapshot.viewer_id, uid
+                ));
+            }
+        }
+
+        let remote_entries = snapshot.entries;
+        let (stats, entries) = self
+            .blocking(move |db| {
+                let skip: HashSet<i64> = db
+                    .list_pending_deletions()?
+                    .into_iter()
+                    .map(|t| t.media_id)
+                    .collect();
+                let stats = db.merge_remote_list(&remote_entries, &skip, delete_missing)?;
+                let _ = db.rematch_all_local_episodes();
+                Ok((stats, db.list_anime_entries()?))
+            })
+            .await
+            .map_err(|m| PullFailure {
+                error: TrackerError::Api(format!("Failed to merge AniList list: {}", m)),
+                auth_reported: false,
+            })?;
+
+        self.sync_active_session(&entries);
+
+        Ok(SyncSummary {
+            added: stats.added,
+            updated_from_remote: stats.updated_from_remote,
+            kept_local: stats.kept_local,
+            deleted: stats.deleted,
+            pushed: pushes.succeeded,
+            push_failed: pushes.failed,
+            remote_deleted: deletions.succeeded,
+            deletion_skipped_reason: skipped_reason.or(stats.deletion_skipped_reason),
+            entries,
+        })
+    }
+
+    /// Current sync state. Does two quick COUNT queries on the DB connection.
+    pub fn status(&self) -> SyncStatus {
+        SyncStatus {
+            in_progress: self.in_progress.load(Ordering::SeqCst),
+            last_synced_at: self.last_synced_at.lock().ok().and_then(|g| *g),
+            pending_count: self.db.count_pending().unwrap_or(0),
+            pending_deletions: self.db.count_pending_deletions().unwrap_or(0),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::test_entry;
+    use crate::plugins::{BoxFuture, RemoteEntryState, RemoteListSnapshot, TrackerUserProfile};
+
+    const TODAY: &str = "2026-10-27";
+
+    fn entry(status: &str, progress: u32, episodes: Option<u32>) -> AnimeEntry {
+        let mut e = test_entry(1, "Test");
+        e.user_status = status.into();
+        e.user_progress = progress;
+        e.episodes = episodes;
+        e
+    }
+
+    fn step(progress: u32) -> UserStateChange {
+        UserStateChange {
+            anime_id: 1,
+            progress: Some(progress),
+            source: ChangeSource::Step,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn planning_to_current_and_started_today_on_first_episode() {
+        let st = normalize_change(&entry("PLANNING", 0, Some(12)), &step(1), TODAY).unwrap();
+        assert_eq!(st.user_status, "CURRENT");
+        assert_eq!(st.user_progress, 1);
+        assert_eq!(st.user_started_at.as_deref(), Some(TODAY));
+        assert_eq!(st.user_completed_at, None);
+    }
+
+    #[test]
+    fn completed_at_total_with_completed_today() {
+        let mut cur = entry("CURRENT", 11, Some(12));
+        cur.user_started_at = Some("2026-01-01".into());
+        let st = normalize_change(&cur, &step(12), TODAY).unwrap();
+        assert_eq!(st.user_status, "COMPLETED");
+        assert_eq!(st.user_completed_at.as_deref(), Some(TODAY));
+        // started_at is never overwritten once set
+        assert_eq!(st.user_started_at.as_deref(), Some("2026-01-01"));
+
+        // Straight to completed with no start date: both dates today
+        let st = normalize_change(&entry("PLANNING", 0, Some(12)), &step(12), TODAY).unwrap();
+        assert_eq!(st.user_status, "COMPLETED");
+        assert_eq!(st.user_started_at.as_deref(), Some(TODAY));
+        assert_eq!(st.user_completed_at.as_deref(), Some(TODAY));
+    }
+
+    #[test]
+    fn started_not_overwritten_and_no_autodate_after_first_episode() {
+        let mut cur = entry("CURRENT", 3, Some(12));
+        cur.user_started_at = Some("2025-05-05".into());
+        let st = normalize_change(&cur, &step(4), TODAY).unwrap();
+        assert_eq!(st.user_started_at.as_deref(), Some("2025-05-05"));
+
+        // progress 3 -> 4 with no start date does not invent one (only 0 -> >=1 does)
+        let st = normalize_change(&entry("CURRENT", 3, Some(12)), &step(4), TODAY).unwrap();
+        assert_eq!(st.user_started_at, None);
+    }
+
+    #[test]
+    fn explicit_dates_win_over_auto_dates() {
+        let change = UserStateChange {
+            anime_id: 1,
+            progress: Some(12),
+            started_at: Some("2026-02-02".into()),
+            completed_at: Some("2026-03-03".into()),
+            ..Default::default()
+        };
+        let st = normalize_change(&entry("CURRENT", 0, Some(12)), &change, TODAY).unwrap();
+        assert_eq!(st.user_status, "COMPLETED");
+        assert_eq!(st.user_started_at.as_deref(), Some("2026-02-02"));
+        assert_eq!(st.user_completed_at.as_deref(), Some("2026-03-03"));
+
+        // Explicit clear wins too
+        let mut cur = entry("CURRENT", 0, Some(12));
+        cur.user_started_at = Some("2026-01-01".into());
+        let change = UserStateChange {
+            anime_id: 1,
+            progress: Some(1),
+            started_at: Some(String::new()),
+            ..Default::default()
+        };
+        let st = normalize_change(&cur, &change, TODAY).unwrap();
+        assert_eq!(st.user_started_at, None);
+
+        // Modal re-sending the unchanged (empty) date is not explicit: auto date applies
+        let change = UserStateChange {
+            anime_id: 1,
+            progress: Some(1),
+            started_at: Some(String::new()),
+            completed_at: Some(String::new()),
+            ..Default::default()
+        };
+        let st = normalize_change(&entry("PLANNING", 0, Some(12)), &change, TODAY).unwrap();
+        assert_eq!(st.user_started_at.as_deref(), Some(TODAY));
+    }
+
+    #[test]
+    fn repeating_to_completed_increments_repeats() {
+        let mut cur = entry("REPEATING", 11, Some(12));
+        cur.user_repeats = 1;
+        cur.user_started_at = Some("2020-01-01".into());
+        cur.user_completed_at = Some("2020-03-01".into());
+        let st = normalize_change(&cur, &step(12), TODAY).unwrap();
+        assert_eq!(st.user_status, "COMPLETED");
+        assert_eq!(st.user_repeats, 2);
+        assert_eq!(st.user_completed_at.as_deref(), Some(TODAY));
+        assert_eq!(st.user_started_at.as_deref(), Some("2020-01-01"));
+    }
+
+    #[test]
+    fn progress_is_clamped() {
+        let st = normalize_change(&entry("CURRENT", 5, Some(12)), &step(40), TODAY).unwrap();
+        assert_eq!(st.user_progress, 12);
+        let change = UserStateChange {
+            anime_id: 1,
+            progress_delta: Some(-10),
+            ..Default::default()
+        };
+        let st = normalize_change(&entry("CURRENT", 5, Some(12)), &change, TODAY).unwrap();
+        assert_eq!(st.user_progress, 0);
+        // Unknown total: no upper clamp, no auto-complete
+        let st = normalize_change(&entry("CURRENT", 5, None), &step(40), TODAY).unwrap();
+        assert_eq!(st.user_progress, 40);
+        assert_eq!(st.user_status, "CURRENT");
+        // Score clamp
+        let change = UserStateChange {
+            anime_id: 1,
+            score: Some(250.0),
+            ..Default::default()
+        };
+        let st = normalize_change(&entry("CURRENT", 5, Some(12)), &change, TODAY).unwrap();
+        assert_eq!(st.user_score, 100.0);
+    }
+
+    #[test]
+    fn explicit_status_is_not_rederived() {
+        let change = UserStateChange {
+            anime_id: 1,
+            status: Some("PAUSED".into()),
+            progress: Some(12),
+            ..Default::default()
+        };
+        let st = normalize_change(&entry("CURRENT", 3, Some(12)), &change, TODAY).unwrap();
+        assert_eq!(st.user_status, "PAUSED");
+        assert_eq!(st.user_completed_at, None);
+
+        // Same status re-sent by the modal counts as unchanged -> derivation applies
+        let change = UserStateChange {
+            anime_id: 1,
+            status: Some("CURRENT".into()),
+            progress: Some(12),
+            ..Default::default()
+        };
+        let st = normalize_change(&entry("CURRENT", 3, Some(12)), &change, TODAY).unwrap();
+        assert_eq!(st.user_status, "COMPLETED");
+
+        // Editing notes on an entry already at total does not flip status
+        let change = UserStateChange {
+            anime_id: 1,
+            notes: Some("hi".into()),
+            ..Default::default()
+        };
+        let st = normalize_change(&entry("CURRENT", 12, Some(12)), &change, TODAY).unwrap();
+        assert_eq!(st.user_status, "CURRENT");
+        assert_eq!(st.user_completed_at, None);
+    }
+
+    #[test]
+    fn invalid_status_and_dates_are_rejected() {
+        let cur = entry("CURRENT", 3, Some(12));
+        let bad_status = UserStateChange {
+            anime_id: 1,
+            status: Some("WATCHING".into()),
+            ..Default::default()
+        };
+        assert!(normalize_change(&cur, &bad_status, TODAY).is_err());
+        for bad in ["2026/01/01", "2026-13-01", "26-01-01", "2026-02-30", "yesterday"] {
+            let change = UserStateChange {
+                anime_id: 1,
+                started_at: Some(bad.into()),
+                ..Default::default()
+            };
+            assert!(normalize_change(&cur, &change, TODAY).is_err(), "{bad}");
+        }
+        let lower = UserStateChange {
+            anime_id: 1,
+            status: Some("dropped".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            normalize_change(&cur, &lower, TODAY).unwrap().user_status,
+            "DROPPED"
+        );
+    }
+
+    #[test]
+    fn batch_patch_goes_through_normalization() {
+        let db = Database::open_in_memory().unwrap();
+        let mut a = test_entry(1, "Alpha");
+        a.episodes = Some(24);
+        a.user_notes = "Queued.".into();
+        let mut b = test_entry(2, "Beta");
+        b.episodes = Some(12);
+        b.user_status = "CURRENT".into();
+        b.user_progress = 11;
+        db.upsert_anime_entries_batch(&[a, b]).unwrap();
+
+        let patch = BatchAnimeUpdatePatch {
+            anime_ids: vec![1, 2, 999],
+            user_status: None,
+            user_progress: None,
+            progress_delta: Some(2),
+            mark_completed_progress: None,
+            user_score: Some(88.0),
+            user_repeats: None,
+            user_notes: Some("Watching seasonal".into()),
+            notes_mode: Some("append".into()),
+            user_started_at: None,
+            user_completed_at: None,
+        };
+        let updated = write_batch_change(&db, &patch, TODAY, true).unwrap();
+        assert_eq!(updated.len(), 2);
+        let a = db.get_anime_entry_by_id(1).unwrap();
+        assert_eq!(a.user_status, "CURRENT");
+        assert_eq!(a.user_progress, 2);
+        assert_eq!(a.user_score, 88.0);
+        assert_eq!(a.user_notes, "Queued.\nWatching seasonal");
+        assert_eq!(a.user_started_at.as_deref(), Some(TODAY));
+        assert!(a.sync_pending);
+        let b = db.get_anime_entry_by_id(2).unwrap();
+        assert_eq!(b.user_progress, 12);
+        assert_eq!(b.user_status, "COMPLETED");
+        assert_eq!(b.user_completed_at.as_deref(), Some(TODAY));
+
+        let clear_patch = BatchAnimeUpdatePatch {
+            anime_ids: vec![1],
+            user_status: None,
+            user_progress: None,
+            progress_delta: None,
+            mark_completed_progress: Some(true),
+            user_score: None,
+            user_repeats: None,
+            user_notes: None,
+            notes_mode: None,
+            user_started_at: Some(String::new()),
+            user_completed_at: Some("2026-03-30".into()),
+        };
+        write_batch_change(&db, &clear_patch, TODAY, false).unwrap();
+        let a = db.get_anime_entry_by_id(1).unwrap();
+        assert_eq!(a.user_started_at, None);
+        assert_eq!(a.user_completed_at.as_deref(), Some("2026-03-30"));
+        assert_eq!(a.user_progress, 24);
+        assert_eq!(a.user_status, "COMPLETED");
+
+        let bad = BatchAnimeUpdatePatch {
+            user_status: Some("NOPE".into()),
+            ..clear_patch
+        };
+        assert!(write_batch_change(&db, &bad, TODAY, false).is_err());
+    }
+
+    // ------------------------------------------------------------- service tests (mock tracker)
+
+    #[derive(Default)]
+    struct MockTracker {
+        viewer_id: i64,
+        remote: Mutex<Vec<AnimeEntry>>,
+        saves: Mutex<Vec<TrackerEntryUpdate>>,
+        deletes: Mutex<Vec<(i64, Option<i64>)>>,
+        save_error: Mutex<Option<TrackerError>>,
+        fetch_error: Mutex<Option<TrackerError>>,
+    }
+
+    impl TrackerPlugin for MockTracker {
+        fn descriptor(&self) -> crate::plugins::TrackerPluginDescriptor {
+            unimplemented!()
+        }
+        fn verify_account<'a>(
+            &'a self,
+            _username: &'a str,
+            _token: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<TrackerUserProfile, String>> {
+            Box::pin(async { Err("mock".to_string()) })
+        }
+        fn fetch_user_list<'a>(
+            &'a self,
+            _token: &'a str,
+        ) -> BoxFuture<'a, Result<RemoteListSnapshot, TrackerError>> {
+            Box::pin(async move {
+                if let Some(e) = self.fetch_error.lock().unwrap().clone() {
+                    return Err(e);
+                }
+                Ok(RemoteListSnapshot {
+                    viewer_id: self.viewer_id,
+                    entries: self.remote.lock().unwrap().clone(),
+                })
+            })
+        }
+        fn search_anime<'a>(
+            &'a self,
+            _query: &'a str,
+            _season: Option<&'a str>,
+            _year: Option<u32>,
+        ) -> BoxFuture<'a, Result<Vec<AnimeEntry>, String>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+        fn save_list_entry<'a>(
+            &'a self,
+            _token: &'a str,
+            update: &'a TrackerEntryUpdate,
+        ) -> BoxFuture<'a, Result<RemoteEntryState, TrackerError>> {
+            Box::pin(async move {
+                if let Some(e) = self.save_error.lock().unwrap().clone() {
+                    return Err(e);
+                }
+                self.saves.lock().unwrap().push(update.clone());
+                Ok(RemoteEntryState {
+                    list_entry_id: 5000 + update.media_id,
+                    status: update.status.clone(),
+                    progress: update.progress,
+                    updated_at: 1_900_000_000,
+                })
+            })
+        }
+        fn delete_list_entry<'a>(
+            &'a self,
+            _token: &'a str,
+            media_id: i64,
+            list_entry_id: Option<i64>,
+        ) -> BoxFuture<'a, Result<(), TrackerError>> {
+            Box::pin(async move {
+                self.deletes.lock().unwrap().push((media_id, list_entry_id));
+                Ok(())
+            })
+        }
+    }
+
+    type Events = Arc<Mutex<Vec<(String, Value)>>>;
+
+    fn service(db: Arc<Database>, mock: Arc<MockTracker>) -> (Arc<TrackerSyncService>, Events) {
+        let mut plugins = PluginManager::new();
+        plugins.register("anilist", mock);
+        let events: Events = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let emit: SyncEmitter = Arc::new(move |name: &str, payload: Value| {
+            sink.lock().unwrap().push((name.to_string(), payload));
+        });
+        let svc = TrackerSyncService::new(db, Arc::new(plugins), emit, Arc::new(Mutex::new(None)))
+            .with_min_request_interval(Duration::from_millis(0));
+        (Arc::new(svc), events)
+    }
+
+    fn sign_in(db: &Database, user_id: i64) {
+        let mut s = db.get_settings().unwrap();
+        s.anilist_token = "token".into();
+        s.anilist_user_id = Some(user_id);
+        db.save_settings(&s).unwrap();
+    }
+
+    fn names(events: &Events) -> Vec<String> {
+        events.lock().unwrap().iter().map(|(n, _)| n.clone()).collect()
+    }
+
+    async fn wait_until(mut cond: impl FnMut() -> bool) {
+        for _ in 0..200 {
+            if cond() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("condition not reached");
+    }
+
+    #[tokio::test]
+    async fn pull_flushes_queues_then_merges() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        sign_in(&db, 42);
+        let mut pending = test_entry(1, "Pending");
+        pending.user_status = "CURRENT".into();
+        pending.user_progress = 3;
+        pending.sync_pending = true;
+        let gone = test_entry(2, "Gone Remotely");
+        let mut to_delete = test_entry(3, "Deleted Locally");
+        to_delete.anilist_list_entry_id = Some(333);
+        db.upsert_anime_entries_batch(&[pending, gone, to_delete]).unwrap();
+        db.delete_entries_with_tombstones(&[3]).unwrap();
+
+        let mock = Arc::new(MockTracker {
+            viewer_id: 42,
+            ..Default::default()
+        });
+        let mut remote_pending = test_entry(1, "Pending");
+        remote_pending.user_progress = 1;
+        remote_pending.updated_at = 1_000;
+        let mut remote_new = test_entry(4, "New Remote");
+        remote_new.updated_at = 1_000;
+        // Remote still has the locally-deleted entry (its delete is flushed first, but the mock snapshot is static)
+        let remote_tomb = test_entry(3, "Deleted Locally");
+        *mock.remote.lock().unwrap() = vec![remote_pending, remote_new, remote_tomb];
+
+        let (svc, events) = service(db.clone(), mock.clone());
+        let summary = svc.pull("startup").await.unwrap();
+
+        assert_eq!(summary.remote_deleted, 1);
+        assert_eq!(summary.pushed, 1);
+        assert_eq!(summary.push_failed, 0);
+        assert_eq!(summary.added, 2); // entry 4, plus entry 3 again since its tombstone is gone
+        assert_eq!(summary.deleted, 1); // entry 2
+        assert_eq!(*mock.deletes.lock().unwrap(), vec![(3, Some(333))]);
+        assert_eq!(mock.saves.lock().unwrap()[0].progress, 3);
+
+        // Pushed entry: no longer pending, adopted remote updatedAt, kept local progress
+        let e1 = db.get_anime_entry_by_id(1).unwrap();
+        assert!(!e1.sync_pending);
+        assert_eq!(e1.user_progress, 3);
+        assert_eq!(e1.anilist_list_entry_id, Some(5001));
+        assert!(db.get_anime_entry_by_id(2).is_err());
+        assert_eq!(summary.entries.len(), 3);
+
+        let n = names(&events);
+        assert_eq!(n.first().map(String::as_str), Some(EVENT_SYNC_STARTED));
+        assert_eq!(n.last().map(String::as_str), Some(EVENT_LIST_SYNCED));
+        assert!(n.iter().any(|x| x == EVENT_ENTRY_SYNCED));
+        let status = svc.status();
+        assert!(!status.in_progress);
+        assert!(status.last_synced_at.is_some());
+        assert_eq!(status.pending_count, 0);
+        assert_eq!(status.pending_deletions, 0);
+    }
+
+    #[tokio::test]
+    async fn pull_skips_deletion_on_viewer_mismatch_and_requires_token() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let mock = Arc::new(MockTracker {
+            viewer_id: 7,
+            ..Default::default()
+        });
+        let (svc, _events) = service(db.clone(), mock.clone());
+        assert_eq!(
+            svc.pull("manual").await.unwrap_err(),
+            "Not signed in to AniList"
+        );
+
+        sign_in(&db, 42);
+        db.upsert_anime_entry(&test_entry(2, "Local")).unwrap();
+        *mock.remote.lock().unwrap() = vec![test_entry(9, "Other")];
+        let summary = svc.pull("manual").await.unwrap();
+        assert_eq!(summary.deleted, 0);
+        assert!(summary.deletion_skipped_reason.is_some());
+        assert!(db.get_anime_entry_by_id(2).is_ok());
+    }
+
+    #[tokio::test]
+    async fn failed_push_stays_pending_and_reports_auth() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        sign_in(&db, 42);
+        let mut e = test_entry(1, "Alpha");
+        e.episodes = Some(12);
+        db.upsert_anime_entry(&e).unwrap();
+        let mock = Arc::new(MockTracker {
+            viewer_id: 42,
+            ..Default::default()
+        });
+        *mock.save_error.lock().unwrap() = Some(TrackerError::Unauthorized("bad token".into()));
+        let (svc, events) = service(db.clone(), mock.clone());
+
+        let updated = svc.apply_local_update(step_for(1, 1)).await.unwrap();
+        assert!(updated.sync_pending);
+        assert_eq!(updated.user_status, "CURRENT");
+        wait_until(|| names(&events).iter().any(|n| n == EVENT_AUTH_INVALID)).await;
+        let n = names(&events);
+        assert!(n.iter().any(|x| x == EVENT_SYNC_ERROR));
+        let err = events
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(n, _)| n == EVENT_SYNC_ERROR)
+            .map(|(_, v)| v.clone())
+            .unwrap();
+        assert_eq!(err["kind"], "unauthorized");
+        assert_eq!(err["operation"], "save");
+        assert_eq!(err["anime_id"], 1);
+        assert!(db.get_anime_entry_by_id(1).unwrap().sync_pending);
+
+        // Pull aborts on the rejected token without a duplicate auth event
+        events.lock().unwrap().clear();
+        assert!(svc.pull("manual").await.is_err());
+        let n = names(&events);
+        assert!(n.iter().any(|x| x == EVENT_SYNC_FAILED));
+        assert_eq!(n.iter().filter(|x| *x == EVENT_AUTH_INVALID).count(), 1);
+
+        // Recovery: next flush pushes it and marks the scrobble
+        *mock.save_error.lock().unwrap() = None;
+        let hid = db
+            .record_watch_history(Some(1), "Alpha", 1, "mpv", "a.mkv", false)
+            .unwrap();
+        assert!(svc.push_entry_with_history(1, Some(hid)).await);
+        assert!(!db.get_anime_entry_by_id(1).unwrap().sync_pending);
+        assert!(db.list_watch_history(5).unwrap()[0].scrobbled_to_tracker);
+    }
+
+    fn step_for(anime_id: i64, progress: u32) -> UserStateChange {
+        UserStateChange {
+            anime_id,
+            progress: Some(progress),
+            source: ChangeSource::Scrobble,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn add_existing_keeps_user_state_and_delete_queues_tombstone() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        sign_in(&db, 42);
+        let mut existing = test_entry(10, "Existing");
+        existing.user_status = "CURRENT".into();
+        existing.user_progress = 5;
+        db.upsert_anime_entry(&existing).unwrap();
+        let mock = Arc::new(MockTracker {
+            viewer_id: 42,
+            ..Default::default()
+        });
+        let (svc, _events) = service(db.clone(), mock.clone());
+
+        // Re-adding from Discover (PLANNING, 0) must not reset progress
+        let mut readd = test_entry(10, "Existing (new title)");
+        readd.cover_image = "https://example/cover.jpg".into();
+        svc.add_entry(readd).await.unwrap();
+        let e = db.get_anime_entry_by_id(10).unwrap();
+        assert_eq!(e.user_progress, 5);
+        assert_eq!(e.title_romaji, "Existing (new title)");
+        assert!(!e.sync_pending);
+
+        // Brand-new add as COMPLETED gets dates and is pushed
+        let mut fresh = test_entry(11, "Fresh");
+        fresh.user_status = "COMPLETED".into();
+        fresh.user_progress = 12;
+        svc.add_entry(fresh).await.unwrap();
+        let f = db.get_anime_entry_by_id(11).unwrap();
+        assert_eq!(f.user_completed_at.as_deref(), Some(today_string().as_str()));
+        wait_until(|| !db.get_anime_entry_by_id(11).unwrap().sync_pending).await;
+
+        let mut no_id = test_entry(12, "No id");
+        no_id.anilist_id = None;
+        assert!(svc.add_entry(no_id).await.is_err());
+
+        svc.delete_entries(vec![10]).await.unwrap();
+        assert!(db.get_anime_entry_by_id(10).is_err());
+        wait_until(|| db.count_pending_deletions().unwrap() == 0).await;
+        assert_eq!(*mock.deletes.lock().unwrap(), vec![(10, None)]);
+    }
+}

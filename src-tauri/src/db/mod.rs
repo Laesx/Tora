@@ -3,7 +3,8 @@ use crate::detection::anitomy::{extract_effective_season, normalize_anime_title,
 use crate::detection::relations::relations_db;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use once_cell::sync::Lazy;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -49,6 +50,13 @@ pub struct AnimeEntry {
     // Computed local library fields
     pub local_episode_count: u32,
     pub available_episodes: Vec<u32>,
+    // Tracker sync bookkeeping
+    /// `true` while a local change has not been confirmed by the tracker yet.
+    #[serde(default)]
+    pub sync_pending: bool,
+    /// AniList `MediaList.id` of this entry (needed for deletes).
+    #[serde(default)]
+    pub anilist_list_entry_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +72,42 @@ pub struct BatchAnimeUpdatePatch {
     pub notes_mode: Option<String>, // "replace" | "append"
     pub user_started_at: Option<String>, // Some("") clears, Some("YYYY-MM-DD") sets, None leaves unchanged
     pub user_completed_at: Option<String>, // Some("") clears, Some("YYYY-MM-DD") sets, None leaves unchanged
+}
+
+/// Fully resolved user-list state for one entry (output of `sync::normalize_change`), ready to be written.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResolvedState {
+    pub user_status: String,
+    pub user_progress: u32,
+    pub user_score: f64,
+    pub user_repeats: u32,
+    pub user_notes: String,
+    /// Final value (`None` = no date).
+    pub user_started_at: Option<String>,
+    /// Final value (`None` = no date).
+    pub user_completed_at: Option<String>,
+    /// Final value (full replace).
+    pub custom_folder: Option<String>,
+    /// `Some` replaces the synonym list; `None` leaves it unchanged.
+    pub synonyms: Option<Vec<String>>,
+}
+
+/// Outcome of [`Database::merge_remote_list`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MergeStats {
+    pub added: usize,
+    pub updated_from_remote: usize,
+    pub kept_local: usize,
+    pub deleted: usize,
+    pub deletion_skipped_reason: Option<String>,
+}
+
+/// A queued tracker-side deletion (tombstone) for an entry already deleted locally.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingDeletion {
+    pub media_id: i64,
+    pub list_entry_id: Option<i64>,
+    pub title: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,7 +185,6 @@ pub struct AppSettings {
     pub anilist_avatar: Option<String>,
     pub recognition_enabled: bool,
     pub recognition_delay_seconds: u64,
-    pub auto_sync_tracker: bool,
     pub custom_media_player_path: String,
     pub torrent_provider: String, // "nyaa" | "animetosho"
     pub qbittorrent_enabled: bool,
@@ -166,7 +209,6 @@ impl Default for AppSettings {
             anilist_avatar: None,
             recognition_enabled: true,
             recognition_delay_seconds: 10,
-            auto_sync_tracker: true,
             custom_media_player_path: String::new(),
             torrent_provider: "nyaa".into(),
             qbittorrent_enabled: false,
@@ -483,12 +525,501 @@ pub struct Database {
     pub conn: Mutex<Connection>,
 }
 
+/// AniList ids of the demo entries the removed seed used to insert.
+const SEEDED_ANIME_IDS: [i64; 8] = [
+    195516, 154587, 171018, 153518, 161645, 130003, 4224, 176301,
+];
+/// Exact names of the demo torrent rules the removed seed used to insert.
+const SEEDED_TORRENT_RULE_NAMES: [&str; 2] = [
+    "SubsPlease 1080p (Watching)",
+    "Dandadan - Erai-raws 1080p Auto",
+];
+const SEED_MARKER_KEY: &str = "seeded_kusuriya_s3";
+
+/// Column list used by every `anime_entries` insert (37 columns, bound as ?1..?37).
+const ENTRY_INSERT_COLUMNS: &str = "id, anilist_id, mal_id, title_romaji, title_english, title_native,
+    synonyms_json, normalized_titles_json, format, airing_status, episodes,
+    duration, season, season_year, average_score, cover_image, banner_image,
+    cover_color, synopsis, genres_json, studios_json, next_airing_episode,
+    next_airing_at, trailer_url, site_url, source_material, user_status,
+    user_progress, user_score, user_repeats, user_notes, user_started_at,
+    user_completed_at, custom_folder, updated_at, sync_pending, anilist_list_entry_id";
+
+/// Metadata refreshed on conflict regardless of who wins the user fields.
+/// `custom_folder` is always preserved unless the incoming row sets one; `sync_pending` is never touched here.
+const ENTRY_METADATA_UPDATE: &str = "anilist_id = COALESCE(excluded.anilist_id, anime_entries.anilist_id),
+    mal_id = COALESCE(excluded.mal_id, anime_entries.mal_id),
+    title_romaji = excluded.title_romaji,
+    title_english = excluded.title_english,
+    title_native = excluded.title_native,
+    synonyms_json = excluded.synonyms_json,
+    normalized_titles_json = excluded.normalized_titles_json,
+    format = excluded.format,
+    airing_status = excluded.airing_status,
+    episodes = excluded.episodes,
+    duration = excluded.duration,
+    season = excluded.season,
+    season_year = excluded.season_year,
+    average_score = excluded.average_score,
+    cover_image = CASE WHEN excluded.cover_image != '' THEN excluded.cover_image ELSE anime_entries.cover_image END,
+    banner_image = COALESCE(excluded.banner_image, anime_entries.banner_image),
+    cover_color = COALESCE(excluded.cover_color, anime_entries.cover_color),
+    synopsis = CASE WHEN excluded.synopsis != '' THEN excluded.synopsis ELSE anime_entries.synopsis END,
+    genres_json = excluded.genres_json,
+    studios_json = excluded.studios_json,
+    next_airing_episode = excluded.next_airing_episode,
+    next_airing_at = excluded.next_airing_at,
+    trailer_url = COALESCE(excluded.trailer_url, anime_entries.trailer_url),
+    site_url = COALESCE(excluded.site_url, anime_entries.site_url),
+    source_material = COALESCE(excluded.source_material, anime_entries.source_material),
+    custom_folder = COALESCE(excluded.custom_folder, anime_entries.custom_folder),
+    anilist_list_entry_id = COALESCE(excluded.anilist_list_entry_id, anime_entries.anilist_list_entry_id)";
+
+/// User-list fields overwritten on conflict when the incoming row wins.
+const ENTRY_USER_FIELDS_UPDATE: &str = "user_status = excluded.user_status,
+    user_progress = excluded.user_progress,
+    user_score = excluded.user_score,
+    user_repeats = excluded.user_repeats,
+    user_notes = excluded.user_notes,
+    user_started_at = excluded.user_started_at,
+    user_completed_at = excluded.user_completed_at,
+    updated_at = excluded.updated_at";
+
+static UPSERT_OVERWRITE_SQL: Lazy<String> = Lazy::new(|| {
+    format!(
+        "INSERT INTO anime_entries ({ENTRY_INSERT_COLUMNS}) VALUES ({}) ON CONFLICT(id) DO UPDATE SET {ENTRY_METADATA_UPDATE}, {ENTRY_USER_FIELDS_UPDATE}",
+        placeholders(37)
+    )
+});
+
+static UPSERT_KEEP_USER_SQL: Lazy<String> = Lazy::new(|| {
+    format!(
+        "INSERT INTO anime_entries ({ENTRY_INSERT_COLUMNS}) VALUES ({}) ON CONFLICT(id) DO UPDATE SET {ENTRY_METADATA_UPDATE}",
+        placeholders(37)
+    )
+});
+
+fn placeholders(n: usize) -> String {
+    (1..=n).map(|i| format!("?{}", i)).collect::<Vec<_>>().join(", ")
+}
+
+/// Column list shared by every `AnimeEntry` read; see [`row_to_entry`].
+const ENTRY_SELECT_COLUMNS: &str = "id, anilist_id, mal_id, title_romaji, title_english, title_native,
+    synonyms_json, format, airing_status, episodes, duration, season,
+    season_year, average_score, cover_image, banner_image, cover_color,
+    synopsis, genres_json, studios_json, next_airing_episode, next_airing_at,
+    trailer_url, site_url, source_material, user_status, user_progress,
+    user_score, user_repeats, user_notes, custom_folder, updated_at,
+    user_started_at, user_completed_at, sync_pending, anilist_list_entry_id";
+
+fn row_to_entry(row: &rusqlite::Row<'_>, avail: Vec<u32>) -> rusqlite::Result<AnimeEntry> {
+    let synonyms_str: String = row.get(6)?;
+    let genres_str: String = row.get(18)?;
+    let studios_str: String = row.get(19)?;
+    Ok(AnimeEntry {
+        id: row.get(0)?,
+        anilist_id: row.get(1)?,
+        mal_id: row.get(2)?,
+        title_romaji: row.get(3)?,
+        title_english: row.get(4)?,
+        title_native: row.get(5)?,
+        synonyms: serde_json::from_str(&synonyms_str).unwrap_or_default(),
+        format: row.get(7)?,
+        airing_status: row.get(8)?,
+        episodes: row.get(9)?,
+        duration: row.get(10)?,
+        season: row.get(11)?,
+        season_year: row.get(12)?,
+        average_score: row.get(13)?,
+        cover_image: row.get(14)?,
+        banner_image: row.get(15)?,
+        cover_color: row.get(16)?,
+        synopsis: row.get(17)?,
+        genres: serde_json::from_str(&genres_str).unwrap_or_default(),
+        studios: serde_json::from_str(&studios_str).unwrap_or_default(),
+        next_airing_episode: row.get(20)?,
+        next_airing_at: row.get(21)?,
+        trailer_url: row.get(22)?,
+        site_url: row.get(23)?,
+        source_material: row.get(24)?,
+        user_status: row.get(25)?,
+        user_progress: row.get(26)?,
+        user_score: row.get(27)?,
+        user_repeats: row.get(28)?,
+        user_notes: row.get(29)?,
+        custom_folder: row.get(30)?,
+        updated_at: row.get(31)?,
+        user_started_at: row.get(32)?,
+        user_completed_at: row.get(33)?,
+        sync_pending: row.get::<_, i64>(34)? != 0,
+        anilist_list_entry_id: row.get(35)?,
+        local_episode_count: avail.len() as u32,
+        available_episodes: avail,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UserFieldsMode {
+    /// Incoming user fields (status/progress/score/repeats/notes/dates/updated_at) replace local ones.
+    Overwrite,
+    /// Local user fields are kept; only metadata is refreshed.
+    KeepExisting,
+}
+
+/// Insert or update one entry. Synonyms are merged with the stored ones; `custom_folder` is preserved.
+/// On insert, `entry.sync_pending` is stored; on conflict `sync_pending` is left untouched.
+fn write_entry_tx(conn: &Connection, entry: &AnimeEntry, mode: UserFieldsMode) -> Result<(), String> {
+    let mut merged_synonyms = entry.synonyms.clone();
+    if let Some(existing_syns_str) = conn
+        .query_row(
+            "SELECT synonyms_json FROM anime_entries WHERE id = ?1",
+            params![entry.id],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+    {
+        if let Ok(existing_syns) = serde_json::from_str::<Vec<String>>(&existing_syns_str) {
+            for s in existing_syns {
+                if !merged_synonyms.iter().any(|x| x.eq_ignore_ascii_case(&s)) {
+                    merged_synonyms.push(s);
+                }
+            }
+        }
+    }
+
+    let norm_titles = Database::build_normalized_titles(
+        &entry.title_romaji,
+        entry.title_english.as_deref(),
+        entry.title_native.as_deref(),
+        &merged_synonyms,
+    );
+    let synonyms_json = serde_json::to_string(&merged_synonyms).unwrap_or_else(|_| "[]".into());
+    let norm_json = serde_json::to_string(&norm_titles).unwrap_or_else(|_| "[]".into());
+    let genres_json = serde_json::to_string(&entry.genres).unwrap_or_else(|_| "[]".into());
+    let studios_json = serde_json::to_string(&entry.studios).unwrap_or_else(|_| "[]".into());
+
+    let sql: &str = match mode {
+        UserFieldsMode::Overwrite => UPSERT_OVERWRITE_SQL.as_str(),
+        UserFieldsMode::KeepExisting => UPSERT_KEEP_USER_SQL.as_str(),
+    };
+    let mut stmt = conn.prepare_cached(sql).map_err(|e| e.to_string())?;
+    stmt.execute(params![
+        entry.id,
+        entry.anilist_id,
+        entry.mal_id,
+        entry.title_romaji,
+        entry.title_english,
+        entry.title_native,
+        synonyms_json,
+        norm_json,
+        entry.format,
+        entry.airing_status,
+        entry.episodes,
+        entry.duration,
+        entry.season,
+        entry.season_year,
+        entry.average_score,
+        entry.cover_image,
+        entry.banner_image,
+        entry.cover_color,
+        entry.synopsis,
+        genres_json,
+        studios_json,
+        entry.next_airing_episode,
+        entry.next_airing_at,
+        entry.trailer_url,
+        entry.site_url,
+        entry.source_material,
+        entry.user_status,
+        entry.user_progress,
+        entry.user_score,
+        entry.user_repeats,
+        entry.user_notes,
+        entry.user_started_at,
+        entry.user_completed_at,
+        entry.custom_folder,
+        entry.updated_at,
+        entry.sync_pending as i64,
+        entry.anilist_list_entry_id,
+    ])
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Unmatch local episodes, drop aliases and delete the entry row (inside the caller's transaction).
+fn delete_entry_rows_tx(conn: &Connection, anime_id: i64) -> Result<(), String> {
+    conn.execute(
+        "UPDATE local_episodes SET matched_anime_id = NULL WHERE matched_anime_id = ?1",
+        params![anime_id],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM title_aliases WHERE anime_id = ?1",
+        params![anime_id],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM anime_entries WHERE id = ?1", params![anime_id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn normalize_opt_text(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|s| !s.is_empty())
+}
+
+/// Write an already-resolved user state (inside the caller's transaction).
+/// `updated_at` is bumped and `sync_pending` set (when requested) only if a user field actually changed.
+/// Returns `true` when `custom_folder` or `synonyms` changed (caller should rematch local episodes).
+fn write_resolved_state_tx(
+    conn: &Connection,
+    anime_id: i64,
+    state: &ResolvedState,
+    sync_pending: bool,
+    now: i64,
+) -> Result<bool, String> {
+    let (old_folder, old_syns_json, romaji, english, native, old_user): (
+        Option<String>,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        LocalSyncRow,
+    ) = conn
+        .query_row(
+            "SELECT custom_folder, synonyms_json, title_romaji, title_english, title_native,
+                    updated_at, sync_pending, user_status, user_progress, user_score, user_repeats,
+                    user_notes, user_started_at, user_completed_at
+             FROM anime_entries WHERE id = ?1",
+            params![anime_id],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    LocalSyncRow {
+                        id: anime_id,
+                        updated_at: r.get(5)?,
+                        sync_pending: r.get::<_, i64>(6)? != 0,
+                        status: r.get(7)?,
+                        progress: r.get(8)?,
+                        score: r.get(9)?,
+                        repeats: r.get(10)?,
+                        notes: r.get(11)?,
+                        started_at: r.get(12)?,
+                        completed_at: r.get(13)?,
+                    },
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Anime entry {} not found", anime_id))?;
+
+    // Only a real user-state change bumps `updated_at` (used for newest-wins conflict resolution)
+    // and queues a tracker push. Folder / synonym edits are local-only.
+    let user_changed = old_user.differs_from_state(state);
+    let new_updated_at = if user_changed { now } else { old_user.updated_at };
+    let mark_pending = sync_pending && user_changed;
+
+    let new_folder = normalize_opt_text(state.custom_folder.as_deref()).map(|s| s.to_string());
+    let mut needs_rematch = normalize_opt_text(old_folder.as_deref()) != new_folder.as_deref();
+
+    if let Some(syns) = &state.synonyms {
+        let syns_json = serde_json::to_string(syns).unwrap_or_else(|_| "[]".into());
+        if syns_json != old_syns_json {
+            needs_rematch = true;
+            let norm = Database::build_normalized_titles(
+                &romaji,
+                english.as_deref(),
+                native.as_deref(),
+                syns,
+            );
+            let norm_json = serde_json::to_string(&norm).unwrap_or_else(|_| "[]".into());
+            conn.execute(
+                "UPDATE anime_entries SET synonyms_json = ?1, normalized_titles_json = ?2 WHERE id = ?3",
+                params![syns_json, norm_json, anime_id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+
+    let started = normalize_opt_text(state.user_started_at.as_deref());
+    let completed = normalize_opt_text(state.user_completed_at.as_deref());
+
+    conn.execute(
+        "UPDATE anime_entries SET
+            user_status = ?1,
+            user_progress = ?2,
+            user_score = ?3,
+            user_repeats = ?4,
+            user_notes = ?5,
+            custom_folder = ?6,
+            user_started_at = ?7,
+            user_completed_at = ?8,
+            updated_at = ?9,
+            sync_pending = CASE WHEN ?10 THEN 1 ELSE sync_pending END
+         WHERE id = ?11",
+        params![
+            state.user_status,
+            state.user_progress,
+            state.user_score,
+            state.user_repeats,
+            state.user_notes,
+            new_folder,
+            started,
+            completed,
+            new_updated_at,
+            mark_pending,
+            anime_id
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+
+    // Fast O(1) indexed update of watched status for local episodes of this specific anime
+    conn.execute(
+        "UPDATE local_episodes
+         SET watched = CASE WHEN episode_number IS NOT NULL AND episode_number <= ?1 THEN 1 ELSE 0 END
+         WHERE matched_anime_id = ?2",
+        params![state.user_progress, anime_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(needs_rematch)
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, String> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({})", table))
+        .map_err(|e| e.to_string())?;
+    let names = stmt
+        .query_map([], |r| r.get::<_, String>(1))
+        .map_err(|e| e.to_string())?;
+    for name in names {
+        if name.map_err(|e| e.to_string())?.eq_ignore_ascii_case(column) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    decl: &str,
+) -> Result<(), String> {
+    if !column_exists(conn, table, column)? {
+        conn.execute(
+            &format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, decl),
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// One-time / idempotent data migrations:
+/// - purge entries without an AniList id (they can never be synced),
+/// - purge the old demo seed if its marker is present.
+fn run_data_migrations(conn: &mut Connection) -> Result<(), String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+    tx.execute_batch(
+        "UPDATE local_episodes SET matched_anime_id = NULL
+           WHERE matched_anime_id IN (SELECT id FROM anime_entries WHERE anilist_id IS NULL);
+         DELETE FROM title_aliases
+           WHERE anime_id IN (SELECT id FROM anime_entries WHERE anilist_id IS NULL);
+         DELETE FROM anime_entries WHERE anilist_id IS NULL;",
+    )
+    .map_err(|e| e.to_string())?;
+
+    let seeded: bool = tx
+        .query_row(
+            "SELECT 1 FROM app_settings WHERE key = ?1",
+            params![SEED_MARKER_KEY],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .is_some();
+    if seeded {
+        for id in SEEDED_ANIME_IDS {
+            delete_entry_rows_tx(&tx, id)?;
+        }
+        for name in SEEDED_TORRENT_RULE_NAMES {
+            tx.execute("DELETE FROM torrent_rules WHERE name = ?1", params![name])
+                .map_err(|e| e.to_string())?;
+        }
+        tx.execute(
+            "DELETE FROM app_settings WHERE key = ?1",
+            params![SEED_MARKER_KEY],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    tx.commit().map_err(|e| e.to_string())
+}
+
+/// Per-entry local state used by [`Database::merge_remote_list`] for conflict resolution.
+struct LocalSyncRow {
+    id: i64,
+    updated_at: i64,
+    sync_pending: bool,
+    status: String,
+    progress: u32,
+    score: f64,
+    repeats: u32,
+    notes: String,
+    started_at: Option<String>,
+    completed_at: Option<String>,
+}
+
+impl LocalSyncRow {
+    fn differs_from_state(&self, state: &ResolvedState) -> bool {
+        self.status != state.user_status
+            || self.progress != state.user_progress
+            || (self.score - state.user_score).abs() > 0.001
+            || self.repeats != state.user_repeats
+            || self.notes != state.user_notes
+            || normalize_opt_text(self.started_at.as_deref())
+                != normalize_opt_text(state.user_started_at.as_deref())
+            || normalize_opt_text(self.completed_at.as_deref())
+                != normalize_opt_text(state.user_completed_at.as_deref())
+    }
+
+    fn user_fields_differ(&self, remote: &AnimeEntry) -> bool {
+        self.status != remote.user_status
+            || self.progress != remote.user_progress
+            || (self.score - remote.user_score).abs() > 0.001
+            || self.repeats != remote.user_repeats
+            || self.notes != remote.user_notes
+            || normalize_opt_text(self.started_at.as_deref())
+                != normalize_opt_text(remote.user_started_at.as_deref())
+            || normalize_opt_text(self.completed_at.as_deref())
+                != normalize_opt_text(remote.user_completed_at.as_deref())
+    }
+}
+
 impl Database {
     pub fn open(db_path: &Path) -> Result<Self, String> {
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
+        Self::from_connection(conn)
+    }
+
+    /// Fresh in-memory database with the full schema (tests only).
+    #[cfg(test)]
+    pub fn open_in_memory() -> Result<Self, String> {
+        let conn = Connection::open_in_memory().map_err(|e| e.to_string())?;
+        Self::from_connection(conn)
+    }
+
+    fn from_connection(conn: Connection) -> Result<Self, String> {
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
@@ -503,12 +1034,11 @@ impl Database {
             conn: Mutex::new(conn),
         };
         db.init_schema()?;
-        db.seed_initial_data_if_empty()?;
         Ok(db)
     }
 
     fn init_schema(&self) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS anime_entries (
                 id INTEGER PRIMARY KEY,
@@ -545,7 +1075,9 @@ impl Database {
                 user_started_at TEXT,
                 user_completed_at TEXT,
                 custom_folder TEXT,
-                updated_at INTEGER NOT NULL DEFAULT 0
+                updated_at INTEGER NOT NULL DEFAULT 0,
+                sync_pending INTEGER NOT NULL DEFAULT 0,
+                anilist_list_entry_id INTEGER
             );
 
             CREATE INDEX IF NOT EXISTS idx_anime_status ON anime_entries(user_status);
@@ -620,19 +1152,29 @@ impl Database {
             CREATE TABLE IF NOT EXISTS app_settings (
                 key TEXT PRIMARY KEY,
                 value_json TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS tracker_pending_deletions (
+                media_id INTEGER PRIMARY KEY,
+                list_entry_id INTEGER,
+                title TEXT NOT NULL DEFAULT '',
+                created_at INTEGER NOT NULL
             );",
         )
         .map_err(|e| e.to_string())?;
 
-        // Safe schema migrations for existing databases
-        let _ = conn.execute(
-            "ALTER TABLE anime_entries ADD COLUMN user_started_at TEXT",
-            [],
-        );
-        let _ = conn.execute(
-            "ALTER TABLE anime_entries ADD COLUMN user_completed_at TEXT",
-            [],
-        );
+        // Idempotent column migrations for existing databases
+        add_column_if_missing(&conn, "anime_entries", "user_started_at", "TEXT")?;
+        add_column_if_missing(&conn, "anime_entries", "user_completed_at", "TEXT")?;
+        add_column_if_missing(
+            &conn,
+            "anime_entries",
+            "sync_pending",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        add_column_if_missing(&conn, "anime_entries", "anilist_list_entry_id", "INTEGER")?;
+
+        run_data_migrations(&mut conn)?;
 
         Ok(())
     }
@@ -657,529 +1199,152 @@ impl Database {
         set
     }
 
-    fn seed_initial_data_if_empty(&self) -> Result<(), String> {
-        let now = chrono::Utc::now().timestamp();
-        let kusuriya_s3 = AnimeEntry {
-            id: 195516,
-            anilist_id: Some(195516),
-            mal_id: Some(61987),
-            title_romaji: "Kusuriya no Hitorigoto 3rd Season".into(),
-            title_english: Some("The Apothecary Diaries Season 3".into()),
-            title_native: Some("薬屋のひとりごと 第3期".into()),
-            synonyms: vec!["Apothecary Diaries S3".into(), "Kusuriya S3".into()],
-            format: "TV".into(),
-            airing_status: "RELEASING".into(),
-            episodes: Some(12),
-            duration: Some(24),
-            season: Some("FALL".into()),
-            season_year: Some(2026),
-            average_score: Some(90),
-            cover_image: "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx161645-7I8C2721A1sV.jpg".into(),
-            banner_image: Some("https://s4.anilist.co/file/anilistcdn/media/anime/banner/161645-5A2V3gA8G4zZ.jpg".into()),
-            cover_color: Some("#059669".into()),
-            synopsis: "Third season of Kusuriya no Hitorigoto.".into(),
-            genres: vec!["Drama".into(), "Mystery".into()],
-            studios: vec!["OLM".into(), "TOHO animation STUDIO".into()],
-            next_airing_episode: Some(4),
-            next_airing_at: Some(now + 86400 * 3),
-            trailer_url: None,
-            site_url: Some("https://anilist.co/anime/195516".into()),
-            source_material: Some("LIGHT_NOVEL".into()),
-            user_status: "CURRENT".into(),
-            user_progress: 2,
-            user_score: 0.0,
-            user_repeats: 0,
-            user_notes: "".into(),
-            user_started_at: Some("2026-10-04".into()),
-            user_completed_at: None,
-            custom_folder: None,
-            updated_at: now - 100000,
-            local_episode_count: 0,
-            available_episodes: vec![],
-        };
-
-        let (count, has_s1, has_s3_seeded): (i64, bool, bool) = {
-            let conn = self.conn.lock().map_err(|e| e.to_string())?;
-            let c: i64 = conn
-                .query_row("SELECT COUNT(*) FROM anime_entries", [], |r| r.get(0))
-                .unwrap_or(0);
-            let s1: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM anime_entries WHERE id = 161645",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap_or(0);
-            let s3_flag: Option<String> = conn
-                .query_row(
-                    "SELECT value_json FROM app_settings WHERE key = 'seeded_kusuriya_s3'",
-                    [],
-                    |r| r.get(0),
-                )
-                .optional()
-                .unwrap_or(None);
-            (c, s1 > 0, s3_flag.is_some())
-        };
-        if count > 0 {
-            if has_s1 && !has_s3_seeded {
-                let exists: i64 = {
-                    let conn = self.conn.lock().map_err(|e| e.to_string())?;
-                    conn.query_row(
-                        "SELECT COUNT(*) FROM anime_entries WHERE id = 195516 OR anilist_id = 195516",
-                        [],
-                        |r| r.get(0),
-                    )
-                    .unwrap_or(0)
-                };
-                if exists == 0 {
-                    let _ = self.upsert_anime_entry(&kusuriya_s3);
-                }
-                if let Ok(conn) = self.conn.lock() {
-                    let _ = conn.execute(
-                        "INSERT OR REPLACE INTO app_settings (key, value_json) VALUES ('seeded_kusuriya_s3', 'true')",
-                        [],
-                    );
-                }
-            }
-            return Ok(());
-        }
-
-        let starter_entries = vec![
-            AnimeEntry {
-                id: 154587,
-                anilist_id: Some(154587),
-                mal_id: Some(52991),
-                title_romaji: "Sousou no Frieren".into(),
-                title_english: Some("Frieren: Beyond Journey's End".into()),
-                title_native: Some("葬送のフリーレン".into()),
-                synonyms: vec!["Frieren".into(), "Sousou no Frieren".into()],
-                format: "TV".into(),
-                airing_status: "FINISHED".into(),
-                episodes: Some(28),
-                duration: Some(24),
-                season: Some("FALL".into()),
-                season_year: Some(2023),
-                average_score: Some(93),
-                cover_image: "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx154587-gHSraOSa0nBG.jpg".into(),
-                banner_image: Some("https://s4.anilist.co/file/anilistcdn/media/anime/banner/154587-ivXNJ23SM1xB.jpg".into()),
-                cover_color: Some("#a3e635".into()),
-                synopsis: "The adventure is over but life goes on for an elf mage just beginning to learn what living is all about. Elf mage Frieren and her courageous fellow adventurers have defeated the Demon King and brought peace to the land.".into(),
-                genres: vec!["Adventure".into(), "Drama".into(), "Fantasy".into()],
-                studios: vec!["Madhouse".into()],
-                next_airing_episode: None,
-                next_airing_at: None,
-                trailer_url: Some("https://www.youtube.com/watch?v=ZEkwCGJ3o7M".into()),
-                site_url: Some("https://anilist.co/anime/154587".into()),
-                source_material: Some("MANGA".into()),
-                user_status: "CURRENT".into(),
-                user_progress: 24,
-                user_score: 95.0,
-                user_repeats: 0,
-                user_notes: "Masterpiece adaptation by Madhouse. Watching in 1080p FLAC.".into(),
-                user_started_at: Some("2023-09-29".into()),
-                user_completed_at: None,
-                custom_folder: None,
-                updated_at: now - 3600,
-                local_episode_count: 0,
-                available_episodes: vec![],
-            },
-            AnimeEntry {
-                id: 171018,
-                anilist_id: Some(171018),
-                mal_id: Some(57334),
-                title_romaji: "Dandadan".into(),
-                title_english: Some("DAN DA DAN".into()),
-                title_native: Some("ダンダダン".into()),
-                synonyms: vec!["Dandadan".into()],
-                format: "TV".into(),
-                airing_status: "RELEASING".into(),
-                episodes: Some(12),
-                duration: Some(24),
-                season: Some("FALL".into()),
-                season_year: Some(2024),
-                average_score: Some(87),
-                cover_image: "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx171018-2ldCj6QywuOa.jpg".into(),
-                banner_image: Some("https://s4.anilist.co/file/anilistcdn/media/anime/banner/171018-s0c272c2aI8v.jpg".into()),
-                cover_color: Some("#ef4444".into()),
-                synopsis: "Momo Ayase strikes up an unusual friendship with her school's UFO fanatic, whom she nicknames 'Okarun' because he has a name that is not to be said aloud.".into(),
-                genres: vec!["Action".into(), "Comedy".into(), "Sci-Fi".into(), "Supernatural".into()],
-                studios: vec!["Science SARU".into()],
-                next_airing_episode: Some(9),
-                next_airing_at: Some(now + 86400 * 2 + 14400),
-                trailer_url: Some("https://www.youtube.com/watch?v=0XJxfbN36Uw".into()),
-                site_url: Some("https://anilist.co/anime/171018".into()),
-                source_material: Some("MANGA".into()),
-                user_status: "CURRENT".into(),
-                user_progress: 8,
-                user_score: 90.0,
-                user_repeats: 0,
-                user_notes: "Science SARU storyboarding and colors are incredible.".into(),
-                user_started_at: Some("2024-10-03".into()),
-                user_completed_at: None,
-                custom_folder: None,
-                updated_at: now - 7200,
-                local_episode_count: 0,
-                available_episodes: vec![],
-            },
-            AnimeEntry {
-                id: 153518,
-                anilist_id: Some(153518),
-                mal_id: Some(52701),
-                title_romaji: "Dungeon Meshi".into(),
-                title_english: Some("Delicious in Dungeon".into()),
-                title_native: Some("ダンジョン飯".into()),
-                synonyms: vec!["Dungeon Meshi".into()],
-                format: "TV".into(),
-                airing_status: "FINISHED".into(),
-                episodes: Some(24),
-                duration: Some(24),
-                season: Some("WINTER".into()),
-                season_year: Some(2024),
-                average_score: Some(86),
-                cover_image: "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx153518-7FNR7zCx22X5.jpg".into(),
-                banner_image: Some("https://s4.anilist.co/file/anilistcdn/media/anime/banner/153518-c362G717B2P7.jpg".into()),
-                cover_color: Some("#f59e0b".into()),
-                synopsis: "After the Golden Kingdom is sunk underground by an insane magician, its king emerges, promising all of his treasure to any who defeat the magician, before crumbling to dust.".into(),
-                genres: vec!["Adventure".into(), "Comedy".into(), "Fantasy".into()],
-                studios: vec!["Trigger".into()],
-                next_airing_episode: None,
-                next_airing_at: None,
-                trailer_url: None,
-                site_url: Some("https://anilist.co/anime/153518".into()),
-                source_material: Some("MANGA".into()),
-                user_status: "CURRENT".into(),
-                user_progress: 18,
-                user_score: 88.0,
-                user_repeats: 0,
-                user_notes: "Studio Trigger worldbuilding at its finest.".into(),
-                user_started_at: Some("2024-01-04".into()),
-                user_completed_at: None,
-                custom_folder: None,
-                updated_at: now - 18000,
-                local_episode_count: 0,
-                available_episodes: vec![],
-            },
-            AnimeEntry {
-                id: 161645,
-                anilist_id: Some(161645),
-                mal_id: Some(54492),
-                title_romaji: "Kusuriya no Hitorigoto".into(),
-                title_english: Some("The Apothecary Diaries".into()),
-                title_native: Some("薬屋のひとりごと".into()),
-                synonyms: vec!["Kusuriya".into(), "Apothecary Diaries".into()],
-                format: "TV".into(),
-                airing_status: "FINISHED".into(),
-                episodes: Some(24),
-                duration: Some(24),
-                season: Some("FALL".into()),
-                season_year: Some(2023),
-                average_score: Some(88),
-                cover_image: "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx161645-7I8C2721A1sV.jpg".into(),
-                banner_image: Some("https://s4.anilist.co/file/anilistcdn/media/anime/banner/161645-5A2V3gA8G4zZ.jpg".into()),
-                cover_color: Some("#10b981".into()),
-                synopsis: "Maomao lived a peaceful life with her apothecary father. Until one day, she's sold as a lowly servant to the emperor's palace.".into(),
-                genres: vec!["Drama".into(), "Mystery".into()],
-                studios: vec!["OLM".into(), "TOHO animation STUDIO".into()],
-                next_airing_episode: None,
-                next_airing_at: None,
-                trailer_url: None,
-                site_url: Some("https://anilist.co/anime/161645".into()),
-                source_material: Some("LIGHT_NOVEL".into()),
-                user_status: "COMPLETED".into(),
-                user_progress: 24,
-                user_score: 92.0,
-                user_repeats: 1,
-                user_notes: "Maomao is one of the best protagonists in recent memory.".into(),
-                user_started_at: Some("2023-10-22".into()),
-                user_completed_at: Some("2024-03-24".into()),
-                custom_folder: None,
-                updated_at: now - 86400,
-                local_episode_count: 0,
-                available_episodes: vec![],
-            },
-            AnimeEntry {
-                id: 130003,
-                anilist_id: Some(130003),
-                mal_id: Some(47917),
-                title_romaji: "Bocchi the Rock!".into(),
-                title_english: Some("BOCCHI THE ROCK!".into()),
-                title_native: Some("ぼっち・ざ・ろっく！".into()),
-                synonyms: vec!["Bocchi the Rock".into(), "BTR".into()],
-                format: "TV".into(),
-                airing_status: "FINISHED".into(),
-                episodes: Some(12),
-                duration: Some(24),
-                season: Some("FALL".into()),
-                season_year: Some(2022),
-                average_score: Some(88),
-                cover_image: "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx130003-5Y5a3R8nF9vP.jpg".into(),
-                banner_image: Some("https://s4.anilist.co/file/anilistcdn/media/anime/banner/130003-8B8f9k3wL2qR.jpg".into()),
-                cover_color: Some("#ec4899".into()),
-                synopsis: "Hitori Gotoh, a lonely high school girl whose heart lies in her guitar, makes no progress every day until she meets Nijika Ijichi, who is looking for a guitarist for her group 'Kessoku Band'.".into(),
-                genres: vec!["Comedy".into(), "Music".into(), "Slice of Life".into()],
-                studios: vec!["CloverWorks".into()],
-                next_airing_episode: None,
-                next_airing_at: None,
-                trailer_url: None,
-                site_url: Some("https://anilist.co/anime/130003".into()),
-                source_material: Some("MANGA".into()),
-                user_status: "COMPLETED".into(),
-                user_progress: 12,
-                user_score: 94.0,
-                user_repeats: 2,
-                user_notes: "Kessoku Band forever!".into(),
-                user_started_at: Some("2022-10-09".into()),
-                user_completed_at: Some("2022-12-25".into()),
-                custom_folder: None,
-                updated_at: now - 172800,
-                local_episode_count: 0,
-                available_episodes: vec![],
-            },
-            AnimeEntry {
-                id: 4224,
-                anilist_id: Some(4224),
-                mal_id: Some(4224),
-                title_romaji: "Toradora!".into(),
-                title_english: Some("Toradora!".into()),
-                title_native: Some("とらドラ！".into()),
-                synonyms: vec!["Toradora".into(), "Tiger x Dragon".into()],
-                format: "TV".into(),
-                airing_status: "FINISHED".into(),
-                episodes: Some(25),
-                duration: Some(24),
-                season: Some("FALL".into()),
-                season_year: Some(2008),
-                average_score: Some(80),
-                cover_image: "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx4224-3k2b8R7x9L1q.jpg".into(),
-                banner_image: None,
-                cover_color: Some("#f97316".into()),
-                synopsis: "Ryuuji Takasu is a gentle high school student with a love for housework; but in contrast to his kind nature, he has an intimidating face that often gets him labeled as a delinquent. He meets Taiga Aisaka, the 'Palmtop Tiger'.".into(),
-                genres: vec!["Comedy".into(), "Drama".into(), "Romance".into(), "Slice of Life".into()],
-                studios: vec!["J.C.Staff".into()],
-                next_airing_episode: None,
-                next_airing_at: None,
-                trailer_url: None,
-                site_url: Some("https://anilist.co/anime/4224".into()),
-                source_material: Some("LIGHT_NOVEL".into()),
-                user_status: "COMPLETED".into(),
-                user_progress: 25,
-                user_score: 90.0,
-                user_repeats: 3,
-                user_notes: "The namesake of Taiga & Tora!".into(),
-                user_started_at: Some("2008-10-02".into()),
-                user_completed_at: Some("2009-03-26".into()),
-                custom_folder: None,
-                updated_at: now - 250000,
-                local_episode_count: 0,
-                available_episodes: vec![],
-            },
-            AnimeEntry {
-                id: 176301,
-                anilist_id: Some(176301),
-                mal_id: Some(58514),
-                title_romaji: "Kusuriya no Hitorigoto 2nd Season".into(),
-                title_english: Some("The Apothecary Diaries Season 2".into()),
-                title_native: Some("薬屋のひとりごと 第2期".into()),
-                synonyms: vec!["Apothecary Diaries S2".into()],
-                format: "TV".into(),
-                airing_status: "RELEASING".into(),
-                episodes: Some(24),
-                duration: Some(24),
-                season: Some("WINTER".into()),
-                season_year: Some(2025),
-                average_score: Some(89),
-                cover_image: "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx176301-mO8z6P2k1W9q.jpg".into(),
-                banner_image: None,
-                cover_color: Some("#14b8a6".into()),
-                synopsis: "Second season of Kusuriya no Hitorigoto as Maomao and Jinshi uncover deeper conspiracies within the Imperial Court.".into(),
-                genres: vec!["Drama".into(), "Mystery".into()],
-                studios: vec!["OLM".into(), "TOHO animation STUDIO".into()],
-                next_airing_episode: Some(12),
-                next_airing_at: Some(now + 86400 * 4 + 7200),
-                trailer_url: None,
-                site_url: Some("https://anilist.co/anime/176301".into()),
-                source_material: Some("LIGHT_NOVEL".into()),
-                user_status: "PLANNING".into(),
-                user_progress: 0,
-                user_score: 0.0,
-                user_repeats: 0,
-                user_notes: "Queued for seasonal watch.".into(),
-                user_started_at: None,
-                user_completed_at: None,
-                custom_folder: None,
-                updated_at: now - 300000,
-                local_episode_count: 0,
-                available_episodes: vec![],
-            },
-            kusuriya_s3,
-        ];
-
-        self.upsert_anime_entries_batch(&starter_entries)?;
-
-        // Seed default Taiga-style RSS Torrent filter rules
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "INSERT OR REPLACE INTO app_settings (key, value_json) VALUES ('seeded_kusuriya_s3', 'true')",
-            [],
-        )
-        .ok();
-        conn.execute(
-            "INSERT INTO torrent_rules (name, enabled, anime_title_filter, release_group, resolution, exclude_keywords, action, only_unwatched)
-             VALUES (?1, 1, '', 'SubsPlease', '1080p', 'Batch, 480p, Dub', 'highlight', 1)",
-            params!["SubsPlease 1080p (Watching)"],
-        )
-        .ok();
-        conn.execute(
-            "INSERT INTO torrent_rules (name, enabled, anime_title_filter, release_group, resolution, exclude_keywords, action, only_unwatched)
-             VALUES (?1, 1, 'Dandadan', 'Erai-raws', '1080p', '480p', 'auto_download', 1)",
-            params!["Dandadan - Erai-raws 1080p Auto"],
-        )
-        .ok();
-
-        Ok(())
-    }
-
     pub fn upsert_anime_entry(&self, entry: &AnimeEntry) -> Result<(), String> {
         self.upsert_anime_entries_batch(std::slice::from_ref(entry))
     }
 
     /// Batch upsert anime entries inside a single fast transaction.
+    /// Incoming user fields overwrite local ones; `custom_folder` and synonyms are preserved/merged.
     pub fn upsert_anime_entries_batch(&self, entries: &[AnimeEntry]) -> Result<(), String> {
         if entries.is_empty() {
             return Ok(());
         }
         let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
-        {
-            let mut stmt = tx
-                .prepare(
-                    "INSERT INTO anime_entries (
-                        id, anilist_id, mal_id, title_romaji, title_english, title_native,
-                        synonyms_json, normalized_titles_json, format, airing_status, episodes,
-                        duration, season, season_year, average_score, cover_image, banner_image,
-                        cover_color, synopsis, genres_json, studios_json, next_airing_episode,
-                        next_airing_at, trailer_url, site_url, source_material, user_status,
-                        user_progress, user_score, user_repeats, user_notes, user_started_at,
-                        user_completed_at, custom_folder, updated_at
-                    ) VALUES (
-                        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                        ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
-                        ?31, ?32, ?33, ?34, ?35
-                    )
-                    ON CONFLICT(id) DO UPDATE SET
-                        anilist_id = excluded.anilist_id,
-                        mal_id = COALESCE(excluded.mal_id, anime_entries.mal_id),
-                        title_romaji = excluded.title_romaji,
-                        title_english = excluded.title_english,
-                        title_native = excluded.title_native,
-                        synonyms_json = excluded.synonyms_json,
-                        normalized_titles_json = excluded.normalized_titles_json,
-                        format = excluded.format,
-                        airing_status = excluded.airing_status,
-                        episodes = excluded.episodes,
-                        duration = excluded.duration,
-                        season = excluded.season,
-                        season_year = excluded.season_year,
-                        average_score = excluded.average_score,
-                        cover_image = CASE WHEN excluded.cover_image != '' THEN excluded.cover_image ELSE anime_entries.cover_image END,
-                        banner_image = COALESCE(excluded.banner_image, anime_entries.banner_image),
-                        cover_color = COALESCE(excluded.cover_color, anime_entries.cover_color),
-                        synopsis = CASE WHEN excluded.synopsis != '' THEN excluded.synopsis ELSE anime_entries.synopsis END,
-                        genres_json = excluded.genres_json,
-                        studios_json = excluded.studios_json,
-                        next_airing_episode = excluded.next_airing_episode,
-                        next_airing_at = excluded.next_airing_at,
-                        trailer_url = COALESCE(excluded.trailer_url, anime_entries.trailer_url),
-                        site_url = COALESCE(excluded.site_url, anime_entries.site_url),
-                        source_material = COALESCE(excluded.source_material, anime_entries.source_material),
-                        user_status = excluded.user_status,
-                        user_progress = excluded.user_progress,
-                        user_score = excluded.user_score,
-                        user_repeats = excluded.user_repeats,
-                        user_notes = excluded.user_notes,
-                        user_started_at = COALESCE(excluded.user_started_at, anime_entries.user_started_at),
-                        user_completed_at = COALESCE(excluded.user_completed_at, anime_entries.user_completed_at),
-                        custom_folder = COALESCE(excluded.custom_folder, anime_entries.custom_folder),
-                        updated_at = excluded.updated_at",
-                )
-                .map_err(|e| e.to_string())?;
-
-            for entry in entries {
-                let mut merged_synonyms = entry.synonyms.clone();
-                if let Ok(Some(existing_syns_str)) = tx
-                    .query_row(
-                        "SELECT synonyms_json FROM anime_entries WHERE id = ?1",
-                        params![entry.id],
-                        |r| r.get::<_, String>(0),
-                    )
-                    .optional()
-                {
-                    if let Ok(existing_syns) = serde_json::from_str::<Vec<String>>(&existing_syns_str) {
-                        for s in existing_syns {
-                            if !merged_synonyms.iter().any(|x| x.eq_ignore_ascii_case(&s)) {
-                                merged_synonyms.push(s);
-                            }
-                        }
-                    }
-                }
-
-                let norm_titles = Self::build_normalized_titles(
-                    &entry.title_romaji,
-                    entry.title_english.as_deref(),
-                    entry.title_native.as_deref(),
-                    &merged_synonyms,
-                );
-                let synonyms_json =
-                    serde_json::to_string(&merged_synonyms).unwrap_or_else(|_| "[]".into());
-                let norm_json =
-                    serde_json::to_string(&norm_titles).unwrap_or_else(|_| "[]".into());
-                let genres_json =
-                    serde_json::to_string(&entry.genres).unwrap_or_else(|_| "[]".into());
-                let studios_json =
-                    serde_json::to_string(&entry.studios).unwrap_or_else(|_| "[]".into());
-
-                stmt.execute(params![
-                    entry.id,
-                    entry.anilist_id,
-                    entry.mal_id,
-                    entry.title_romaji,
-                    entry.title_english,
-                    entry.title_native,
-                    synonyms_json,
-                    norm_json,
-                    entry.format,
-                    entry.airing_status,
-                    entry.episodes,
-                    entry.duration,
-                    entry.season,
-                    entry.season_year,
-                    entry.average_score,
-                    entry.cover_image,
-                    entry.banner_image,
-                    entry.cover_color,
-                    entry.synopsis,
-                    genres_json,
-                    studios_json,
-                    entry.next_airing_episode,
-                    entry.next_airing_at,
-                    entry.trailer_url,
-                    entry.site_url,
-                    entry.source_material,
-                    entry.user_status,
-                    entry.user_progress,
-                    entry.user_score,
-                    entry.user_repeats,
-                    entry.user_notes,
-                    entry.user_started_at,
-                    entry.user_completed_at,
-                    entry.custom_folder,
-                    entry.updated_at,
-                ])
-                .map_err(|e| e.to_string())?;
-            }
+        for entry in entries {
+            write_entry_tx(&tx, entry, UserFieldsMode::Overwrite)?;
         }
         tx.commit().map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    /// Refresh only the metadata of an existing entry (user state, `updated_at` and `sync_pending` untouched).
+    pub fn refresh_entry_metadata(&self, entry: &AnimeEntry) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        write_entry_tx(&conn, entry, UserFieldsMode::KeepExisting)
+    }
+
+    /// Local row id of the entry with this AniList media id, if any.
+    pub fn find_entry_id_by_anilist_id(&self, anilist_id: i64) -> Result<Option<i64>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT id FROM anime_entries WHERE anilist_id = ?1 OR id = ?1 ORDER BY (anilist_id = ?1) DESC LIMIT 1",
+            params![anilist_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())
+    }
+
+    /// Merge the tracker's list into the local DB in one transaction (newest-wins per entry).
+    ///
+    /// - Media ids in `skip_media_ids` (pending remote deletions) are ignored.
+    /// - New remote entries are inserted.
+    /// - If the local entry is `sync_pending` or newer (`updated_at`) than the remote, local user fields are
+    ///   kept and only metadata is refreshed (`kept_local` counts only entries whose user fields differ).
+    /// - Otherwise remote user fields overwrite local ones (`updated_from_remote` counts actual changes).
+    /// - `custom_folder` is always preserved and synonyms merged; `anilist_list_entry_id` is stored.
+    /// - With `delete_missing`, local entries absent from the remote list (and not `sync_pending`) are deleted,
+    ///   unless the remote list is empty while local entries exist (guard against partial/broken fetches).
+    pub fn merge_remote_list(
+        &self,
+        snapshot_entries: &[AnimeEntry],
+        skip_media_ids: &HashSet<i64>,
+        delete_missing: bool,
+    ) -> Result<MergeStats, String> {
+        let mut stats = MergeStats::default();
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+        let mut local_by_media: HashMap<i64, LocalSyncRow> = HashMap::new();
+        {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT id, anilist_id, updated_at, sync_pending, user_status, user_progress,
+                            user_score, user_repeats, user_notes, user_started_at, user_completed_at
+                     FROM anime_entries WHERE anilist_id IS NOT NULL",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, i64>(1)?,
+                        LocalSyncRow {
+                            id: r.get(0)?,
+                            updated_at: r.get(2)?,
+                            sync_pending: r.get::<_, i64>(3)? != 0,
+                            status: r.get(4)?,
+                            progress: r.get(5)?,
+                            score: r.get(6)?,
+                            repeats: r.get(7)?,
+                            notes: r.get(8)?,
+                            started_at: r.get(9)?,
+                            completed_at: r.get(10)?,
+                        },
+                    ))
+                })
+                .map_err(|e| e.to_string())?;
+            for row in rows {
+                let (media_id, local) = row.map_err(|e| e.to_string())?;
+                local_by_media.insert(media_id, local);
+            }
+        }
+
+        let mut remote_media_ids: HashSet<i64> = HashSet::new();
+        for remote in snapshot_entries {
+            let Some(media_id) = remote.anilist_id else {
+                continue;
+            };
+            remote_media_ids.insert(media_id);
+            if skip_media_ids.contains(&media_id) {
+                continue;
+            }
+
+            match local_by_media.get(&media_id) {
+                None => {
+                    let mut fresh = remote.clone();
+                    fresh.sync_pending = false;
+                    write_entry_tx(&tx, &fresh, UserFieldsMode::Overwrite)?;
+                    stats.added += 1;
+                }
+                Some(local) => {
+                    let mut incoming = remote.clone();
+                    incoming.id = local.id;
+                    let differs = local.user_fields_differ(remote);
+                    if local.sync_pending || local.updated_at > remote.updated_at {
+                        write_entry_tx(&tx, &incoming, UserFieldsMode::KeepExisting)?;
+                        if differs {
+                            stats.kept_local += 1;
+                        }
+                    } else {
+                        write_entry_tx(&tx, &incoming, UserFieldsMode::Overwrite)?;
+                        if differs {
+                            stats.updated_from_remote += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        if delete_missing {
+            if remote_media_ids.is_empty() && !local_by_media.is_empty() {
+                stats.deletion_skipped_reason = Some(format!(
+                    "AniList returned an empty list; skipped deleting {} local entries",
+                    local_by_media.len()
+                ));
+            } else {
+                for (media_id, local) in &local_by_media {
+                    if remote_media_ids.contains(media_id) || local.sync_pending {
+                        continue;
+                    }
+                    delete_entry_rows_tx(&tx, local.id)?;
+                    stats.deleted += 1;
+                }
+            }
+        }
+
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(stats)
     }
 
     /// Fetch a single AnimeEntry by ID in O(1) without loading the entire anime_entries table.
@@ -1204,61 +1369,9 @@ impl Database {
         }
 
         conn.query_row(
-            "SELECT
-                id, anilist_id, mal_id, title_romaji, title_english, title_native,
-                synonyms_json, format, airing_status, episodes, duration, season,
-                season_year, average_score, cover_image, banner_image, cover_color,
-                synopsis, genres_json, studios_json, next_airing_episode, next_airing_at,
-                trailer_url, site_url, source_material, user_status, user_progress,
-                user_score, user_repeats, user_notes, custom_folder, updated_at,
-                user_started_at, user_completed_at
-             FROM anime_entries
-             WHERE id = ?1",
+            &format!("SELECT {ENTRY_SELECT_COLUMNS} FROM anime_entries WHERE id = ?1"),
             params![anime_id],
-            |row| {
-                let id: i64 = row.get(0)?;
-                let synonyms_str: String = row.get(6)?;
-                let genres_str: String = row.get(18)?;
-                let studios_str: String = row.get(19)?;
-                Ok(AnimeEntry {
-                    id,
-                    anilist_id: row.get(1)?,
-                    mal_id: row.get(2)?,
-                    title_romaji: row.get(3)?,
-                    title_english: row.get(4)?,
-                    title_native: row.get(5)?,
-                    synonyms: serde_json::from_str(&synonyms_str).unwrap_or_default(),
-                    format: row.get(7)?,
-                    airing_status: row.get(8)?,
-                    episodes: row.get(9)?,
-                    duration: row.get(10)?,
-                    season: row.get(11)?,
-                    season_year: row.get(12)?,
-                    average_score: row.get(13)?,
-                    cover_image: row.get(14)?,
-                    banner_image: row.get(15)?,
-                    cover_color: row.get(16)?,
-                    synopsis: row.get(17)?,
-                    genres: serde_json::from_str(&genres_str).unwrap_or_default(),
-                    studios: serde_json::from_str(&studios_str).unwrap_or_default(),
-                    next_airing_episode: row.get(20)?,
-                    next_airing_at: row.get(21)?,
-                    trailer_url: row.get(22)?,
-                    site_url: row.get(23)?,
-                    source_material: row.get(24)?,
-                    user_status: row.get(25)?,
-                    user_progress: row.get(26)?,
-                    user_score: row.get(27)?,
-                    user_repeats: row.get(28)?,
-                    user_notes: row.get(29)?,
-                    custom_folder: row.get(30)?,
-                    updated_at: row.get(31)?,
-                    user_started_at: row.get(32)?,
-                    user_completed_at: row.get(33)?,
-                    local_episode_count: avail.len() as u32,
-                    available_episodes: avail,
-                })
-            },
+            |row| row_to_entry(row, avail),
         )
         .map_err(|e| format!("Anime entry not found: {}", e))
     }
@@ -1293,65 +1406,16 @@ impl Database {
         }
 
         let mut stmt = conn
-            .prepare(
-                "SELECT
-                    id, anilist_id, mal_id, title_romaji, title_english, title_native,
-                    synonyms_json, format, airing_status, episodes, duration, season,
-                    season_year, average_score, cover_image, banner_image, cover_color,
-                    synopsis, genres_json, studios_json, next_airing_episode, next_airing_at,
-                    trailer_url, site_url, source_material, user_status, user_progress,
-                    user_score, user_repeats, user_notes, custom_folder, updated_at,
-                    user_started_at, user_completed_at
-                 FROM anime_entries
-                 ORDER BY updated_at DESC, title_romaji ASC",
-            )
+            .prepare(&format!(
+                "SELECT {ENTRY_SELECT_COLUMNS} FROM anime_entries ORDER BY updated_at DESC, title_romaji ASC"
+            ))
             .map_err(|e| e.to_string())?;
 
         let rows = stmt
             .query_map([], |row| {
                 let id: i64 = row.get(0)?;
-                let synonyms_str: String = row.get(6)?;
-                let genres_str: String = row.get(18)?;
-                let studios_str: String = row.get(19)?;
                 let avail = ep_map.get(&id).cloned().unwrap_or_default();
-                Ok(AnimeEntry {
-                    id,
-                    anilist_id: row.get(1)?,
-                    mal_id: row.get(2)?,
-                    title_romaji: row.get(3)?,
-                    title_english: row.get(4)?,
-                    title_native: row.get(5)?,
-                    synonyms: serde_json::from_str(&synonyms_str).unwrap_or_default(),
-                    format: row.get(7)?,
-                    airing_status: row.get(8)?,
-                    episodes: row.get(9)?,
-                    duration: row.get(10)?,
-                    season: row.get(11)?,
-                    season_year: row.get(12)?,
-                    average_score: row.get(13)?,
-                    cover_image: row.get(14)?,
-                    banner_image: row.get(15)?,
-                    cover_color: row.get(16)?,
-                    synopsis: row.get(17)?,
-                    genres: serde_json::from_str(&genres_str).unwrap_or_default(),
-                    studios: serde_json::from_str(&studios_str).unwrap_or_default(),
-                    next_airing_episode: row.get(20)?,
-                    next_airing_at: row.get(21)?,
-                    trailer_url: row.get(22)?,
-                    site_url: row.get(23)?,
-                    source_material: row.get(24)?,
-                    user_status: row.get(25)?,
-                    user_progress: row.get(26)?,
-                    user_score: row.get(27)?,
-                    user_repeats: row.get(28)?,
-                    user_notes: row.get(29)?,
-                    custom_folder: row.get(30)?,
-                    updated_at: row.get(31)?,
-                    user_started_at: row.get(32)?,
-                    user_completed_at: row.get(33)?,
-                    local_episode_count: avail.len() as u32,
-                    available_episodes: avail,
-                })
+                row_to_entry(row, avail)
             })
             .map_err(|e| e.to_string())?;
 
@@ -1362,6 +1426,11 @@ impl Database {
         Ok(list)
     }
 
+    /// Write a single entry's user state. Dates: `Some("")` clears, `None` keeps the stored value.
+    /// `custom_folder` is a full replace. `sync_pending = true` marks the entry for a tracker push
+    /// (`false` never clears an existing pending flag; use `set_sync_result` / `finish_push` for that).
+    /// Returns the updated entry and whether a full local-episode rematch is needed.
+    #[allow(clippy::too_many_arguments)]
     pub fn update_anime_user_state(
         &self,
         anime_id: i64,
@@ -1374,272 +1443,69 @@ impl Database {
         synonyms: Option<Vec<String>>,
         user_started_at: Option<String>,
         user_completed_at: Option<String>,
+        sync_pending: bool,
     ) -> Result<(AnimeEntry, bool), String> {
         let now = chrono::Utc::now().timestamp();
-        let mut needs_full_rematch = false;
+        let needs_full_rematch = {
+            let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
 
-        {
-            let conn = self.conn.lock().map_err(|e| e.to_string())?;
-
-            let (old_folder, old_syns_json, old_started, old_completed): (
-                Option<String>,
-                String,
-                Option<String>,
-                Option<String>,
-            ) = conn
+            let (old_started, old_completed): (Option<String>, Option<String>) = tx
                 .query_row(
-                    "SELECT custom_folder, synonyms_json, user_started_at, user_completed_at FROM anime_entries WHERE id = ?1",
+                    "SELECT user_started_at, user_completed_at FROM anime_entries WHERE id = ?1",
                     params![anime_id],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?)),
                 )
                 .optional()
                 .map_err(|e| e.to_string())?
-                .unwrap_or((None, "[]".to_string(), None, None));
+                .ok_or_else(|| format!("Anime entry {} not found", anime_id))?;
 
-            let norm_old_folder = old_folder
-                .as_deref()
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty());
-            let norm_new_folder = custom_folder
-                .as_deref()
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty());
-
-            if norm_old_folder != norm_new_folder {
-                needs_full_rematch = true;
-            }
-
-            if let Some(syns) = synonyms {
-                let syns_json = serde_json::to_string(&syns).unwrap_or_else(|_| "[]".into());
-                if syns_json != old_syns_json {
-                    needs_full_rematch = true;
-                    let (romaji, english, native): (String, Option<String>, Option<String>) = conn
-                        .query_row(
-                            "SELECT title_romaji, title_english, title_native FROM anime_entries WHERE id = ?1",
-                            params![anime_id],
-                            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                        )
-                        .map_err(|e| e.to_string())?;
-                    let norm = Self::build_normalized_titles(
-                        &romaji,
-                        english.as_deref(),
-                        native.as_deref(),
-                        &syns,
-                    );
-                    let norm_json = serde_json::to_string(&norm).unwrap_or_else(|_| "[]".into());
-                    conn.execute(
-                        "UPDATE anime_entries SET synonyms_json = ?1, normalized_titles_json = ?2 WHERE id = ?3",
-                        params![syns_json, norm_json, anime_id],
-                    )
-                    .map_err(|e| e.to_string())?;
-                }
-            }
-
-            let resolved_started = match user_started_at {
-                Some(s) => {
-                    let trimmed = s.trim();
-                    if trimmed.is_empty() {
-                        None
-                    } else {
-                        Some(trimmed.to_string())
-                    }
-                }
-                None => old_started,
+            let state = ResolvedState {
+                user_status: user_status.to_string(),
+                user_progress,
+                user_score,
+                user_repeats,
+                user_notes: user_notes.to_string(),
+                user_started_at: user_started_at.or(old_started),
+                user_completed_at: user_completed_at.or(old_completed),
+                custom_folder,
+                synonyms,
             };
-
-            let resolved_completed = match user_completed_at {
-                Some(s) => {
-                    let trimmed = s.trim();
-                    if trimmed.is_empty() {
-                        None
-                    } else {
-                        Some(trimmed.to_string())
-                    }
-                }
-                None => old_completed,
-            };
-
-            conn.execute(
-                "UPDATE anime_entries SET
-                    user_status = ?1,
-                    user_progress = ?2,
-                    user_score = ?3,
-                    user_repeats = ?4,
-                    user_notes = ?5,
-                    custom_folder = ?6,
-                    user_started_at = ?7,
-                    user_completed_at = ?8,
-                    updated_at = ?9
-                 WHERE id = ?10",
-                params![
-                    user_status,
-                    user_progress,
-                    user_score,
-                    user_repeats,
-                    user_notes,
-                    custom_folder,
-                    resolved_started,
-                    resolved_completed,
-                    now,
-                    anime_id
-                ],
-            )
-            .map_err(|e| e.to_string())?;
-
-            // Fast O(1) indexed update of watched status for local episodes of this specific anime
-            conn.execute(
-                "UPDATE local_episodes
-                 SET watched = CASE WHEN episode_number IS NOT NULL AND episode_number <= ?1 THEN 1 ELSE 0 END
-                 WHERE matched_anime_id = ?2",
-                params![user_progress, anime_id],
-            )
-            .map_err(|e| e.to_string())?;
-        }
+            let needs = write_resolved_state_tx(&tx, anime_id, &state, sync_pending, now)?;
+            tx.commit().map_err(|e| e.to_string())?;
+            needs
+        };
 
         let entry = self.get_anime_entry_by_id(anime_id)?;
         Ok((entry, needs_full_rematch))
     }
 
-    pub fn batch_update_anime_entries(
+    /// Write several already-resolved user states in one transaction (see `sync::normalize_change`).
+    /// Also refreshes `local_episodes.watched`. Returns `true` if any `custom_folder` / `synonyms` changed.
+    pub fn write_resolved_states(
         &self,
-        patch: &BatchAnimeUpdatePatch,
-    ) -> Result<Vec<AnimeEntry>, String> {
-        if patch.anime_ids.is_empty() {
-            return Ok(Vec::new());
+        states: &[(i64, ResolvedState)],
+        sync_pending: bool,
+    ) -> Result<bool, String> {
+        if states.is_empty() {
+            return Ok(false);
         }
         let now = chrono::Utc::now().timestamp();
-        {
-            let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
-            let tx = conn.transaction().map_err(|e| e.to_string())?;
-            for &aid in &patch.anime_ids {
-                let existing: Option<(String, u32, Option<u32>, f64, u32, String, Option<String>, Option<String>)> = tx
-                    .query_row(
-                        "SELECT user_status, user_progress, episodes, user_score, user_repeats, user_notes, user_started_at, user_completed_at
-                         FROM anime_entries WHERE id = ?1",
-                        params![aid],
-                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)),
-                    )
-                    .optional()
-                    .map_err(|e| e.to_string())?;
-
-                let Some((cur_status, cur_prog, total_eps, cur_score, cur_repeats, cur_notes, cur_started, cur_completed)) = existing else {
-                    continue;
-                };
-
-                let mut next_prog = cur_prog;
-                if let Some(explicit_prog) = patch.user_progress {
-                    let max_ep = total_eps.unwrap_or(9999);
-                    next_prog = explicit_prog.min(max_ep);
-                } else if let Some(delta) = patch.progress_delta {
-                    let max_ep = total_eps.unwrap_or(9999) as i64;
-                    let computed = (cur_prog as i64 + delta as i64).clamp(0, max_ep);
-                    next_prog = computed as u32;
-                }
-                if patch.mark_completed_progress == Some(true) {
-                    if let Some(tot) = total_eps.filter(|&e| e > 0) {
-                        next_prog = tot;
-                    }
-                }
-
-                let mut next_status = patch.user_status.clone().unwrap_or_else(|| cur_status.clone());
-                if patch.user_status.is_none() && (patch.user_progress.is_some() || patch.progress_delta.is_some()) {
-                    if let Some(tot) = total_eps.filter(|&e| e > 0) {
-                        if next_prog >= tot {
-                            next_status = "COMPLETED".to_string();
-                        } else if next_prog > 0 && cur_status == "PLANNING" {
-                            next_status = "CURRENT".to_string();
-                        }
-                    } else if next_prog > 0 && cur_status == "PLANNING" {
-                        next_status = "CURRENT".to_string();
-                    }
-                }
-
-                let next_score = patch.user_score.unwrap_or(cur_score).clamp(0.0, 100.0);
-                let next_repeats = patch.user_repeats.unwrap_or(cur_repeats);
-
-                let next_notes = match &patch.user_notes {
-                    Some(new_text) => {
-                        if patch.notes_mode.as_deref() == Some("append") {
-                            let trimmed_new = new_text.trim();
-                            if trimmed_new.is_empty() {
-                                cur_notes
-                            } else if cur_notes.trim().is_empty() {
-                                trimmed_new.to_string()
-                            } else {
-                                format!("{}\n{}", cur_notes.trim(), trimmed_new)
-                            }
-                        } else {
-                            new_text.clone()
-                        }
-                    }
-                    None => cur_notes,
-                };
-
-                let next_started = match &patch.user_started_at {
-                    Some(s) => {
-                        let t = s.trim();
-                        if t.is_empty() { None } else { Some(t.to_string()) }
-                    }
-                    None => cur_started,
-                };
-
-                let next_completed = match &patch.user_completed_at {
-                    Some(s) => {
-                        let t = s.trim();
-                        if t.is_empty() { None } else { Some(t.to_string()) }
-                    }
-                    None => cur_completed,
-                };
-
-                tx.execute(
-                    "UPDATE anime_entries SET
-                        user_status = ?1,
-                        user_progress = ?2,
-                        user_score = ?3,
-                        user_repeats = ?4,
-                        user_notes = ?5,
-                        user_started_at = ?6,
-                        user_completed_at = ?7,
-                        updated_at = ?8
-                     WHERE id = ?9",
-                    params![
-                        next_status,
-                        next_prog,
-                        next_score,
-                        next_repeats,
-                        next_notes,
-                        next_started,
-                        next_completed,
-                        now,
-                        aid
-                    ],
-                )
-                .map_err(|e| e.to_string())?;
-
-                tx.execute(
-                    "UPDATE local_episodes
-                     SET watched = CASE WHEN episode_number IS NOT NULL AND episode_number <= ?1 THEN 1 ELSE 0 END
-                     WHERE matched_anime_id = ?2",
-                    params![next_prog, aid],
-                )
-                .map_err(|e| e.to_string())?;
-            }
-            tx.commit().map_err(|e| e.to_string())?;
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let mut needs_rematch = false;
+        for (anime_id, state) in states {
+            needs_rematch |= write_resolved_state_tx(&tx, *anime_id, state, sync_pending, now)?;
         }
-
-        let mut updated_entries = Vec::with_capacity(patch.anime_ids.len());
-        for &aid in &patch.anime_ids {
-            if let Ok(entry) = self.get_anime_entry_by_id(aid) {
-                updated_entries.push(entry);
-            }
-        }
-        Ok(updated_entries)
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(needs_rematch)
     }
 
     pub fn delete_anime_entry(&self, anime_id: i64) -> Result<(), String> {
         self.batch_delete_anime_entries(&[anime_id])
     }
 
+    /// Delete entries locally only (no tracker tombstones). Unmatches episodes and drops aliases.
     pub fn batch_delete_anime_entries(&self, anime_ids: &[i64]) -> Result<(), String> {
         if anime_ids.is_empty() {
             return Ok(());
@@ -1647,16 +1513,181 @@ impl Database {
         let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         for &aid in anime_ids {
-            tx.execute(
-                "UPDATE local_episodes SET matched_anime_id = NULL WHERE matched_anime_id = ?1",
-                params![aid],
-            )
-            .map_err(|e| e.to_string())?;
-            tx.execute("DELETE FROM anime_entries WHERE id = ?1", params![aid])
-                .map_err(|e| e.to_string())?;
+            delete_entry_rows_tx(&tx, aid)?;
         }
         tx.commit().map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    /// Delete entries locally and queue a tracker deletion (tombstone) for each one that has an AniList id,
+    /// all in one transaction. Returns the queued tombstones.
+    pub fn delete_entries_with_tombstones(
+        &self,
+        anime_ids: &[i64],
+    ) -> Result<Vec<PendingDeletion>, String> {
+        let now = chrono::Utc::now().timestamp();
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let mut tombstones = Vec::new();
+        for &aid in anime_ids {
+            let row: Option<(Option<i64>, Option<i64>, String)> = tx
+                .query_row(
+                    "SELECT anilist_id, anilist_list_entry_id, title_romaji FROM anime_entries WHERE id = ?1",
+                    params![aid],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
+            let Some((anilist_id, list_entry_id, title)) = row else {
+                continue;
+            };
+            delete_entry_rows_tx(&tx, aid)?;
+            if let Some(media_id) = anilist_id {
+                tx.execute(
+                    "INSERT OR REPLACE INTO tracker_pending_deletions (media_id, list_entry_id, title, created_at)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![media_id, list_entry_id, title, now],
+                )
+                .map_err(|e| e.to_string())?;
+                tombstones.push(PendingDeletion {
+                    media_id,
+                    list_entry_id,
+                    title,
+                });
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(tombstones)
+    }
+
+    pub fn list_pending_deletions(&self) -> Result<Vec<PendingDeletion>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT media_id, list_entry_id, title FROM tracker_pending_deletions ORDER BY created_at ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(PendingDeletion {
+                    media_id: r.get(0)?,
+                    list_entry_id: r.get(1)?,
+                    title: r.get(2)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    }
+
+    pub fn remove_pending_deletion(&self, media_id: i64) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM tracker_pending_deletions WHERE media_id = ?1",
+            params![media_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn count_pending_deletions(&self) -> Result<usize, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row("SELECT COUNT(*) FROM tracker_pending_deletions", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .map(|n| n as usize)
+        .map_err(|e| e.to_string())
+    }
+
+    /// Set the sync bookkeeping of an entry. `updated_at` / `list_entry_id` are only written when `Some`.
+    pub fn set_sync_result(
+        &self,
+        anime_id: i64,
+        pending: bool,
+        updated_at: Option<i64>,
+        list_entry_id: Option<i64>,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE anime_entries SET
+                sync_pending = ?1,
+                updated_at = COALESCE(?2, updated_at),
+                anilist_list_entry_id = COALESCE(?3, anilist_list_entry_id)
+             WHERE id = ?4",
+            params![pending, updated_at, list_entry_id, anime_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Record a successful push of `pushed` (the entry snapshot that was sent). Clears `sync_pending` and
+    /// adopts the tracker's `updated_at` only if the user fields are still exactly what was pushed; if the
+    /// entry was edited meanwhile it stays pending (only the list entry id is stored). Returns whether it cleared.
+    pub fn finish_push(
+        &self,
+        pushed: &AnimeEntry,
+        remote_updated_at: i64,
+        list_entry_id: i64,
+    ) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let changed = conn
+            .execute(
+                "UPDATE anime_entries SET sync_pending = 0, updated_at = ?1, anilist_list_entry_id = ?2
+                 WHERE id = ?3 AND user_status = ?4 AND user_progress = ?5 AND user_score = ?6
+                   AND user_repeats = ?7 AND user_notes = ?8
+                   AND user_started_at IS ?9 AND user_completed_at IS ?10",
+                params![
+                    remote_updated_at,
+                    list_entry_id,
+                    pushed.id,
+                    pushed.user_status,
+                    pushed.user_progress,
+                    pushed.user_score,
+                    pushed.user_repeats,
+                    pushed.user_notes,
+                    pushed.user_started_at,
+                    pushed.user_completed_at
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        if changed == 0 {
+            conn.execute(
+                "UPDATE anime_entries SET anilist_list_entry_id = ?1 WHERE id = ?2",
+                params![list_entry_id, pushed.id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        Ok(changed > 0)
+    }
+
+    pub fn list_pending_sync_ids(&self) -> Result<Vec<i64>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT id FROM anime_entries WHERE sync_pending = 1 ORDER BY updated_at ASC")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, i64>(0))
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    }
+
+    /// Number of entries with an unpushed local change.
+    pub fn count_pending(&self) -> Result<usize, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT COUNT(*) FROM anime_entries WHERE sync_pending = 1",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|n| n as usize)
+        .map_err(|e| e.to_string())
     }
 
     /// Build an in-memory AnimeMatcherIndex in a single SQL pass for ultra-fast batch matching.
@@ -1916,7 +1947,7 @@ impl Database {
         player_name: &str,
         file_name: &str,
         scrobbled: bool,
-    ) -> Result<(), String> {
+    ) -> Result<i64, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let now = chrono::Utc::now().timestamp();
         conn.execute(
@@ -1931,6 +1962,16 @@ impl Database {
                 scrobbled as i32,
                 now
             ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn mark_watch_history_scrobbled(&self, history_id: i64) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE watch_history SET scrobbled_to_tracker = 1 WHERE id = ?1",
+            params![history_id],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -2044,17 +2085,398 @@ impl Database {
     }
 }
 
+/// Minimal entry for tests (status PLANNING, no progress, 12 episodes).
+#[cfg(test)]
+pub(crate) fn test_entry(id: i64, title: &str) -> AnimeEntry {
+    AnimeEntry {
+        id,
+        anilist_id: Some(id),
+        mal_id: None,
+        title_romaji: title.to_string(),
+        title_english: None,
+        title_native: None,
+        synonyms: vec![],
+        format: "TV".into(),
+        airing_status: "FINISHED".into(),
+        episodes: Some(12),
+        duration: Some(24),
+        season: None,
+        season_year: None,
+        average_score: None,
+        cover_image: String::new(),
+        banner_image: None,
+        cover_color: None,
+        synopsis: String::new(),
+        genres: vec![],
+        studios: vec![],
+        next_airing_episode: None,
+        next_airing_at: None,
+        trailer_url: None,
+        site_url: None,
+        source_material: None,
+        user_status: "PLANNING".into(),
+        user_progress: 0,
+        user_score: 0.0,
+        user_repeats: 0,
+        user_notes: String::new(),
+        user_started_at: None,
+        user_completed_at: None,
+        custom_folder: None,
+        updated_at: 0,
+        local_episode_count: 0,
+        available_episodes: vec![],
+        sync_pending: false,
+        anilist_list_entry_id: None,
+    }
+}
+
+/// Realistic library used by matcher / scanner / relations tests (formerly the demo seed).
+#[cfg(test)]
+pub(crate) fn test_fixture_entries() -> Vec<AnimeEntry> {
+    let now = chrono::Utc::now().timestamp();
+    let kusuriya_s3 = AnimeEntry {
+        id: 195516,
+        anilist_id: Some(195516),
+        mal_id: Some(61987),
+        title_romaji: "Kusuriya no Hitorigoto 3rd Season".into(),
+        title_english: Some("The Apothecary Diaries Season 3".into()),
+        title_native: Some("薬屋のひとりごと 第3期".into()),
+        synonyms: vec!["Apothecary Diaries S3".into(), "Kusuriya S3".into()],
+        format: "TV".into(),
+        airing_status: "RELEASING".into(),
+        episodes: Some(12),
+        duration: Some(24),
+        season: Some("FALL".into()),
+        season_year: Some(2026),
+        average_score: Some(90),
+        cover_image: "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx161645-7I8C2721A1sV.jpg".into(),
+        banner_image: Some("https://s4.anilist.co/file/anilistcdn/media/anime/banner/161645-5A2V3gA8G4zZ.jpg".into()),
+        cover_color: Some("#059669".into()),
+        synopsis: "Third season of Kusuriya no Hitorigoto.".into(),
+        genres: vec!["Drama".into(), "Mystery".into()],
+        studios: vec!["OLM".into(), "TOHO animation STUDIO".into()],
+        next_airing_episode: Some(4),
+        next_airing_at: Some(now + 86400 * 3),
+        trailer_url: None,
+        site_url: Some("https://anilist.co/anime/195516".into()),
+        source_material: Some("LIGHT_NOVEL".into()),
+        user_status: "CURRENT".into(),
+        user_progress: 2,
+        user_score: 0.0,
+        user_repeats: 0,
+        user_notes: "".into(),
+        user_started_at: Some("2026-10-04".into()),
+        user_completed_at: None,
+        custom_folder: None,
+        updated_at: now - 100000,
+        local_episode_count: 0,
+        available_episodes: vec![],
+        sync_pending: false,
+        anilist_list_entry_id: None,
+    };
+    let starter_entries = vec![
+        AnimeEntry {
+            id: 154587,
+            anilist_id: Some(154587),
+            mal_id: Some(52991),
+            title_romaji: "Sousou no Frieren".into(),
+            title_english: Some("Frieren: Beyond Journey's End".into()),
+            title_native: Some("葬送のフリーレン".into()),
+            synonyms: vec!["Frieren".into(), "Sousou no Frieren".into()],
+            format: "TV".into(),
+            airing_status: "FINISHED".into(),
+            episodes: Some(28),
+            duration: Some(24),
+            season: Some("FALL".into()),
+            season_year: Some(2023),
+            average_score: Some(93),
+            cover_image: "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx154587-gHSraOSa0nBG.jpg".into(),
+            banner_image: Some("https://s4.anilist.co/file/anilistcdn/media/anime/banner/154587-ivXNJ23SM1xB.jpg".into()),
+            cover_color: Some("#a3e635".into()),
+            synopsis: "The adventure is over but life goes on for an elf mage just beginning to learn what living is all about. Elf mage Frieren and her courageous fellow adventurers have defeated the Demon King and brought peace to the land.".into(),
+            genres: vec!["Adventure".into(), "Drama".into(), "Fantasy".into()],
+            studios: vec!["Madhouse".into()],
+            next_airing_episode: None,
+            next_airing_at: None,
+            trailer_url: Some("https://www.youtube.com/watch?v=ZEkwCGJ3o7M".into()),
+            site_url: Some("https://anilist.co/anime/154587".into()),
+            source_material: Some("MANGA".into()),
+            user_status: "CURRENT".into(),
+            user_progress: 24,
+            user_score: 95.0,
+            user_repeats: 0,
+            user_notes: "Masterpiece adaptation by Madhouse. Watching in 1080p FLAC.".into(),
+            user_started_at: Some("2023-09-29".into()),
+            user_completed_at: None,
+            custom_folder: None,
+            updated_at: now - 3600,
+            local_episode_count: 0,
+            available_episodes: vec![],
+        sync_pending: false,
+        anilist_list_entry_id: None,
+        },
+        AnimeEntry {
+            id: 171018,
+            anilist_id: Some(171018),
+            mal_id: Some(57334),
+            title_romaji: "Dandadan".into(),
+            title_english: Some("DAN DA DAN".into()),
+            title_native: Some("ダンダダン".into()),
+            synonyms: vec!["Dandadan".into()],
+            format: "TV".into(),
+            airing_status: "RELEASING".into(),
+            episodes: Some(12),
+            duration: Some(24),
+            season: Some("FALL".into()),
+            season_year: Some(2024),
+            average_score: Some(87),
+            cover_image: "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx171018-2ldCj6QywuOa.jpg".into(),
+            banner_image: Some("https://s4.anilist.co/file/anilistcdn/media/anime/banner/171018-s0c272c2aI8v.jpg".into()),
+            cover_color: Some("#ef4444".into()),
+            synopsis: "Momo Ayase strikes up an unusual friendship with her school's UFO fanatic, whom she nicknames 'Okarun' because he has a name that is not to be said aloud.".into(),
+            genres: vec!["Action".into(), "Comedy".into(), "Sci-Fi".into(), "Supernatural".into()],
+            studios: vec!["Science SARU".into()],
+            next_airing_episode: Some(9),
+            next_airing_at: Some(now + 86400 * 2 + 14400),
+            trailer_url: Some("https://www.youtube.com/watch?v=0XJxfbN36Uw".into()),
+            site_url: Some("https://anilist.co/anime/171018".into()),
+            source_material: Some("MANGA".into()),
+            user_status: "CURRENT".into(),
+            user_progress: 8,
+            user_score: 90.0,
+            user_repeats: 0,
+            user_notes: "Science SARU storyboarding and colors are incredible.".into(),
+            user_started_at: Some("2024-10-03".into()),
+            user_completed_at: None,
+            custom_folder: None,
+            updated_at: now - 7200,
+            local_episode_count: 0,
+            available_episodes: vec![],
+        sync_pending: false,
+        anilist_list_entry_id: None,
+        },
+        AnimeEntry {
+            id: 153518,
+            anilist_id: Some(153518),
+            mal_id: Some(52701),
+            title_romaji: "Dungeon Meshi".into(),
+            title_english: Some("Delicious in Dungeon".into()),
+            title_native: Some("ダンジョン飯".into()),
+            synonyms: vec!["Dungeon Meshi".into()],
+            format: "TV".into(),
+            airing_status: "FINISHED".into(),
+            episodes: Some(24),
+            duration: Some(24),
+            season: Some("WINTER".into()),
+            season_year: Some(2024),
+            average_score: Some(86),
+            cover_image: "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx153518-7FNR7zCx22X5.jpg".into(),
+            banner_image: Some("https://s4.anilist.co/file/anilistcdn/media/anime/banner/153518-c362G717B2P7.jpg".into()),
+            cover_color: Some("#f59e0b".into()),
+            synopsis: "After the Golden Kingdom is sunk underground by an insane magician, its king emerges, promising all of his treasure to any who defeat the magician, before crumbling to dust.".into(),
+            genres: vec!["Adventure".into(), "Comedy".into(), "Fantasy".into()],
+            studios: vec!["Trigger".into()],
+            next_airing_episode: None,
+            next_airing_at: None,
+            trailer_url: None,
+            site_url: Some("https://anilist.co/anime/153518".into()),
+            source_material: Some("MANGA".into()),
+            user_status: "CURRENT".into(),
+            user_progress: 18,
+            user_score: 88.0,
+            user_repeats: 0,
+            user_notes: "Studio Trigger worldbuilding at its finest.".into(),
+            user_started_at: Some("2024-01-04".into()),
+            user_completed_at: None,
+            custom_folder: None,
+            updated_at: now - 18000,
+            local_episode_count: 0,
+            available_episodes: vec![],
+        sync_pending: false,
+        anilist_list_entry_id: None,
+        },
+        AnimeEntry {
+            id: 161645,
+            anilist_id: Some(161645),
+            mal_id: Some(54492),
+            title_romaji: "Kusuriya no Hitorigoto".into(),
+            title_english: Some("The Apothecary Diaries".into()),
+            title_native: Some("薬屋のひとりごと".into()),
+            synonyms: vec!["Kusuriya".into(), "Apothecary Diaries".into()],
+            format: "TV".into(),
+            airing_status: "FINISHED".into(),
+            episodes: Some(24),
+            duration: Some(24),
+            season: Some("FALL".into()),
+            season_year: Some(2023),
+            average_score: Some(88),
+            cover_image: "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx161645-7I8C2721A1sV.jpg".into(),
+            banner_image: Some("https://s4.anilist.co/file/anilistcdn/media/anime/banner/161645-5A2V3gA8G4zZ.jpg".into()),
+            cover_color: Some("#10b981".into()),
+            synopsis: "Maomao lived a peaceful life with her apothecary father. Until one day, she's sold as a lowly servant to the emperor's palace.".into(),
+            genres: vec!["Drama".into(), "Mystery".into()],
+            studios: vec!["OLM".into(), "TOHO animation STUDIO".into()],
+            next_airing_episode: None,
+            next_airing_at: None,
+            trailer_url: None,
+            site_url: Some("https://anilist.co/anime/161645".into()),
+            source_material: Some("LIGHT_NOVEL".into()),
+            user_status: "COMPLETED".into(),
+            user_progress: 24,
+            user_score: 92.0,
+            user_repeats: 1,
+            user_notes: "Maomao is one of the best protagonists in recent memory.".into(),
+            user_started_at: Some("2023-10-22".into()),
+            user_completed_at: Some("2024-03-24".into()),
+            custom_folder: None,
+            updated_at: now - 86400,
+            local_episode_count: 0,
+            available_episodes: vec![],
+        sync_pending: false,
+        anilist_list_entry_id: None,
+        },
+        AnimeEntry {
+            id: 130003,
+            anilist_id: Some(130003),
+            mal_id: Some(47917),
+            title_romaji: "Bocchi the Rock!".into(),
+            title_english: Some("BOCCHI THE ROCK!".into()),
+            title_native: Some("ぼっち・ざ・ろっく！".into()),
+            synonyms: vec!["Bocchi the Rock".into(), "BTR".into()],
+            format: "TV".into(),
+            airing_status: "FINISHED".into(),
+            episodes: Some(12),
+            duration: Some(24),
+            season: Some("FALL".into()),
+            season_year: Some(2022),
+            average_score: Some(88),
+            cover_image: "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx130003-5Y5a3R8nF9vP.jpg".into(),
+            banner_image: Some("https://s4.anilist.co/file/anilistcdn/media/anime/banner/130003-8B8f9k3wL2qR.jpg".into()),
+            cover_color: Some("#ec4899".into()),
+            synopsis: "Hitori Gotoh, a lonely high school girl whose heart lies in her guitar, makes no progress every day until she meets Nijika Ijichi, who is looking for a guitarist for her group 'Kessoku Band'.".into(),
+            genres: vec!["Comedy".into(), "Music".into(), "Slice of Life".into()],
+            studios: vec!["CloverWorks".into()],
+            next_airing_episode: None,
+            next_airing_at: None,
+            trailer_url: None,
+            site_url: Some("https://anilist.co/anime/130003".into()),
+            source_material: Some("MANGA".into()),
+            user_status: "COMPLETED".into(),
+            user_progress: 12,
+            user_score: 94.0,
+            user_repeats: 2,
+            user_notes: "Kessoku Band forever!".into(),
+            user_started_at: Some("2022-10-09".into()),
+            user_completed_at: Some("2022-12-25".into()),
+            custom_folder: None,
+            updated_at: now - 172800,
+            local_episode_count: 0,
+            available_episodes: vec![],
+        sync_pending: false,
+        anilist_list_entry_id: None,
+        },
+        AnimeEntry {
+            id: 4224,
+            anilist_id: Some(4224),
+            mal_id: Some(4224),
+            title_romaji: "Toradora!".into(),
+            title_english: Some("Toradora!".into()),
+            title_native: Some("とらドラ！".into()),
+            synonyms: vec!["Toradora".into(), "Tiger x Dragon".into()],
+            format: "TV".into(),
+            airing_status: "FINISHED".into(),
+            episodes: Some(25),
+            duration: Some(24),
+            season: Some("FALL".into()),
+            season_year: Some(2008),
+            average_score: Some(80),
+            cover_image: "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx4224-3k2b8R7x9L1q.jpg".into(),
+            banner_image: None,
+            cover_color: Some("#f97316".into()),
+            synopsis: "Ryuuji Takasu is a gentle high school student with a love for housework; but in contrast to his kind nature, he has an intimidating face that often gets him labeled as a delinquent. He meets Taiga Aisaka, the 'Palmtop Tiger'.".into(),
+            genres: vec!["Comedy".into(), "Drama".into(), "Romance".into(), "Slice of Life".into()],
+            studios: vec!["J.C.Staff".into()],
+            next_airing_episode: None,
+            next_airing_at: None,
+            trailer_url: None,
+            site_url: Some("https://anilist.co/anime/4224".into()),
+            source_material: Some("LIGHT_NOVEL".into()),
+            user_status: "COMPLETED".into(),
+            user_progress: 25,
+            user_score: 90.0,
+            user_repeats: 3,
+            user_notes: "The namesake of Taiga & Tora!".into(),
+            user_started_at: Some("2008-10-02".into()),
+            user_completed_at: Some("2009-03-26".into()),
+            custom_folder: None,
+            updated_at: now - 250000,
+            local_episode_count: 0,
+            available_episodes: vec![],
+        sync_pending: false,
+        anilist_list_entry_id: None,
+        },
+        AnimeEntry {
+            id: 176301,
+            anilist_id: Some(176301),
+            mal_id: Some(58514),
+            title_romaji: "Kusuriya no Hitorigoto 2nd Season".into(),
+            title_english: Some("The Apothecary Diaries Season 2".into()),
+            title_native: Some("薬屋のひとりごと 第2期".into()),
+            synonyms: vec!["Apothecary Diaries S2".into()],
+            format: "TV".into(),
+            airing_status: "RELEASING".into(),
+            episodes: Some(24),
+            duration: Some(24),
+            season: Some("WINTER".into()),
+            season_year: Some(2025),
+            average_score: Some(89),
+            cover_image: "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx176301-mO8z6P2k1W9q.jpg".into(),
+            banner_image: None,
+            cover_color: Some("#14b8a6".into()),
+            synopsis: "Second season of Kusuriya no Hitorigoto as Maomao and Jinshi uncover deeper conspiracies within the Imperial Court.".into(),
+            genres: vec!["Drama".into(), "Mystery".into()],
+            studios: vec!["OLM".into(), "TOHO animation STUDIO".into()],
+            next_airing_episode: Some(12),
+            next_airing_at: Some(now + 86400 * 4 + 7200),
+            trailer_url: None,
+            site_url: Some("https://anilist.co/anime/176301".into()),
+            source_material: Some("LIGHT_NOVEL".into()),
+            user_status: "PLANNING".into(),
+            user_progress: 0,
+            user_score: 0.0,
+            user_repeats: 0,
+            user_notes: "Queued for seasonal watch.".into(),
+            user_started_at: None,
+            user_completed_at: None,
+            custom_folder: None,
+            updated_at: now - 300000,
+            local_episode_count: 0,
+            available_episodes: vec![],
+        sync_pending: false,
+        anilist_list_entry_id: None,
+        },
+        kusuriya_s3,
+    ];
+    starter_entries
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::detection::anitomy::parse_filename;
 
+    fn fixture_db(name: &str) -> (Database, std::path::PathBuf) {
+        let tmp_dir = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        let db = Database::open(&tmp_dir.join("test.db")).expect("open test db");
+        db.upsert_anime_entries_batch(&test_fixture_entries())
+            .expect("load fixtures");
+        (db, tmp_dir)
+    }
+
     #[test]
     fn test_fuzzy_matching_and_alias_linking() {
-        let tmp_dir = std::env::temp_dir().join("tora_test_db_fuzzy");
-        let _ = std::fs::remove_dir_all(&tmp_dir);
-        let db_path = tmp_dir.join("test.db");
-        let db = Database::open(&db_path).expect("open test db");
+        let (db, tmp_dir) = fixture_db("tora_test_db_fuzzy");
 
         // 1. "[Judas] Kusuriya - S03E03.mkv" matches "Kusuriya no Hitorigoto 3rd Season"
         let mut parsed_s3 = parse_filename("[Judas] Kusuriya - S03E03.mkv");
@@ -2097,71 +2519,332 @@ mod tests {
         assert_eq!(matched_ep2.0, 154587);
         assert_eq!(matched_ep2.1, "Sousou no Frieren");
 
+        drop(db);
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 
     #[test]
-    fn test_batch_update_and_delete_anime_entries() {
-        let tmp_dir = std::env::temp_dir().join("tora_test_db_batch");
-        let _ = std::fs::remove_dir_all(&tmp_dir);
-        let db_path = tmp_dir.join("test.db");
-        let db = Database::open(&db_path).expect("open test db");
+    fn test_write_resolved_states_and_delete() {
+        let db = Database::open_in_memory().expect("db");
+        db.upsert_anime_entries_batch(&[test_entry(1, "Alpha"), test_entry(2, "Beta")])
+            .unwrap();
 
-        let target_ids = vec![176301, 195516];
-        let patch = BatchAnimeUpdatePatch {
-            anime_ids: target_ids.clone(),
-            user_status: Some("CURRENT".into()),
-            user_progress: None,
-            progress_delta: Some(2),
-            mark_completed_progress: None,
-            user_score: Some(88.0),
-            user_repeats: None,
-            user_notes: Some("Watching seasonal".into()),
-            notes_mode: Some("append".into()),
+        let state = ResolvedState {
+            user_status: "CURRENT".into(),
+            user_progress: 2,
+            user_score: 88.0,
+            user_repeats: 0,
+            user_notes: "notes".into(),
             user_started_at: Some("2026-01-15".into()),
             user_completed_at: None,
+            custom_folder: None,
+            synonyms: None,
         };
+        let needs = db
+            .write_resolved_states(&[(1, state.clone()), (2, state.clone())], true)
+            .unwrap();
+        assert!(!needs);
+        let a = db.get_anime_entry_by_id(1).unwrap();
+        assert_eq!(a.user_status, "CURRENT");
+        assert_eq!(a.user_progress, 2);
+        assert_eq!(a.user_started_at.as_deref(), Some("2026-01-15"));
+        assert!(a.sync_pending);
 
-        let updated = db
-            .batch_update_anime_entries(&patch)
-            .expect("batch update should succeed");
-        assert_eq!(updated.len(), 2);
+        // A non-pending write never clears an existing pending flag
+        let mut cleared = state.clone();
+        cleared.user_started_at = Some(String::new());
+        cleared.custom_folder = Some("D:/Anime/Alpha".into());
+        assert!(db.write_resolved_states(&[(1, cleared)], false).unwrap());
+        let a = db.get_anime_entry_by_id(1).unwrap();
+        assert!(a.sync_pending);
+        assert_eq!(a.user_started_at, None);
+        assert_eq!(a.custom_folder.as_deref(), Some("D:/Anime/Alpha"));
 
-        let s2 = db.get_anime_entry_by_id(176301).expect("get s2");
-        assert_eq!(s2.user_status, "CURRENT");
-        assert_eq!(s2.user_progress, 2);
-        assert_eq!(s2.user_score, 88.0);
-        assert!(s2.user_notes.contains("Queued for seasonal watch."));
-        assert!(s2.user_notes.contains("Watching seasonal"));
-        assert_eq!(s2.user_started_at.as_deref(), Some("2026-01-15"));
+        assert_eq!(db.count_pending().unwrap(), 2);
+        assert_eq!(db.list_pending_sync_ids().unwrap().len(), 2);
 
-        // Clear date started via empty string
-        let clear_patch = BatchAnimeUpdatePatch {
-            anime_ids: vec![176301],
-            user_status: None,
-            user_progress: None,
-            progress_delta: None,
-            mark_completed_progress: Some(true),
-            user_score: None,
-            user_repeats: None,
-            user_notes: None,
-            notes_mode: None,
-            user_started_at: Some("".into()),
-            user_completed_at: Some("2026-03-30".into()),
-        };
-        db.batch_update_anime_entries(&clear_patch)
-            .expect("clear date patch");
-        let s2_after = db.get_anime_entry_by_id(176301).expect("get s2 after");
-        assert_eq!(s2_after.user_started_at, None);
-        assert_eq!(s2_after.user_completed_at.as_deref(), Some("2026-03-30"));
-        assert_eq!(s2_after.user_progress, 24);
+        db.batch_delete_anime_entries(&[1, 2]).expect("batch delete");
+        assert!(db.get_anime_entry_by_id(1).is_err());
+        assert!(db.get_anime_entry_by_id(2).is_err());
+        assert_eq!(db.count_pending_deletions().unwrap(), 0);
+    }
 
-        // Batch delete
-        db.batch_delete_anime_entries(&target_ids)
-            .expect("batch delete");
-        assert!(db.get_anime_entry_by_id(176301).is_err());
-        assert!(db.get_anime_entry_by_id(195516).is_err());
+    fn insert_matched_episode(db: &Database, anime_id: i64, file: &str) {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO library_folders (id, path, label, drive_root) VALUES (1, 'C:/lib', 'lib', 'C:')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO local_episodes (folder_id, file_path, file_name, drive_root, parsed_title, normalized_title, episode_number, matched_anime_id)
+             VALUES (1, ?1, ?1, 'C:', 'x', 'x', 1, ?2)",
+            params![file, anime_id],
+        )
+        .unwrap();
+    }
 
-        let _ = std::fs::remove_dir_all(&tmp_dir);
+    fn matched_id_of(db: &Database, file: &str) -> Option<i64> {
+        let conn = db.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT matched_anime_id FROM local_episodes WHERE file_path = ?1",
+            params![file],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    fn alias_count(db: &Database, anime_id: i64) -> i64 {
+        let conn = db.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM title_aliases WHERE anime_id = ?1",
+            params![anime_id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_migrations_purge_null_anilist_and_seed() {
+        let db = Database::open_in_memory().expect("db");
+        db.upsert_anime_entries_batch(&[
+            test_entry(154587, "Sousou no Frieren"),
+            test_entry(5114, "Fullmetal Alchemist: Brotherhood"),
+        ])
+        .unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO anime_entries (id, anilist_id, title_romaji) VALUES (900001, NULL, 'Local Only')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO title_aliases (normalized_alias, anime_id) VALUES ('local only', 900001)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO title_aliases (normalized_alias, anime_id) VALUES ('frieren alias', 154587)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO torrent_rules (name) VALUES ('SubsPlease 1080p (Watching)'), ('Dandadan - Erai-raws 1080p Auto'), ('My Own Rule')",
+                [],
+            )
+            .unwrap();
+        }
+        insert_matched_episode(&db, 900001, "C:/lib/local.mkv");
+        insert_matched_episode(&db, 154587, "C:/lib/frieren.mkv");
+
+        // No seed marker: only the NULL-anilist row is purged
+        db.init_schema().unwrap();
+        assert!(db.get_anime_entry_by_id(900001).is_err());
+        assert_eq!(alias_count(&db, 900001), 0);
+        assert_eq!(matched_id_of(&db, "C:/lib/local.mkv"), None);
+        assert!(db.get_anime_entry_by_id(154587).is_ok());
+        assert_eq!(matched_id_of(&db, "C:/lib/frieren.mkv"), Some(154587));
+        assert_eq!(db.list_torrent_rules().unwrap().len(), 3);
+
+        // With the marker: seeded anime + rules are purged, the marker is removed
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO app_settings (key, value_json) VALUES ('seeded_kusuriya_s3', 'true')",
+                [],
+            )
+            .unwrap();
+        }
+        db.init_schema().unwrap();
+        assert!(db.get_anime_entry_by_id(154587).is_err());
+        assert_eq!(alias_count(&db, 154587), 0);
+        assert_eq!(matched_id_of(&db, "C:/lib/frieren.mkv"), None);
+        assert!(db.get_anime_entry_by_id(5114).is_ok());
+        let rules = db.list_torrent_rules().unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].name, "My Own Rule");
+        {
+            let conn = db.conn.lock().unwrap();
+            let marker: Option<String> = conn
+                .query_row(
+                    "SELECT value_json FROM app_settings WHERE key = 'seeded_kusuriya_s3'",
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()
+                .unwrap();
+            assert!(marker.is_none());
+        }
+
+        // Re-running is a no-op; a re-added entry with the same id survives
+        db.upsert_anime_entry(&test_entry(154587, "Sousou no Frieren"))
+            .unwrap();
+        db.init_schema().unwrap();
+        assert!(db.get_anime_entry_by_id(154587).is_ok());
+        assert!(db.get_anime_entry_by_id(5114).is_ok());
+    }
+
+    #[test]
+    fn test_merge_remote_list_rules() {
+        let db = Database::open_in_memory().expect("db");
+
+        let mut a = test_entry(1, "Alpha");
+        a.user_status = "CURRENT".into();
+        a.user_progress = 3;
+        a.updated_at = 100;
+        a.custom_folder = Some("D:/Anime/Alpha".into());
+        a.synonyms = vec!["Local Alpha".into()];
+        let mut b = test_entry(2, "Beta");
+        b.user_status = "CURRENT".into();
+        b.user_progress = 5;
+        b.updated_at = 500;
+        let mut c = test_entry(3, "Gamma");
+        c.user_progress = 2;
+        c.user_status = "CURRENT".into();
+        c.updated_at = 100;
+        c.sync_pending = true;
+        let mut d = test_entry(4, "Delta");
+        d.updated_at = 100;
+        let mut e = test_entry(5, "Epsilon");
+        e.updated_at = 100;
+        e.sync_pending = true;
+        let mut same = test_entry(9, "Same");
+        same.updated_at = 100;
+        db.upsert_anime_entries_batch(&[a, b, c, d, e, same.clone()])
+            .unwrap();
+        insert_matched_episode(&db, 4, "C:/lib/delta.mkv");
+
+        let mut ra = test_entry(1, "Alpha");
+        ra.user_status = "CURRENT".into();
+        ra.user_progress = 7;
+        ra.updated_at = 200;
+        ra.anilist_list_entry_id = Some(9001);
+        ra.synonyms = vec!["Remote Alpha".into()];
+        let mut rb = test_entry(2, "Beta");
+        rb.user_status = "CURRENT".into();
+        rb.user_progress = 4;
+        rb.updated_at = 400;
+        let mut rc = test_entry(3, "Gamma (renamed)");
+        rc.user_status = "CURRENT".into();
+        rc.user_progress = 9;
+        rc.updated_at = 900;
+        let rg = test_entry(7, "Tombstoned");
+        let mut rh = test_entry(8, "New One");
+        rh.user_status = "CURRENT".into();
+        rh.user_progress = 1;
+        rh.updated_at = 300;
+        let mut rsame = same.clone();
+        rsame.updated_at = 150;
+
+        let skip: HashSet<i64> = [7].into_iter().collect();
+        let stats = db
+            .merge_remote_list(&[ra, rb, rc, rg, rh, rsame], &skip, true)
+            .unwrap();
+        assert_eq!(stats.added, 1);
+        assert_eq!(stats.updated_from_remote, 1);
+        assert_eq!(stats.kept_local, 2);
+        assert_eq!(stats.deleted, 1);
+        assert_eq!(stats.deletion_skipped_reason, None);
+
+        // Remote newer -> remote wins; custom_folder preserved; synonyms merged; list entry id stored
+        let a = db.get_anime_entry_by_id(1).unwrap();
+        assert_eq!(a.user_progress, 7);
+        assert_eq!(a.updated_at, 200);
+        assert_eq!(a.custom_folder.as_deref(), Some("D:/Anime/Alpha"));
+        assert!(a.synonyms.iter().any(|s| s == "Local Alpha"));
+        assert!(a.synonyms.iter().any(|s| s == "Remote Alpha"));
+        assert_eq!(a.anilist_list_entry_id, Some(9001));
+        // Local newer -> local kept
+        let b = db.get_anime_entry_by_id(2).unwrap();
+        assert_eq!(b.user_progress, 5);
+        assert_eq!(b.updated_at, 500);
+        // Pending -> local user fields kept, metadata refreshed, still pending
+        let c = db.get_anime_entry_by_id(3).unwrap();
+        assert_eq!(c.user_progress, 2);
+        assert_eq!(c.title_romaji, "Gamma (renamed)");
+        assert!(c.sync_pending);
+        // Missing remotely -> deleted (episode unmatched); pending one survives
+        assert!(db.get_anime_entry_by_id(4).is_err());
+        assert_eq!(matched_id_of(&db, "C:/lib/delta.mkv"), None);
+        assert!(db.get_anime_entry_by_id(5).is_ok());
+        // Tombstoned -> not inserted; new -> inserted
+        assert!(db.get_anime_entry_by_id(7).is_err());
+        let h = db.get_anime_entry_by_id(8).unwrap();
+        assert_eq!(h.user_progress, 1);
+        assert!(!h.sync_pending);
+
+        // Empty remote list never wipes the local library
+        let stats = db.merge_remote_list(&[], &HashSet::new(), true).unwrap();
+        assert_eq!(stats.deleted, 0);
+        assert!(stats.deletion_skipped_reason.is_some());
+        assert!(db.get_anime_entry_by_id(1).is_ok());
+
+        // delete_missing = false never deletes
+        let stats = db
+            .merge_remote_list(&[test_entry(1, "Alpha")], &HashSet::new(), false)
+            .unwrap();
+        assert_eq!(stats.deleted, 0);
+        assert!(db.get_anime_entry_by_id(2).is_ok());
+    }
+
+    #[test]
+    fn test_tombstones_and_finish_push_guard() {
+        let db = Database::open_in_memory().expect("db");
+        let mut a = test_entry(1, "Alpha");
+        a.anilist_list_entry_id = Some(77);
+        db.upsert_anime_entries_batch(&[a, test_entry(2, "Beta")])
+            .unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO title_aliases (normalized_alias, anime_id) VALUES ('alpha alias', 1)",
+                [],
+            )
+            .unwrap();
+        }
+
+        // finish_push only clears pending if the entry is unchanged since the push snapshot
+        let (pushed, _) = db
+            .update_anime_user_state(2, "CURRENT", 1, 0.0, 0, "", None, None, None, None, true)
+            .unwrap();
+        assert!(pushed.sync_pending);
+        db.update_anime_user_state(2, "CURRENT", 2, 0.0, 0, "", None, None, None, None, true)
+            .unwrap();
+        assert!(!db.finish_push(&pushed, 12345, 555).unwrap());
+        let b = db.get_anime_entry_by_id(2).unwrap();
+        assert!(b.sync_pending);
+        assert_eq!(b.anilist_list_entry_id, Some(555));
+        assert!(db.finish_push(&b, 12345, 555).unwrap());
+        let b = db.get_anime_entry_by_id(2).unwrap();
+        assert!(!b.sync_pending);
+        assert_eq!(b.updated_at, 12345);
+
+        db.set_sync_result(2, true, None, None).unwrap();
+        assert_eq!(db.list_pending_sync_ids().unwrap(), vec![2]);
+
+        let tombs = db.delete_entries_with_tombstones(&[1, 999]).unwrap();
+        assert_eq!(
+            tombs,
+            vec![PendingDeletion {
+                media_id: 1,
+                list_entry_id: Some(77),
+                title: "Alpha".into()
+            }]
+        );
+        assert!(db.get_anime_entry_by_id(1).is_err());
+        assert_eq!(alias_count(&db, 1), 0);
+        assert_eq!(db.list_pending_deletions().unwrap(), tombs);
+        assert_eq!(db.count_pending_deletions().unwrap(), 1);
+        db.remove_pending_deletion(1).unwrap();
+        assert!(db.list_pending_deletions().unwrap().is_empty());
+
+        let hid = db
+            .record_watch_history(Some(2), "Beta", 1, "mpv", "beta.mkv", false)
+            .unwrap();
+        db.mark_watch_history_scrobbled(hid).unwrap();
+        let hist = db.list_watch_history(10).unwrap();
+        assert_eq!(hist[0].id, hid);
+        assert!(hist[0].scrobbled_to_tracker);
     }
 }

@@ -4,6 +4,7 @@ use crate::db::AnimeEntry;
 use crate::plugins::anilist::AniListPlugin;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -31,6 +32,96 @@ pub struct TrackerUserProfile {
     pub authenticated: bool,
 }
 
+/// Boxed, `Send` future used by the object-safe [`TrackerPlugin`] trait.
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// Typed tracker failure so the sync service can decide between retrying, re-authenticating
+/// or surfacing an error to the user.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TrackerError {
+    /// Transport failure, timeout or a 5xx from the tracker. Transient.
+    Network(String),
+    /// HTTP 429. The caller should wait `retry_after_secs` before retrying.
+    RateLimited { retry_after_secs: u64 },
+    /// Missing, expired or revoked OAuth token.
+    Unauthorized(String),
+    /// The requested media / list entry does not exist.
+    NotFound(String),
+    /// Any other tracker-side or protocol error.
+    Api(String),
+}
+
+impl TrackerError {
+    /// Stable machine-readable kind sent to the frontend in `tracker-sync-error` events.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            TrackerError::Network(_) => "network",
+            TrackerError::RateLimited { .. } => "rate_limited",
+            TrackerError::Unauthorized(_) => "unauthorized",
+            TrackerError::NotFound(_) => "not_found",
+            TrackerError::Api(_) => "api",
+        }
+    }
+}
+
+impl fmt::Display for TrackerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TrackerError::Network(m) => write!(f, "{}", m),
+            TrackerError::RateLimited { retry_after_secs } => write!(
+                f,
+                "Tracker rate limit reached, retry after {} seconds",
+                retry_after_secs
+            ),
+            TrackerError::Unauthorized(m) => write!(f, "{}", m),
+            TrackerError::NotFound(m) => write!(f, "{}", m),
+            TrackerError::Api(m) => write!(f, "{}", m),
+        }
+    }
+}
+
+impl std::error::Error for TrackerError {}
+
+impl From<TrackerError> for String {
+    fn from(e: TrackerError) -> Self {
+        e.to_string()
+    }
+}
+
+/// Full user-state payload pushed to a tracker for one media entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TrackerEntryUpdate {
+    pub media_id: i64,
+    pub status: String,
+    pub progress: u32,
+    /// 0..=100 (`POINT_100` / `scoreRaw` on AniList).
+    pub score: f64,
+    pub repeat: u32,
+    pub notes: String,
+    /// `YYYY-MM-DD`; `None` clears the date on the tracker.
+    pub started_at: Option<String>,
+    /// `YYYY-MM-DD`; `None` clears the date on the tracker.
+    pub completed_at: Option<String>,
+}
+
+/// State the tracker reports back after a successful save.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RemoteEntryState {
+    pub list_entry_id: i64,
+    pub status: String,
+    pub progress: u32,
+    /// Unix seconds.
+    pub updated_at: i64,
+}
+
+/// The authenticated viewer's complete anime list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteListSnapshot {
+    pub viewer_id: i64,
+    /// Deduplicated by media id. Each entry carries `anilist_list_entry_id` and the remote `updated_at`.
+    pub entries: Vec<AnimeEntry>,
+}
+
 /// Core internal trait for all anime tracker plugins (AniList, MyAnimeList, Kitsu, Shikimori, etc.)
 pub trait TrackerPlugin: Send + Sync {
     fn descriptor(&self) -> TrackerPluginDescriptor;
@@ -39,36 +130,46 @@ pub trait TrackerPlugin: Send + Sync {
         &'a self,
         username: &'a str,
         token: Option<&'a str>,
-    ) -> Pin<Box<dyn Future<Output = Result<TrackerUserProfile, String>> + Send + 'a>>;
+    ) -> BoxFuture<'a, Result<TrackerUserProfile, String>>;
 
+    /// Fetch the authenticated viewer's full anime list.
     fn fetch_user_list<'a>(
         &'a self,
-        username: &'a str,
-        token: Option<&'a str>,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<AnimeEntry>, String>> + Send + 'a>>;
+        token: &'a str,
+    ) -> BoxFuture<'a, Result<RemoteListSnapshot, TrackerError>>;
 
     fn search_anime<'a>(
         &'a self,
         query: &'a str,
         season: Option<&'a str>,
         year: Option<u32>,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<AnimeEntry>, String>> + Send + 'a>>;
+    ) -> BoxFuture<'a, Result<Vec<AnimeEntry>, String>>;
 
-    fn update_list_entry<'a>(
+    /// Create or update the viewer's list entry for `update.media_id`.
+    fn save_list_entry<'a>(
+        &'a self,
+        token: &'a str,
+        update: &'a TrackerEntryUpdate,
+    ) -> BoxFuture<'a, Result<RemoteEntryState, TrackerError>>;
+
+    /// Delete the viewer's list entry for `media_id`. Already-missing entries count as success.
+    fn delete_list_entry<'a>(
         &'a self,
         token: &'a str,
         media_id: i64,
-        status: &'a str,
-        progress: u32,
-        score: f64,
-        repeat: u32,
-        notes: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
+        list_entry_id: Option<i64>,
+    ) -> BoxFuture<'a, Result<(), TrackerError>>;
 }
 
 /// Stub plugin implementation for additional trackers in the plugin registry.
 struct StubTrackerPlugin {
     desc: TrackerPluginDescriptor,
+}
+
+impl StubTrackerPlugin {
+    fn not_configured(&self) -> TrackerError {
+        TrackerError::Api(format!("{} plugin is not yet configured.", self.desc.name))
+    }
 }
 
 impl TrackerPlugin for StubTrackerPlugin {
@@ -80,7 +181,7 @@ impl TrackerPlugin for StubTrackerPlugin {
         &'a self,
         _username: &'a str,
         _token: Option<&'a str>,
-    ) -> Pin<Box<dyn Future<Output = Result<TrackerUserProfile, String>> + Send + 'a>> {
+    ) -> BoxFuture<'a, Result<TrackerUserProfile, String>> {
         let name = self.desc.name.clone();
         Box::pin(async move {
             Err(format!(
@@ -92,11 +193,10 @@ impl TrackerPlugin for StubTrackerPlugin {
 
     fn fetch_user_list<'a>(
         &'a self,
-        _username: &'a str,
-        _token: Option<&'a str>,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<AnimeEntry>, String>> + Send + 'a>> {
-        let name = self.desc.name.clone();
-        Box::pin(async move { Err(format!("{} plugin is not yet configured.", name)) })
+        _token: &'a str,
+    ) -> BoxFuture<'a, Result<RemoteListSnapshot, TrackerError>> {
+        let err = self.not_configured();
+        Box::pin(async move { Err(err) })
     }
 
     fn search_anime<'a>(
@@ -104,23 +204,28 @@ impl TrackerPlugin for StubTrackerPlugin {
         _query: &'a str,
         _season: Option<&'a str>,
         _year: Option<u32>,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<AnimeEntry>, String>> + Send + 'a>> {
+    ) -> BoxFuture<'a, Result<Vec<AnimeEntry>, String>> {
         let name = self.desc.name.clone();
         Box::pin(async move { Err(format!("{} plugin is not yet configured.", name)) })
     }
 
-    fn update_list_entry<'a>(
+    fn save_list_entry<'a>(
+        &'a self,
+        _token: &'a str,
+        _update: &'a TrackerEntryUpdate,
+    ) -> BoxFuture<'a, Result<RemoteEntryState, TrackerError>> {
+        let err = self.not_configured();
+        Box::pin(async move { Err(err) })
+    }
+
+    fn delete_list_entry<'a>(
         &'a self,
         _token: &'a str,
         _media_id: i64,
-        _status: &'a str,
-        _progress: u32,
-        _score: f64,
-        _repeat: u32,
-        _notes: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
-        let name = self.desc.name.clone();
-        Box::pin(async move { Err(format!("{} plugin is not yet configured.", name)) })
+        _list_entry_id: Option<i64>,
+    ) -> BoxFuture<'a, Result<(), TrackerError>> {
+        let err = self.not_configured();
+        Box::pin(async move { Err(err) })
     }
 }
 
@@ -173,6 +278,11 @@ impl PluginManager {
             self.plugins.values().map(|p| p.descriptor()).collect();
         list.sort_by(|a, b| a.id.cmp(&b.id));
         list
+    }
+
+    /// Register (or replace) a plugin under `plugin_id`. Used by tests to inject mock trackers.
+    pub fn register(&mut self, plugin_id: &str, plugin: Arc<dyn TrackerPlugin>) {
+        self.plugins.insert(plugin_id.to_string(), plugin);
     }
 
     pub fn get(&self, plugin_id: &str) -> Option<Arc<dyn TrackerPlugin>> {

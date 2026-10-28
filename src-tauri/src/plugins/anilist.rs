@@ -1,14 +1,19 @@
 use crate::db::AnimeEntry;
-use crate::plugins::{TrackerPlugin, TrackerPluginDescriptor, TrackerUserProfile};
+use crate::plugins::{
+    BoxFuture, RemoteEntryState, RemoteListSnapshot, TrackerEntryUpdate, TrackerError,
+    TrackerPlugin, TrackerPluginDescriptor, TrackerUserProfile,
+};
 use reqwest::Client;
 use serde_json::{json, Value};
-use std::future::Future;
-use std::pin::Pin;
+use std::collections::HashSet;
+use std::sync::Mutex;
 
 const ANILIST_GRAPHQL_URL: &str = "https://graphql.anilist.co";
 
 pub struct AniListPlugin {
     client: Client,
+    /// `(token, viewer_id)` of the last resolved `Viewer`, so deletes don't need an extra round trip.
+    viewer_cache: Mutex<Option<(String, i64)>>,
 }
 
 impl AniListPlugin {
@@ -18,7 +23,10 @@ impl AniListPlugin {
             .timeout(std::time::Duration::from_secs(20))
             .build()
             .unwrap_or_default();
-        Self { client }
+        Self {
+            client,
+            viewer_cache: Mutex::new(None),
+        }
     }
 
     fn strip_html(input: &str) -> String {
@@ -197,6 +205,7 @@ impl AniListPlugin {
             user_started_at,
             user_completed_at,
             updated_at,
+            list_entry_id,
         ) = if let Some(en) = entry_node {
             (
                 en.get("status")
@@ -220,10 +229,12 @@ impl AniListPlugin {
                 parse_fuzzy_date(en.get("completedAt")),
                 en.get("updatedAt")
                     .and_then(|v| v.as_i64())
+                    .filter(|&t| t > 0)
                     .unwrap_or(now),
+                en.get("id").and_then(|v| v.as_i64()),
             )
         } else {
-            ("PLANNING".to_string(), 0, 0.0, 0, String::new(), None, None, now)
+            ("PLANNING".to_string(), 0, 0.0, 0, String::new(), None, None, now, None)
         };
 
         Some(AnimeEntry {
@@ -263,6 +274,8 @@ impl AniListPlugin {
             updated_at,
             local_episode_count: 0,
             available_episodes: vec![],
+            sync_pending: false,
+            anilist_list_entry_id: list_entry_id,
         })
     }
 
@@ -271,7 +284,7 @@ impl AniListPlugin {
         query: &str,
         variables: Value,
         token: Option<&str>,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, TrackerError> {
         let mut req = self
             .client
             .post(ANILIST_GRAPHQL_URL)
@@ -289,27 +302,152 @@ impl AniListPlugin {
         let resp = req
             .send()
             .await
-            .map_err(|e| format!("AniList network error: {}", e))?;
+            .map_err(|e| TrackerError::Network(format!("AniList network error: {}", e)))?;
         let status = resp.status();
-        let body: Value = resp
-            .json()
+        let retry_after = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.trim().parse::<u64>().ok());
+        let text = resp
+            .text()
             .await
-            .map_err(|e| format!("Failed to parse AniList JSON response: {}", e))?;
+            .map_err(|e| TrackerError::Network(format!("AniList network error: {}", e)))?;
 
-        if !status.is_success() || body.get("errors").is_some() {
-            let err_msg = body
-                .get("errors")
-                .and_then(|e| e.as_array())
-                .and_then(|a| a.first())
-                .and_then(|first| first.get("message"))
-                .and_then(|m| m.as_str())
-                .unwrap_or("Unknown AniList GraphQL error");
-            return Err(format!("AniList API Error ({}): {}", status, err_msg));
+        classify_graphql_response(status.as_u16(), retry_after, &text)
+    }
+
+    /// Resolve the authenticated viewer id (cached per token).
+    async fn viewer_id(&self, token: &str) -> Result<i64, TrackerError> {
+        if let Ok(guard) = self.viewer_cache.lock() {
+            if let Some((cached_tok, id)) = guard.as_ref() {
+                if cached_tok == token {
+                    return Ok(*id);
+                }
+            }
         }
+        let data = self
+            .graphql_request("query { Viewer { id name } }", json!({}), Some(token))
+            .await?;
+        let id = data
+            .get("Viewer")
+            .and_then(|v| v.get("id"))
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| {
+                TrackerError::Unauthorized("AniList did not return a Viewer for this token".into())
+            })?;
+        if let Ok(mut guard) = self.viewer_cache.lock() {
+            *guard = Some((token.to_string(), id));
+        }
+        Ok(id)
+    }
+}
 
-        body.get("data")
+/// Map an AniList HTTP response (status + raw body) to either the GraphQL `data` object or a typed error.
+/// Tolerates non-JSON bodies (HTML error pages from proxies / Cloudflare).
+fn classify_graphql_response(
+    status: u16,
+    retry_after: Option<u64>,
+    text: &str,
+) -> Result<Value, TrackerError> {
+    if status == 429 {
+        return Err(TrackerError::RateLimited {
+            retry_after_secs: retry_after.unwrap_or(60),
+        });
+    }
+
+    let body: Option<Value> = serde_json::from_str(text).ok();
+    let first_error = body
+        .as_ref()
+        .and_then(|b| b.get("errors"))
+        .and_then(|e| e.as_array())
+        .and_then(|a| a.first());
+    let gql_message = first_error
+        .and_then(|e| e.get("message"))
+        .and_then(|m| m.as_str())
+        .map(|s| s.to_string());
+    let gql_status = first_error
+        .and_then(|e| e.get("status"))
+        .and_then(|s| s.as_u64())
+        .map(|s| s as u16);
+
+    let is_success = (200..300).contains(&status);
+    if is_success && first_error.is_none() {
+        let Some(body) = body else {
+            return Err(TrackerError::Api(format!(
+                "AniList returned a non-JSON response (HTTP {}): {}",
+                status,
+                snippet(text)
+            )));
+        };
+        return body
+            .get("data")
+            .filter(|d| !d.is_null())
             .cloned()
-            .ok_or_else(|| "AniList response missing 'data' field".into())
+            .ok_or_else(|| TrackerError::Api("AniList response missing 'data' field".into()));
+    }
+
+    let message = gql_message.unwrap_or_else(|| {
+        if text.trim().is_empty() {
+            format!("HTTP {}", status)
+        } else {
+            snippet(text)
+        }
+    });
+    let lower = message.to_ascii_lowercase();
+    let effective = gql_status.unwrap_or(status);
+
+    if effective == 429 {
+        return Err(TrackerError::RateLimited {
+            retry_after_secs: retry_after.unwrap_or(60),
+        });
+    }
+    if status == 401
+        || effective == 401
+        || lower.contains("invalid token")
+        || lower.contains("unauthorized")
+    {
+        return Err(TrackerError::Unauthorized(format!(
+            "AniList rejected the access token: {}",
+            message
+        )));
+    }
+    if status == 404 || effective == 404 || lower.contains("not found") {
+        return Err(TrackerError::NotFound(format!("AniList: {}", message)));
+    }
+    if (500..600).contains(&status) {
+        return Err(TrackerError::Network(format!(
+            "AniList server error (HTTP {}): {}",
+            status, message
+        )));
+    }
+    Err(TrackerError::Api(format!(
+        "AniList API Error (HTTP {}): {}",
+        status, message
+    )))
+}
+
+fn snippet(text: &str) -> String {
+    let t = text.trim();
+    let mut out: String = t.chars().take(200).collect();
+    if t.chars().count() > 200 {
+        out.push_str("...");
+    }
+    out
+}
+
+/// Convert `YYYY-MM-DD` into an AniList `FuzzyDateInput`. `None` / invalid → all-null (clears the date).
+fn fuzzy_date_input(date: Option<&str>) -> Value {
+    let parsed = date
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok());
+    match parsed {
+        Some(d) => {
+            use chrono::Datelike;
+            json!({ "year": d.year(), "month": d.month(), "day": d.day() })
+        }
+        None => json!({ "year": null, "month": null, "day": null }),
     }
 }
 
@@ -373,7 +511,7 @@ impl TrackerPlugin for AniListPlugin {
         &'a self,
         username: &'a str,
         token: Option<&'a str>,
-    ) -> Pin<Box<dyn Future<Output = Result<TrackerUserProfile, String>> + Send + 'a>> {
+    ) -> BoxFuture<'a, Result<TrackerUserProfile, String>> {
         Box::pin(async move {
             if let Some(tok) = token.filter(|t| !t.trim().is_empty()) {
                 let query = r#"
@@ -394,7 +532,10 @@ impl TrackerPlugin for AniListPlugin {
                         }
                     }
                 "#;
-                let data = self.graphql_request(query, json!({}), Some(tok)).await?;
+                let data = self
+                    .graphql_request(query, json!({}), Some(tok))
+                    .await
+                    .map_err(|e| e.to_string())?;
                 let viewer = data
                     .get("Viewer")
                     .ok_or_else(|| "Invalid Viewer response".to_string())?;
@@ -449,7 +590,8 @@ impl TrackerPlugin for AniListPlugin {
             "#;
             let data = self
                 .graphql_request(query, json!({ "name": username.trim() }), None)
-                .await?;
+                .await
+                .map_err(|e| e.to_string())?;
             let user = data
                 .get("User")
                 .ok_or_else(|| "AniList user not found".to_string())?;
@@ -484,25 +626,24 @@ impl TrackerPlugin for AniListPlugin {
 
     fn fetch_user_list<'a>(
         &'a self,
-        username: &'a str,
-        token: Option<&'a str>,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<AnimeEntry>, String>> + Send + 'a>> {
+        token: &'a str,
+    ) -> BoxFuture<'a, Result<RemoteListSnapshot, TrackerError>> {
         Box::pin(async move {
-            let resolved_username = if !username.trim().is_empty() {
-                username.trim().to_string()
-            } else if let Some(tok) = token.filter(|t| !t.trim().is_empty()) {
-                let profile = self.verify_account("", Some(tok)).await?;
-                profile.username
-            } else {
-                return Err("Provide an AniList username or OAuth token to sync.".into());
-            };
+            let token = token.trim();
+            if token.is_empty() {
+                return Err(TrackerError::Unauthorized(
+                    "AniList OAuth token is required to sync the list.".into(),
+                ));
+            }
+            let viewer_id = self.viewer_id(token).await?;
 
             let query = format!(
                 r#"
-                query ($userName: String) {{
-                    MediaListCollection(userName: $userName, type: ANIME) {{
+                query ($userId: Int) {{
+                    MediaListCollection(userId: $userId, type: ANIME) {{
                         lists {{
                             name
+                            isCustomList
                             entries {{
                                 id
                                 status
@@ -532,29 +673,42 @@ impl TrackerPlugin for AniListPlugin {
             );
 
             let data = self
-                .graphql_request(&query, json!({ "userName": resolved_username }), token)
+                .graphql_request(&query, json!({ "userId": viewer_id }), Some(token))
                 .await?;
 
-            let mut results = Vec::new();
-            if let Some(lists) = data
+            let collection = data
                 .get("MediaListCollection")
-                .and_then(|c| c.get("lists"))
-                .and_then(|l| l.as_array())
-            {
-                for list_group in lists {
-                    if let Some(entries) = list_group.get("entries").and_then(|e| e.as_array()) {
-                        for entry_node in entries {
-                            if let Some(media) = entry_node.get("media") {
-                                if let Some(parsed) = Self::parse_media_node(media, Some(entry_node))
-                                {
-                                    results.push(parsed);
-                                }
+                .filter(|c| !c.is_null())
+                .ok_or_else(|| TrackerError::Api("AniList returned no MediaListCollection".into()))?;
+
+            let mut seen: HashSet<i64> = HashSet::new();
+            let mut entries = Vec::new();
+            if let Some(lists) = collection.get("lists").and_then(|l| l.as_array()) {
+                // Standard status lists first so the canonical entry wins over custom-list duplicates.
+                let mut ordered: Vec<&Value> = lists.iter().collect();
+                ordered.sort_by_key(|l| {
+                    l.get("isCustomList")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                });
+                for list_group in ordered {
+                    let Some(list_entries) = list_group.get("entries").and_then(|e| e.as_array())
+                    else {
+                        continue;
+                    };
+                    for entry_node in list_entries {
+                        let Some(media) = entry_node.get("media") else {
+                            continue;
+                        };
+                        if let Some(parsed) = Self::parse_media_node(media, Some(entry_node)) {
+                            if seen.insert(parsed.id) {
+                                entries.push(parsed);
                             }
                         }
                     }
                 }
             }
-            Ok(results)
+            Ok(RemoteListSnapshot { viewer_id, entries })
         })
     }
 
@@ -563,7 +717,7 @@ impl TrackerPlugin for AniListPlugin {
         query_str: &'a str,
         season: Option<&'a str>,
         year: Option<u32>,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<AnimeEntry>, String>> + Send + 'a>> {
+    ) -> BoxFuture<'a, Result<Vec<AnimeEntry>, String>> {
         Box::pin(async move {
             let gql = format!(
                 r#"
@@ -595,7 +749,10 @@ impl TrackerPlugin for AniListPlugin {
                 vars.insert("seasonYear".into(), json!(y));
             }
 
-            let data = self.graphql_request(&gql, Value::Object(vars), None).await?;
+            let data = self
+                .graphql_request(&gql, Value::Object(vars), None)
+                .await
+                .map_err(|e| e.to_string())?;
             let mut list = Vec::new();
             if let Some(media_arr) = data
                 .get("Page")
@@ -612,19 +769,17 @@ impl TrackerPlugin for AniListPlugin {
         })
     }
 
-    fn update_list_entry<'a>(
+    fn save_list_entry<'a>(
         &'a self,
         token: &'a str,
-        media_id: i64,
-        status: &'a str,
-        progress: u32,
-        score: f64,
-        repeat: u32,
-        notes: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        update: &'a TrackerEntryUpdate,
+    ) -> BoxFuture<'a, Result<RemoteEntryState, TrackerError>> {
         Box::pin(async move {
-            if token.trim().is_empty() {
-                return Err("AniList OAuth token is required to push updates to AniList.".into());
+            let token = token.trim();
+            if token.is_empty() {
+                return Err(TrackerError::Unauthorized(
+                    "AniList OAuth token is required to push updates to AniList.".into(),
+                ));
             }
             let mutation = r#"
                 mutation (
@@ -633,7 +788,9 @@ impl TrackerPlugin for AniListPlugin {
                     $progress: Int,
                     $scoreRaw: Int,
                     $repeat: Int,
-                    $notes: String
+                    $notes: String,
+                    $startedAt: FuzzyDateInput,
+                    $completedAt: FuzzyDateInput
                 ) {
                     SaveMediaListEntry(
                         mediaId: $mediaId,
@@ -641,26 +798,173 @@ impl TrackerPlugin for AniListPlugin {
                         progress: $progress,
                         scoreRaw: $scoreRaw,
                         repeat: $repeat,
-                        notes: $notes
+                        notes: $notes,
+                        startedAt: $startedAt,
+                        completedAt: $completedAt
                     ) {
                         id
                         status
                         progress
+                        updatedAt
                     }
                 }
             "#;
 
             let vars = json!({
-                "mediaId": media_id,
-                "status": status,
-                "progress": progress,
-                "scoreRaw": score.round() as i32,
-                "repeat": repeat,
-                "notes": notes,
+                "mediaId": update.media_id,
+                "status": update.status,
+                "progress": update.progress,
+                "scoreRaw": update.score.clamp(0.0, 100.0).round() as i32,
+                "repeat": update.repeat,
+                "notes": update.notes,
+                "startedAt": fuzzy_date_input(update.started_at.as_deref()),
+                "completedAt": fuzzy_date_input(update.completed_at.as_deref()),
             });
 
-            self.graphql_request(mutation, vars, Some(token)).await?;
-            Ok(())
+            let data = self.graphql_request(mutation, vars, Some(token)).await?;
+            let saved = data
+                .get("SaveMediaListEntry")
+                .filter(|v| !v.is_null())
+                .ok_or_else(|| {
+                    TrackerError::Api("AniList did not return the saved list entry".into())
+                })?;
+            Ok(RemoteEntryState {
+                list_entry_id: saved
+                    .get("id")
+                    .and_then(|v| v.as_i64())
+                    .ok_or_else(|| TrackerError::Api("AniList saved entry has no id".into()))?,
+                status: saved
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&update.status)
+                    .to_string(),
+                progress: saved
+                    .get("progress")
+                    .and_then(|v| v.as_u64())
+                    .map(|p| p as u32)
+                    .unwrap_or(update.progress),
+                updated_at: saved
+                    .get("updatedAt")
+                    .and_then(|v| v.as_i64())
+                    .filter(|&t| t > 0)
+                    .unwrap_or_else(|| chrono::Utc::now().timestamp()),
+            })
         })
+    }
+
+    fn delete_list_entry<'a>(
+        &'a self,
+        token: &'a str,
+        media_id: i64,
+        list_entry_id: Option<i64>,
+    ) -> BoxFuture<'a, Result<(), TrackerError>> {
+        Box::pin(async move {
+            let token = token.trim();
+            if token.is_empty() {
+                return Err(TrackerError::Unauthorized(
+                    "AniList OAuth token is required to delete AniList entries.".into(),
+                ));
+            }
+
+            let entry_id = match list_entry_id {
+                Some(id) => id,
+                None => {
+                    let viewer_id = self.viewer_id(token).await?;
+                    let lookup = self
+                        .graphql_request(
+                            "query ($userId: Int, $mediaId: Int) { MediaList(userId: $userId, mediaId: $mediaId) { id } }",
+                            json!({ "userId": viewer_id, "mediaId": media_id }),
+                            Some(token),
+                        )
+                        .await;
+                    match lookup {
+                        Ok(data) => match data
+                            .get("MediaList")
+                            .and_then(|m| m.get("id"))
+                            .and_then(|v| v.as_i64())
+                        {
+                            Some(id) => id,
+                            // Nothing on the list for this media: already deleted.
+                            None => return Ok(()),
+                        },
+                        Err(TrackerError::NotFound(_)) => return Ok(()),
+                        Err(e) => return Err(e),
+                    }
+                }
+            };
+
+            let result = self
+                .graphql_request(
+                    "mutation ($id: Int) { DeleteMediaListEntry(id: $id) { deleted } }",
+                    json!({ "id": entry_id }),
+                    Some(token),
+                )
+                .await;
+            match result {
+                Ok(_) | Err(TrackerError::NotFound(_)) => Ok(()),
+                Err(e) => Err(e),
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_maps_http_and_graphql_errors() {
+        assert_eq!(
+            classify_graphql_response(429, Some(12), "<html>Too Many</html>"),
+            Err(TrackerError::RateLimited { retry_after_secs: 12 })
+        );
+        assert_eq!(
+            classify_graphql_response(429, None, ""),
+            Err(TrackerError::RateLimited { retry_after_secs: 60 })
+        );
+        let unauthorized = classify_graphql_response(
+            400,
+            None,
+            r#"{"errors":[{"message":"Invalid token","status":400}],"data":null}"#,
+        );
+        assert!(matches!(unauthorized, Err(TrackerError::Unauthorized(_))));
+        assert!(matches!(
+            classify_graphql_response(401, None, "nope"),
+            Err(TrackerError::Unauthorized(_))
+        ));
+        let not_found = classify_graphql_response(
+            404,
+            None,
+            r#"{"errors":[{"message":"Not Found.","status":404}],"data":{"MediaList":null}}"#,
+        );
+        assert!(matches!(not_found, Err(TrackerError::NotFound(_))));
+        assert!(matches!(
+            classify_graphql_response(502, None, "<html>Bad gateway</html>"),
+            Err(TrackerError::Network(_))
+        ));
+        assert!(matches!(
+            classify_graphql_response(200, None, "<html>not json</html>"),
+            Err(TrackerError::Api(_))
+        ));
+        assert_eq!(
+            classify_graphql_response(200, None, r#"{"data":{"Viewer":{"id":5}}}"#),
+            Ok(json!({"Viewer":{"id":5}}))
+        );
+    }
+
+    #[test]
+    fn fuzzy_dates_serialize_or_clear() {
+        assert_eq!(
+            fuzzy_date_input(Some("2026-10-27")),
+            json!({"year":2026,"month":10,"day":27})
+        );
+        assert_eq!(
+            fuzzy_date_input(None),
+            json!({"year":null,"month":null,"day":null})
+        );
+        assert_eq!(
+            fuzzy_date_input(Some("")),
+            json!({"year":null,"month":null,"day":null})
+        );
     }
 }
