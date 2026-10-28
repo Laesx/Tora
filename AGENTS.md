@@ -61,6 +61,8 @@ Tora/
 │   ├── seasons.ts                        # Season helpers (current season, shift, labels; broadcast quarters)
 │   ├── schedule.ts                       # Airing schedule helpers (Mon–Sun local weeks, bounds, day/time labels, country labels, `detectBreaks`)
 │   ├── nowPlaying.ts                     # Now Playing helpers: AniList links, play/open-folder, date & enum formatting
+│   ├── fuzzy.ts                          # Shared fuzzy search (normalized index, char-mask prefilter, subsequence scoring, match ranges)
+│   ├── animeActions.ts                   # Keyboard action list for one anime (palette → Right arrow), built on nowPlaying helpers
 │   ├── main.tsx                          # React 19 entrypoint & root provider
 │   ├── styles/
 │   │   └── index.css                     # Tailwind CSS v4 stylesheets, custom theme variables & scrollbars
@@ -68,7 +70,7 @@ Tora/
 │       ├── AnitomyParserPanel.tsx        # Interactive Anitomy filename / window title parser (Settings → Diagnostics)
 │       ├── AnimeDetailModal.tsx          # Slide-over drawer for editing progress, score, notes, custom folder & synonyms
 │       ├── AnimeQuickMenu.tsx            # Context menu for anime cards (+1 episode, mark status, open folder, copy title)
-│       ├── CommandPalette.tsx            # Ctrl+K fuzzy command palette & global search
+│       ├── CommandPalette.tsx            # Ctrl+K keyboard palette: Anime / Commands tabs, recents, AniList row, Right-arrow anime actions
 │       ├── AnimePosterCard.tsx           # Poster card for remote anime (Seasons / Search): opens drawer, quick-add
 │       ├── SeasonsView.tsx               # Cached seasonal browser (chips, ‹ ›, picker, sort/group/format filters, virtualized grid)
 │       ├── ScheduleView.tsx              # Weekly airing timetable (columns / agenda layouts, countdowns, my list / all anime, format/country/status filters, inferred breaks, "next episode ready" play, right-click add)
@@ -81,7 +83,7 @@ Tora/
 │       ├── HistoryView.tsx               # History tab: scrobbles + manual progress changes, grouped by day
 │       ├── SettingsView.tsx              # Sectioned settings: Appearance, Tracker, Library, Playback & Detection (Anisthesia players), Torrents, Diagnostics
 │       ├── TorrentsView.tsx              # Nyaa/AnimeTosho RSS search, feed preview & automated torrent rule editor
-│       └── VirtualWatchlist.tsx          # Viewport-windowed virtual grid/list for Grid, Compact & Table display modes
+│       └── VirtualWatchlist.tsx          # Viewport-windowed virtual grid/list for Grid, Compact & Table modes (row model with optional status group headers, scroll-to-anime)
 └── src-tauri/                            # Tauri v2 Rust Backend & Native C++ Bindings
     ├── Cargo.toml                        # Rust dependencies (rusqlite bundled, tokio, rayon, reqwest, tauri v2)
     ├── build.rs                          # Compiles vendored C++ `anitomy` (/std:c++latest) & `anisthesia` (/std:c++20)
@@ -182,6 +184,11 @@ When a filename or media player window title is parsed (`parse_filename` in `src
 ### 7. Memory Footprint & DOM Virtualization
 - **DOM Virtualization**:
   - Large lists (`VirtualWatchlist.tsx` for the Anime Watchlist across `"grid"`, `"compact"`, and `"table"` modes, and the Indexed Local Episodes table in `LibraryManagerView.tsx`) must remain virtualized so WebView2 only mounts visible rows (+ overscan) and releases decoded cover image bitmaps for off-screen rows.
+  - `VirtualWatchlist` virtualizes a row model (optional group header rows + rows of `cols` cards with prefix-sum offsets, binary search for the first visible row); search results grouped by status go through the same path.
+- **Search (`src/fuzzy.ts`)**:
+  - The watchlist search and the command palette both use `searchAnime` over the one `searchIndex` built in `App.tsx` (`buildAnimeSearchIndex`, rebuilt only when `animeList` changes). Don't add another filter path: an anime picked in the palette must always appear in the watchlist results for the same text.
+  - A non-empty watchlist search shows matches from every list grouped by status (`SEARCH_GROUPS`), best match first; it is computed from `useDeferredValue(searchQuery)`. The palette searches synchronously so Enter always acts on what was typed.
+  - Never scan full titles per keystroke without the index: normalization happens once at index time and the character bitmask rejects most entries before scoring.
 - **Cover Image Resolution (`getOptimizedCoverUrl`)**:
   - **Never** use AniList `/cover/extraLarge/` URLs (up to 6 MB RGBA per decoded bitmap) in lists, cards, or grids.
   - Use `getOptimizedCoverUrl(url, "medium")` (230x325, ~299 KB) for small thumbnails (`w-7` to `w-24`, table rows, compact cards, search selectors).

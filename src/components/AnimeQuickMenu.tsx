@@ -25,7 +25,8 @@ import {
   RotateCcw,
 } from "lucide-react";
 import { AnimeEntry, BatchAnimeUpdatePatch } from "../types";
-import { getOptimizedCoverUrl, toraApi } from "../api";
+import { getOptimizedCoverUrl } from "../api";
+import { openAnimeFolder, playLocalEpisode } from "../nowPlaying";
 
 interface AnimeQuickMenuProps {
   anime: AnimeEntry;
@@ -632,48 +633,15 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
   const hasFolderOrFiles =
     Boolean(anime.custom_folder?.trim()) || anime.local_episode_count > 0;
 
-  const handlePlayEpisode = async (targetEp: number, label: string) => {
+  const handlePlayEpisode = async (targetEp: number) => {
     onClose();
     if (targetEp <= 0) return;
-    try {
-      const files = await toraApi.getLocalEpisodes(anime.id);
-      if (files.length === 0) {
-        showToast(
-          `No local episode files found for "${anime.title_romaji}"`,
-          "error"
-        );
-        return;
-      }
-      const match =
-        files.find((f) => f.episode_number === targetEp) ||
-        (targetEp === 1 && files.length === 1 ? files[0] : undefined);
-      if (!match) {
-        showToast(`Episode ${targetEp} not found on disk`, "error");
-        return;
-      }
-      await toraApi.playEpisodeFile(match.file_path);
-      showToast(`Playing ${label}: ${match.file_name}`, "info");
-    } catch (e: any) {
-      showToast(String(e), "error");
-    }
+    await playLocalEpisode(anime, targetEp, showToast);
   };
 
   const handleOpenFolder = async () => {
     onClose();
-    try {
-      if (anime.custom_folder && anime.custom_folder.trim()) {
-        await toraApi.revealInExplorer(anime.custom_folder.trim());
-        return;
-      }
-      const files = await toraApi.getLocalEpisodes(anime.id);
-      if (files.length > 0) {
-        await toraApi.revealInExplorer(files[0].file_path);
-        return;
-      }
-      showToast(`No local folder linked for "${anime.title_romaji}"`, "error");
-    } catch (e: any) {
-      showToast(String(e), "error");
-    }
+    await openAnimeFolder(anime, showToast);
   };
 
   const handleCopyTitle = async () => {
@@ -754,7 +722,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
       {/* Playback & Folder Actions */}
       <div className="py-1">
         <button
-          onClick={() => handlePlayEpisode(nextEp, `Episode ${nextEp}`)}
+          onClick={() => handlePlayEpisode(nextEp)}
           disabled={!canStepForward}
           className={itemClass}
         >
@@ -772,7 +740,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
         </button>
 
         <button
-          onClick={() => handlePlayEpisode(lastEp, `Episode ${lastEp}`)}
+          onClick={() => handlePlayEpisode(lastEp)}
           disabled={lastEp <= 0}
           className={itemClass}
         >

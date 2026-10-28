@@ -8,6 +8,8 @@ interface SearchViewProps {
   animeList: AnimeEntry[];
   /** Query handed over from another view (e.g. Enter in the Seasons filter); searched on change */
   initialQuery: string;
+  /** Changes with every hand-over, so handing over the same query searches again */
+  searchRequestId?: number;
   onOpenAnime: (anime: AnimeEntry) => void;
   onAddAnime: (anime: AnimeEntry, status: "CURRENT" | "PLANNING") => void;
   showToast: (msg: string, type?: "success" | "info" | "error") => void;
@@ -16,6 +18,7 @@ interface SearchViewProps {
 export const SearchView: React.FC<SearchViewProps> = ({
   animeList,
   initialQuery,
+  searchRequestId,
   onOpenAnime,
   onAddAnime,
   showToast,
@@ -51,7 +54,7 @@ export const SearchView: React.FC<SearchViewProps> = ({
   useEffect(() => {
     setQuery(initialQuery);
     runSearch(initialQuery);
-  }, [initialQuery]);
+  }, [initialQuery, searchRequestId]);
 
   return (
     <div className="p-6 space-y-5 max-w-7xl mx-auto">

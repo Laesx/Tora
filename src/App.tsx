@@ -1,4 +1,10 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
   Tv,
@@ -23,6 +29,9 @@ import {
   CalendarDays,
   CalendarClock,
   History,
+  X,
+  HardDrive,
+  Palette,
 } from "lucide-react";
 import {
   AnimeEntry,
@@ -38,10 +47,16 @@ import {
 } from "./types";
 import {
   applyThemeToDocument,
+  THEME_PRESETS,
   toraApi,
 } from "./api";
 import { AnimeDetailModal } from "./components/AnimeDetailModal";
-import { VirtualWatchlist } from "./components/VirtualWatchlist";
+import {
+  VirtualWatchlist,
+  WatchlistGroup,
+} from "./components/VirtualWatchlist";
+import { buildAnimeSearchIndex, searchAnime } from "./fuzzy";
+import { buildAnimeActions } from "./animeActions";
 import { TorrentsView } from "./components/TorrentsView";
 import { NowPlayingView } from "./components/NowPlayingView";
 import { HistoryView } from "./components/HistoryView";
@@ -49,7 +64,7 @@ import { SeasonsView } from "./components/SeasonsView";
 import { ScheduleView } from "./components/ScheduleView";
 import { SearchView } from "./components/SearchView";
 import { SettingsView } from "./components/SettingsView";
-import { CommandPalette } from "./components/CommandPalette";
+import { CommandPalette, PaletteCommand } from "./components/CommandPalette";
 
 type NavTab =
   | "watchlist"
@@ -97,11 +112,27 @@ const STATUS_TABS = [
   { id: "ALL", label: "All Anime" },
 ];
 
+// Section order while the watchlist search groups matches from every list by status
+const SEARCH_GROUPS = [
+  { status: "CURRENT", label: "Watching" },
+  { status: "REPEATING", label: "Rewatching" },
+  { status: "PLANNING", label: "Plan to Watch" },
+  { status: "COMPLETED", label: "Completed" },
+  { status: "PAUSED", label: "Paused" },
+  { status: "DROPPED", label: "Dropped" },
+];
+
 export const App: React.FC = () => {
   const mainScrollRef = useRef<HTMLElement | null>(null);
   const [activeTab, setActiveTab] = useState<NavTab>("watchlist");
   const [statusFilter, setStatusFilter] = useState<string>("CURRENT");
   const [searchQuery, setSearchQuery] = useState("");
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  // Scroll-to-and-select request for the watchlist (e.g. an anime picked in the command palette)
+  const [focusRequest, setFocusRequest] = useState<{
+    id: number;
+    nonce: number;
+  } | null>(null);
   const [sortBy, setSortBy] = useState<
     "updated" | "title" | "score" | "progress"
   >("updated");
@@ -117,6 +148,10 @@ export const App: React.FC = () => {
   const [torrentSearchQuery, setTorrentSearchQuery] = useState("");
   // Query handed to the Search tab (e.g. Enter in the Seasons filter)
   const [globalSearchQuery, setGlobalSearchQuery] = useState("");
+  // Bumped with every hand-over so the same query searches again
+  const [globalSearchRequest, setGlobalSearchRequest] = useState(0);
+  // Command palette text; kept across opens
+  const [cmdQuery, setCmdQuery] = useState("");
   const [activeSession, setActiveSession] =
     useState<DetectedMediaSession | null>(null);
   const [cmdOpen, setCmdOpen] = useState(false);
@@ -600,44 +635,67 @@ export const App: React.FC = () => {
     return counts;
   }, [animeList]);
 
+  // Shared by the watchlist search and the command palette; rebuilt only when the list changes
+  const searchIndex = useMemo(() => buildAnimeSearchIndex(animeList), [animeList]);
+  // Typing stays responsive: filtering re-runs at lower priority than the input itself
+  const deferredSearchQuery = useDeferredValue(searchQuery);
+  const isSearching = deferredSearchQuery.trim().length > 0;
+
+  const compareBySort = useMemo(() => {
+    return (a: AnimeEntry, b: AnimeEntry) => {
+      if (sortBy === "title") return a.title_romaji.localeCompare(b.title_romaji);
+      if (sortBy === "score") return b.user_score - a.user_score;
+      if (sortBy === "progress") {
+        const progA = pendingStepSnapshots[a.id]?.initialProgress ?? a.user_progress;
+        const progB = pendingStepSnapshots[b.id]?.initialProgress ?? b.user_progress;
+        return progB - progA;
+      }
+      const updA = pendingStepSnapshots[a.id]?.initialUpdatedAt ?? a.updated_at;
+      const updB = pendingStepSnapshots[b.id]?.initialUpdatedAt ?? b.updated_at;
+      return updB - updA;
+    };
+  }, [sortBy, pendingStepSnapshots]);
+
+  // With a search: matches from every list, grouped by status (stepping keeps a card in its
+  // original group), best match first and the sort dropdown as the tie-break
+  const searchGroups = useMemo((): WatchlistGroup[] | null => {
+    if (!isSearching) return null;
+    const hits = searchAnime(searchIndex, deferredSearchQuery);
+    const byStatus = new Map<string, { entry: AnimeEntry; score: number }[]>();
+    for (const { item, score } of hits) {
+      const status = pendingStepSnapshots[item.id]?.initialStatus ?? item.user_status;
+      let bucket = byStatus.get(status);
+      if (!bucket) byStatus.set(status, (bucket = []));
+      bucket.push({ entry: item, score });
+    }
+    const known = new Set(SEARCH_GROUPS.map((g) => g.status));
+    const order = [
+      ...SEARCH_GROUPS,
+      ...Array.from(byStatus.keys())
+        .filter((st) => !known.has(st))
+        .map((st) => ({ status: st, label: st })),
+    ];
+    return order
+      .filter((g) => byStatus.has(g.status))
+      .map((g) => ({
+        ...g,
+        items: byStatus
+          .get(g.status)!
+          .sort((a, b) => b.score - a.score || compareBySort(a.entry, b.entry))
+          .map((h) => h.entry),
+      }));
+  }, [isSearching, searchIndex, deferredSearchQuery, pendingStepSnapshots, compareBySort]);
+
   const filteredAnime = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
+    if (searchGroups) return searchGroups.flatMap((g) => g.items);
     return animeList
       .filter((a) => {
         const effectiveStatus =
           pendingStepSnapshots[a.id]?.initialStatus ?? a.user_status;
-        if (statusFilter !== "ALL" && effectiveStatus !== statusFilter) {
-          return false;
-        }
-        if (q) {
-          return (
-            a.title_romaji.toLowerCase().includes(q) ||
-            (a.title_english && a.title_english.toLowerCase().includes(q)) ||
-            a.synonyms.some((s) => s.toLowerCase().includes(q)) ||
-            a.genres.some((g) => g.toLowerCase().includes(q)) ||
-            a.studios.some((st) => st.toLowerCase().includes(q))
-          );
-        }
-        return true;
+        return statusFilter === "ALL" || effectiveStatus === statusFilter;
       })
-      .sort((a, b) => {
-        if (sortBy === "title")
-          return a.title_romaji.localeCompare(b.title_romaji);
-        if (sortBy === "score") return b.user_score - a.user_score;
-        if (sortBy === "progress") {
-          const progA =
-            pendingStepSnapshots[a.id]?.initialProgress ?? a.user_progress;
-          const progB =
-            pendingStepSnapshots[b.id]?.initialProgress ?? b.user_progress;
-          return progB - progA;
-        }
-        const updA =
-          pendingStepSnapshots[a.id]?.initialUpdatedAt ?? a.updated_at;
-        const updB =
-          pendingStepSnapshots[b.id]?.initialUpdatedAt ?? b.updated_at;
-        return updB - updA;
-      });
-  }, [animeList, statusFilter, searchQuery, sortBy, pendingStepSnapshots]);
+      .sort(compareBySort);
+  }, [animeList, statusFilter, searchGroups, pendingStepSnapshots, compareBySort]);
 
   // Sync requires an OAuth token; a bare username no longer counts as signed in
   const isSignedIn = Boolean(settings?.anilist_token?.trim());
@@ -701,6 +759,104 @@ export const App: React.FC = () => {
 
   const viewMode = settings?.view_mode || "grid";
 
+  const openGlobalSearch = (q: string) => {
+    setGlobalSearchQuery(q);
+    setGlobalSearchRequest((n) => n + 1);
+    setActiveTab("search");
+  };
+
+  const rescanInFlightRef = useRef(false);
+  const handleRescanLibrary = async () => {
+    if (rescanInFlightRef.current) return;
+    rescanInFlightRef.current = true;
+    showToast("Rescanning library folders…", "info");
+    try {
+      const sum = await toraApi.scanLibrary();
+      await refreshAnimeList();
+      setLibraryRefreshTick((t) => t + 1);
+      showToast(
+        `Scanned ${sum.total_files_indexed} files in ${sum.elapsed_ms}ms`,
+        "success"
+      );
+    } catch (err: any) {
+      showToast(String(err), "error");
+    } finally {
+      rescanInFlightRef.current = false;
+    }
+  };
+  // The global key handler is registered with a fixed dependency list; read the latest handler
+  const rescanRef = useRef(handleRescanLibrary);
+  rescanRef.current = handleRescanLibrary;
+
+  // Palette pick: show the anime in the watchlist (palette text in its search box, or its own
+  // list when there is no text), scroll to and select it, and open its details
+  const handleOpenAnimeFromPalette = (anime: AnimeEntry) => {
+    const entry = animeList.find((a) => a.id === anime.id) ?? anime;
+    setActiveTab("watchlist");
+    setSearchQuery(cmdQuery.trim());
+    if (!cmdQuery.trim()) {
+      setStatusFilter(
+        STATUS_TABS.some((t) => t.id === entry.user_status) ? entry.user_status : "ALL"
+      );
+    }
+    setFocusRequest((prev) => ({ id: entry.id, nonce: (prev?.nonce ?? 0) + 1 }));
+    setSelectedAnime(entry);
+  };
+
+  const setViewMode = (mode: "grid" | "compact" | "table") => {
+    setActiveTab("watchlist");
+    if (settings && settings.view_mode !== mode) {
+      handleUpdateSettings({ ...settings, view_mode: mode });
+    }
+  };
+
+  const paletteCommands: PaletteCommand[] = [
+    { id: "go-nowplaying", label: "Go to Now Playing", keywords: ["playing", "player", "dashboard"], icon: Activity, run: () => setActiveTab("nowplaying") },
+    { id: "go-watchlist", label: "Go to Anime Watchlist", keywords: ["list", "library"], icon: Tv, run: () => setActiveTab("watchlist") },
+    { id: "go-torrents", label: "Go to Torrents & RSS", keywords: ["nyaa", "download", "rss", "feed"], icon: Magnet, run: () => setActiveTab("torrents") },
+    { id: "go-seasons", label: "Go to Seasons", keywords: ["seasonal", "browse"], icon: CalendarDays, run: () => setActiveTab("seasons") },
+    { id: "go-schedule", label: "Go to Schedule", keywords: ["airing", "calendar", "timetable"], icon: CalendarClock, run: () => setActiveTab("schedule") },
+    { id: "go-search", label: "Go to Search", keywords: ["anilist", "find"], icon: Compass, run: () => setActiveTab("search") },
+    { id: "go-history", label: "Go to History", keywords: ["watched", "scrobbles"], icon: History, run: () => setActiveTab("history") },
+    { id: "go-settings", label: "Go to Settings", keywords: ["preferences", "options"], icon: Settings, run: () => setActiveTab("settings") },
+    { id: "rescan-library", label: "Rescan All Library Folders", keywords: ["scan", "refresh", "files", "disk"], icon: HardDrive, shortcut: "F5", run: () => void handleRescanLibrary() },
+    {
+      id: "sync-anilist",
+      label: "Sync from AniList",
+      keywords: ["pull", "refresh", "tracker"],
+      icon: RefreshCw,
+      run: () => {
+        if (!isSignedIn) showToast("Sign in to AniList in Settings to sync", "info");
+        else void handleSyncFromAnilist();
+      },
+    },
+    {
+      id: "random-anime",
+      label: "Open a Random Anime from the Current List",
+      keywords: ["shuffle", "pick", "random"],
+      icon: Shuffle,
+      run: () => {
+        if (filteredAnime.length === 0) return showToast("The current list is empty", "info");
+        setActiveTab("watchlist");
+        setSelectedAnime(filteredAnime[Math.floor(Math.random() * filteredAnime.length)]);
+      },
+    },
+    { id: "view-grid", label: "View: Poster Grid", keywords: ["layout", "cards"], icon: LayoutGrid, run: () => setViewMode("grid") },
+    { id: "view-compact", label: "View: Detailed Cards", keywords: ["layout", "compact"], icon: Rows, run: () => setViewMode("compact") },
+    { id: "view-table", label: "View: Dense Table", keywords: ["layout", "list", "taiga"], icon: List, run: () => setViewMode("table") },
+    ...THEME_PRESETS.map((t) => ({
+      id: `theme-${t.id}`,
+      label: `Theme: ${t.name}`,
+      keywords: ["theme", "appearance", "color", t.isDark ? "dark" : "light"],
+      icon: Palette,
+      run: () => {
+        if (!settings) return;
+        applyThemeToDocument(t.id, t.defaultAccent);
+        void handleUpdateSettings({ ...settings, theme: t.id, accent_color: t.defaultAccent });
+      },
+    })),
+  ];
+
   // Keyboard shortcuts: Ctrl+K for Command Palette, Ctrl+A to select all in watchlist,
   // Enter to open selected anime modal, Escape to close modals/menus or clear selection
   useEffect(() => {
@@ -713,7 +869,13 @@ export const App: React.FC = () => {
           target.tagName === "SELECT" ||
           target.isContentEditable);
 
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+      if (e.key === "F5") {
+        // Always swallow F5 so the webview never reloads; rescan when nothing else has focus
+        e.preventDefault();
+        if (!isInputFocused && !selectedAnime && !cmdOpen && !signOutModalOpen) {
+          void rescanRef.current();
+        }
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
         setCmdOpen((prev) => !prev);
       } else if (
@@ -1165,12 +1327,15 @@ export const App: React.FC = () => {
                 {/* Status Tabs */}
                 <div className="flex flex-wrap items-center gap-1 bg-bg-secondary p-1 rounded-xl border border-border-subtle">
                   {STATUS_TABS.map((tab) => {
-                    const active = statusFilter === tab.id;
+                    const active = !isSearching && statusFilter === tab.id;
                     const count = statusCounts[tab.id] || 0;
                     return (
                       <button
                         key={tab.id}
-                        onClick={() => setStatusFilter(tab.id)}
+                        onClick={() => {
+                          setSearchQuery("");
+                          setStatusFilter(tab.id);
+                        }}
                         className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 ${active
                           ? "bg-accent text-white shadow-sm"
                           : "text-text-secondary hover:text-text-primary"
@@ -1195,12 +1360,33 @@ export const App: React.FC = () => {
                   <div className="relative">
                     <Search className="w-3.5 h-3.5 text-text-muted absolute left-3 top-1/2 -translate-y-1/2" />
                     <input
+                      ref={searchInputRef}
                       type="text"
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
-                      placeholder="Filter title, studio, genre..."
-                      className="pl-8 pr-3 py-1.5 rounded-xl bg-bg-secondary border border-border-subtle text-xs text-text-primary focus:outline-none focus:border-accent w-48"
+                      onKeyDown={(e) => {
+                        if (e.key !== "Escape") return;
+                        // Esc clears; on an empty box it leaves the box. Never reaches the global handler.
+                        e.stopPropagation();
+                        if (searchQuery) setSearchQuery("");
+                        else e.currentTarget.blur();
+                      }}
+                      placeholder="Search all lists..."
+                      title="Searches every list; results are grouped by status (Esc clears)"
+                      className="pl-8 pr-7 py-1.5 rounded-xl bg-bg-secondary border border-border-subtle text-xs text-text-primary focus:outline-none focus:border-accent w-56"
                     />
+                    {searchQuery && (
+                      <button
+                        onClick={() => {
+                          setSearchQuery("");
+                          searchInputRef.current?.focus();
+                        }}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 rounded text-text-muted hover:text-text-primary"
+                        title="Clear search (Esc)"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
                   </div>
 
                   <select
@@ -1303,6 +1489,11 @@ export const App: React.FC = () => {
               {/* Virtualized Watchlist Rendering */}
               <VirtualWatchlist
                 items={filteredAnime}
+                groups={searchGroups}
+                searchQuery={deferredSearchQuery}
+                // Applied once the deferred search has caught up, so it scrolls within the new results
+                focusRequest={deferredSearchQuery === searchQuery ? focusRequest : null}
+                onFocusHandled={() => setFocusRequest(null)}
                 allAnime={animeList}
                 viewMode={viewMode}
                 scrollContainerRef={mainScrollRef}
@@ -1340,10 +1531,7 @@ export const App: React.FC = () => {
               keyboardEnabled={!selectedAnime && !cmdOpen && !signOutModalOpen}
               onOpenAnime={openAnime}
               onAddAnime={handleAddRemoteAnime}
-              onGlobalSearch={(q) => {
-                setGlobalSearchQuery(q);
-                setActiveTab("search");
-              }}
+              onGlobalSearch={openGlobalSearch}
               onChangeStatus={(anime, status, label) =>
                 handleBatchUpdate(
                   { anime_ids: [anime.id], user_status: status },
@@ -1383,6 +1571,7 @@ export const App: React.FC = () => {
             <SearchView
               animeList={animeList}
               initialQuery={globalSearchQuery}
+              searchRequestId={globalSearchRequest}
               onOpenAnime={openAnime}
               onAddAnime={handleAddRemoteAnime}
               showToast={showToast}
@@ -1463,28 +1652,26 @@ export const App: React.FC = () => {
       <CommandPalette
         open={cmdOpen}
         onClose={() => setCmdOpen(false)}
+        query={cmdQuery}
+        onQueryChange={setCmdQuery}
         animeList={animeList}
-        onSelectAnime={(a) => setSelectedAnime(a)}
-        onIncrementAnime={(a) => handleStepEpisode(a, 1)}
-        onNavigateTab={(t) => setActiveTab(t)}
-        onScanDrives={async () => {
-          const sum = await toraApi.scanLibrary();
-          await refreshAnimeList();
-          setLibraryRefreshTick((t) => t + 1);
-          showToast(
-            `Scanned ${sum.total_files_indexed} files in ${sum.elapsed_ms}ms`,
-            "success"
-          );
-        }}
-        onSwitchTheme={async (themeId, accent) => {
-          if (!settings) return;
-          applyThemeToDocument(themeId, accent);
-          await handleUpdateSettings({
-            ...settings,
-            theme: themeId,
-            accent_color: accent,
-          });
-        }}
+        searchIndex={searchIndex}
+        commands={paletteCommands}
+        onOpenAnime={handleOpenAnimeFromPalette}
+        onSearchAniList={openGlobalSearch}
+        getAnimeActions={(anime) =>
+          buildAnimeActions(anime, {
+            onStepEpisode: handleStepEpisode,
+            onBatchUpdate: handleBatchUpdate,
+            onOpenDetails: openAnime,
+            onSearchTorrents: (q) => {
+              setTorrentSearchQuery(q);
+              setActiveTab("torrents");
+            },
+            onDeleteAnime: handleDeleteAnime,
+            showToast,
+          })
+        }
       />
 
       {/* Sign Out Confirmation Modal */}

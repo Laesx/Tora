@@ -16,10 +16,38 @@ import {
 } from "lucide-react";
 import { AnimeEntry, BatchAnimeUpdatePatch } from "../types";
 import { formatCountdown, getOptimizedCoverUrl } from "../api";
-import { AnimeQuickMenu } from "./AnimeQuickMenu";
+import { AnimeQuickMenu, STATUS_OPTIONS } from "./AnimeQuickMenu";
+
+/** A titled section of the list (search results grouped by status) */
+export interface WatchlistGroup {
+  status: string;
+  label: string;
+  items: AnimeEntry[];
+}
+
+const GROUP_HEADER_HEIGHT = 40;
+
+/** One virtualized row: a group header, or up to `cols` cards starting at `start` in its group */
+type ListRow =
+  | { kind: "header"; group: WatchlistGroup; top: number; height: number }
+  | {
+    kind: "items";
+    group: WatchlistGroup;
+    start: number;
+    top: number;
+    height: number;
+  };
 
 interface VirtualWatchlistProps {
+  /** Every rendered anime in display order (groups flattened); used for range selection */
   items: AnimeEntry[];
+  /** When set, `items` is rendered in these sections, each under a header */
+  groups?: WatchlistGroup[] | null;
+  /** Active search text, for the empty state */
+  searchQuery?: string;
+  /** Scroll this anime into view and select it (re-applied whenever the nonce changes) */
+  focusRequest?: { id: number; nonce: number } | null;
+  onFocusHandled?: () => void;
   allAnime: AnimeEntry[];
   viewMode: string;
   scrollContainerRef: React.RefObject<HTMLElement | null>;
@@ -41,6 +69,10 @@ interface VirtualWatchlistProps {
 
 export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
   items,
+  groups,
+  searchQuery,
+  focusRequest,
+  onFocusHandled,
   allAnime,
   viewMode,
   scrollContainerRef,
@@ -292,30 +324,83 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
     return { cols: 1, gap: 0, cardHeight: 56, rowHeight: 56 };
   }, [viewMode, containerWidth]);
 
-  const { startRow, endRow, totalRows, visibleItems } = useMemo(() => {
-    const total = Math.ceil(items.length / layout.cols);
-    if (total === 0) {
-      return { startRow: 0, endRow: 0, totalRows: 0, visibleItems: [] };
+  // Row model: group headers + rows of `cols` cards, each with its pixel offset (prefix sums)
+  const { rows, totalHeight } = useMemo(() => {
+    const sections = groups ?? [{ status: "", label: "", items }];
+    const out: ListRow[] = [];
+    let top = 0;
+    for (const group of sections) {
+      if (groups) {
+        out.push({ kind: "header", group, top, height: GROUP_HEADER_HEIGHT });
+        top += GROUP_HEADER_HEIGHT;
+      }
+      for (let start = 0; start < group.items.length; start += layout.cols) {
+        out.push({ kind: "items", group, start, top, height: layout.rowHeight });
+        top += layout.rowHeight;
+      }
     }
-    const relScroll = Math.max(0, scrollTop - listOffsetTop);
-    const overscan = 3;
-    const sRow = Math.max(0, Math.floor(relScroll / layout.rowHeight) - overscan);
-    const eRow = Math.min(
-      total,
-      Math.ceil((relScroll + viewportHeight) / layout.rowHeight) + overscan
-    );
-    const startIdx = sRow * layout.cols;
-    const endIdx = Math.min(items.length, eRow * layout.cols);
-    return {
-      startRow: sRow,
-      endRow: eRow,
-      totalRows: total,
-      visibleItems: items.slice(startIdx, endIdx),
-    };
-  }, [items, layout, scrollTop, listOffsetTop, viewportHeight]);
+    return { rows: out, totalHeight: top };
+  }, [items, groups, layout]);
 
-  const topSpacerHeight = startRow * layout.rowHeight;
-  const bottomSpacerHeight = Math.max(0, (totalRows - endRow) * layout.rowHeight);
+  const { startRow, endRow } = useMemo(() => {
+    if (rows.length === 0) return { startRow: 0, endRow: 0 };
+    const relScroll = Math.max(0, scrollTop - listOffsetTop);
+    const overscanPx = 3 * layout.rowHeight;
+    const from = relScroll - overscanPx;
+    const to = relScroll + viewportHeight + overscanPx;
+    // Binary search for the first row ending below `from`
+    let lo = 0;
+    let hi = rows.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (rows[mid].top + rows[mid].height <= from) lo = mid + 1;
+      else hi = mid;
+    }
+    let end = lo;
+    while (end < rows.length && rows[end].top < to) end++;
+    return { startRow: lo, endRow: end };
+  }, [rows, layout.rowHeight, scrollTop, listOffsetTop, viewportHeight]);
+
+  const visibleRows = rows.slice(startRow, endRow);
+  const lastVisible = visibleRows[visibleRows.length - 1];
+  const topSpacerHeight = visibleRows.length > 0 ? visibleRows[0].top : totalHeight;
+  const bottomSpacerHeight = lastVisible
+    ? Math.max(0, totalHeight - (lastVisible.top + lastVisible.height))
+    : 0;
+  const rowItems = (row: ListRow & { kind: "items" }) =>
+    row.group.items.slice(row.start, row.start + layout.cols);
+  const rowKey = (row: ListRow) =>
+    row.kind === "header" ? `h-${row.group.status}` : `${row.group.status}-${row.start}`;
+
+  // Scroll a requested anime to the middle of the viewport and select it. Waits until the
+  // anime is part of the rendered rows (the list may still be catching up with a new search).
+  const handledFocusNonceRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!focusRequest || handledFocusNonceRef.current === focusRequest.nonce) return;
+    const containerEl = containerRef.current;
+    const scrollEl = scrollContainerRef.current;
+    if (!containerEl || !scrollEl) return;
+    // Right after mount the rows use a default width; wait for the measured layout
+    if (Math.abs((containerEl.clientWidth || 1080) - containerWidth) > 1) return;
+    const row = rows.find(
+      (r) =>
+        r.kind === "items" &&
+        rowItems(r).some((a) => a.id === focusRequest.id)
+    );
+    if (!row) return;
+    handledFocusNonceRef.current = focusRequest.nonce;
+    const listTop =
+      containerEl.getBoundingClientRect().top -
+      scrollEl.getBoundingClientRect().top +
+      scrollEl.scrollTop;
+    scrollEl.scrollTop = Math.max(
+      0,
+      listTop + row.top - (scrollEl.clientHeight - row.height) / 2
+    );
+    onSetSelectedAnimeIds([focusRequest.id]);
+    lastClickedIdRef.current = focusRequest.id;
+    onFocusHandled?.();
+  }, [focusRequest, rows, containerWidth]);
 
   const activeQuickMenuAnime =
     quickMenuAnimeId !== null
@@ -360,250 +445,344 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
     );
 
   if (items.length === 0) {
+    const q = searchQuery?.trim();
     return (
       <div
         ref={containerRef}
         className="py-16 text-center bg-bg-secondary border border-border-subtle rounded-2xl space-y-3"
       >
         <p className="text-sm font-semibold text-text-primary">
-          No anime in this list view
+          {q ? `No anime in your list match "${q}"` : "No anime in this list view"}
         </p>
         <p className="text-xs text-text-muted">
-          Use the Seasons or Search tab to add shows or sync your AniList account in Settings.
+          {q
+            ? "Try fewer letters, or look it up on AniList from the Search tab."
+            : "Use the Seasons or Search tab to add shows or sync your AniList account in Settings."}
         </p>
       </div>
     );
   }
 
-  if (viewMode === "grid") {
+  const renderGridCard = (anime: AnimeEntry) => {
+    const pct = anime.episodes
+      ? Math.min(100, Math.round((anime.user_progress / anime.episodes) * 100))
+      : 50;
+    const cd = formatCountdown(anime.next_airing_at);
+    const isSelected = selectedSet.has(anime.id);
+
     return (
-      <div ref={containerRef} className="w-full">
-        {topSpacerHeight > 0 && <div style={{ height: topSpacerHeight }} />}
-        <div
-          className="grid gap-4"
-          style={{
-            gridTemplateColumns: `repeat(${layout.cols}, minmax(0, 1fr))`,
-          }}
-        >
-          {visibleItems.map((anime) => {
-            const pct = anime.episodes
-              ? Math.min(
-                100,
-                Math.round((anime.user_progress / anime.episodes) * 100)
-              )
-              : 50;
-            const cd = formatCountdown(anime.next_airing_at);
-            const isSelected = selectedSet.has(anime.id);
+      <div
+        key={anime.id}
+        style={{ height: layout.cardHeight }}
+        onClick={(e) => handleItemClick(e, anime)}
+        onDoubleClick={(e) => handleItemDoubleClick(e, anime)}
+        onContextMenu={(e) => handleContextMenu(e, anime)}
+        title="Click to select • Ctrl+Click to multi-select • Double-click to open details"
+        className={`group relative rounded-2xl overflow-visible flex flex-col cursor-pointer transition-[color,background-color,border-color,box-shadow] shadow-sm hover:shadow-xl ${isSelected
+          ? "bg-accent/10 border border-accent ring-2 ring-accent/40 shadow-lg shadow-accent/10"
+          : "bg-bg-secondary border border-border-subtle hover:border-accent/70"
+          }`}
+      >
+        <div className="relative flex-1 w-full rounded-t-2xl overflow-hidden bg-bg-tertiary">
+          <img
+            src={getOptimizedCoverUrl(anime.cover_image, "large")}
+            alt={anime.title_romaji}
+            loading="lazy"
+            decoding="async"
+            className="w-full h-full object-cover"
+          />
+          <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/15 to-transparent" />
 
-            return (
-              <div
-                key={anime.id}
-                style={{ height: layout.cardHeight }}
-                onClick={(e) => handleItemClick(e, anime)}
-                onDoubleClick={(e) => handleItemDoubleClick(e, anime)}
-                onContextMenu={(e) => handleContextMenu(e, anime)}
-                title="Click to select • Ctrl+Click to multi-select • Double-click to open details"
-                className={`group relative rounded-2xl overflow-visible flex flex-col cursor-pointer transition-[color,background-color,border-color,box-shadow] shadow-sm hover:shadow-xl ${isSelected
-                  ? "bg-accent/10 border border-accent ring-2 ring-accent/40 shadow-lg shadow-accent/10"
-                  : "bg-bg-secondary border border-border-subtle hover:border-accent/70"
-                  }`}
+          {anime.sync_pending && (
+            <PendingSyncDot className="absolute top-2.5 right-2.5 ring-2 ring-black/60" />
+          )}
+
+          {/* Top Left Badges: Disk Episodes & Airing Countdown */}
+          <div className="absolute top-2.5 left-2.5 flex flex-col gap-1 max-w-[calc(100%-20px)]">
+            {anime.local_episode_count > 0 && (
+              <span className="px-2 py-0.5 rounded-md bg-emerald-500/90 text-black text-[10px] font-bold flex items-center gap-1 shadow truncate">
+                <HardDrive className="w-3 h-3 shrink-0" />
+                <span className="truncate">
+                  {formatEpisodeRanges(anime.available_episodes)} on disk
+                </span>
+              </span>
+            )}
+            {cd && anime.next_airing_episode && (
+              <span className="px-2 py-0.5 rounded-md bg-black/85 text-emerald-400 text-[10px] font-mono font-semibold flex items-center gap-1 truncate">
+                <Clock className="w-2.5 h-2.5 shrink-0" />
+                <span className="truncate">
+                  Ep {anime.next_airing_episode} in {cd}
+                </span>
+              </span>
+            )}
+          </div>
+
+          {/* Bottom Overlay: Progress & Stepper (-1 / +1) */}
+          <div className="absolute bottom-2.5 left-3 right-3 flex items-center justify-between text-white">
+            <span className="text-xs font-mono font-bold">
+              Ep {anime.user_progress} / {anime.episodes ?? "?"}
+            </span>
+            <div
+              className="flex items-center gap-1"
+              onClick={(e) => e.stopPropagation()}
+              onDoubleClick={(e) => e.stopPropagation()}
+            >
+              <button
+                onClick={() => onStepEpisode(anime, -1)}
+                disabled={anime.user_progress <= 0}
+                className="p-1 rounded-lg bg-black/75 hover:bg-white/20 disabled:opacity-40 disabled:pointer-events-none text-white border border-white/15 transition shadow"
+                title="Decrement Episode (-1)"
               >
-                <div className="relative flex-1 w-full rounded-t-2xl overflow-hidden bg-bg-tertiary">
-                  <img
-                    src={getOptimizedCoverUrl(anime.cover_image, "large")}
-                    alt={anime.title_romaji}
-                    loading="lazy"
-                    decoding="async"
-                    className="w-full h-full object-cover"
-                  />
-                  <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/15 to-transparent" />
-
-                  {anime.sync_pending && (
-                    <PendingSyncDot className="absolute top-2.5 right-2.5 ring-2 ring-black/60" />
-                  )}
-
-                  {/* Top Left Badges: Disk Episodes & Airing Countdown */}
-                  <div className="absolute top-2.5 left-2.5 flex flex-col gap-1 max-w-[calc(100%-20px)]">
-                    {anime.local_episode_count > 0 && (
-                      <span className="px-2 py-0.5 rounded-md bg-emerald-500/90 text-black text-[10px] font-bold flex items-center gap-1 shadow truncate">
-                        <HardDrive className="w-3 h-3 shrink-0" />
-                        <span className="truncate">
-                          {formatEpisodeRanges(anime.available_episodes)} on disk
-                        </span>
-                      </span>
-                    )}
-                    {cd && anime.next_airing_episode && (
-                      <span className="px-2 py-0.5 rounded-md bg-black/85 text-emerald-400 text-[10px] font-mono font-semibold flex items-center gap-1 truncate">
-                        <Clock className="w-2.5 h-2.5 shrink-0" />
-                        <span className="truncate">
-                          Ep {anime.next_airing_episode} in {cd}
-                        </span>
-                      </span>
-                    )}
-                  </div>
-
-                  {/* Bottom Overlay: Progress & Stepper (-1 / +1) */}
-                  <div className="absolute bottom-2.5 left-3 right-3 flex items-center justify-between text-white">
-                    <span className="text-xs font-mono font-bold">
-                      Ep {anime.user_progress} / {anime.episodes ?? "?"}
-                    </span>
-                    <div
-                      className="flex items-center gap-1"
-                      onClick={(e) => e.stopPropagation()}
-                      onDoubleClick={(e) => e.stopPropagation()}
-                    >
-                      <button
-                        onClick={() => onStepEpisode(anime, -1)}
-                        disabled={anime.user_progress <= 0}
-                        className="p-1 rounded-lg bg-black/75 hover:bg-white/20 disabled:opacity-40 disabled:pointer-events-none text-white border border-white/15 transition shadow"
-                        title="Decrement Episode (-1)"
-                      >
-                        <Minus className="w-3 h-3" />
-                      </button>
-                      <button
-                        onClick={() => onStepEpisode(anime, 1)}
-                        className="px-2 py-1 rounded-lg bg-accent hover:bg-accent-hover text-white text-[11px] font-bold flex items-center gap-0.5 shadow transition"
-                        title="Increment Episode (+1)"
-                      >
-                        <Plus className="w-3 h-3" />1
-                      </button>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Progress Bar */}
-                <div className="w-full h-1 bg-bg-tertiary overflow-hidden shrink-0">
-                  <div
-                    className="h-full bg-accent"
-                    style={{ width: `${pct}%` }}
-                  />
-                </div>
-
-                {/* Card Footer (fixed 60px height) */}
-                <div className="p-3 h-[60px] shrink-0 flex flex-col justify-between">
-                  <h3
-                    className={`text-xs font-bold line-clamp-1 transition-colors ${isSelected
-                      ? "text-accent"
-                      : "text-text-primary group-hover:text-accent"
-                      }`}
-                    title={anime.title_romaji}
-                  >
-                    {anime.title_romaji}
-                  </h3>
-                  <div className="flex items-center justify-between text-[11px] text-text-muted">
-                    <span className="truncate">
-                      {anime.studios[0] || anime.format}
-                    </span>
-                    {anime.user_score > 0 && (
-                      <span className="flex items-center gap-0.5 text-amber-400 font-mono font-semibold shrink-0">
-                        <Star className="w-3 h-3 fill-amber-400" />
-                        {anime.user_score}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              </div>
-            );
-          })}
+                <Minus className="w-3 h-3" />
+              </button>
+              <button
+                onClick={() => onStepEpisode(anime, 1)}
+                className="px-2 py-1 rounded-lg bg-accent hover:bg-accent-hover text-white text-[11px] font-bold flex items-center gap-0.5 shadow transition"
+                title="Increment Episode (+1)"
+              >
+                <Plus className="w-3 h-3" />1
+              </button>
+            </div>
+          </div>
         </div>
-        {bottomSpacerHeight > 0 && <div style={{ height: bottomSpacerHeight }} />}
-        {contextMenuPortal}
+
+        {/* Progress Bar */}
+        <div className="w-full h-1 bg-bg-tertiary overflow-hidden shrink-0">
+          <div className="h-full bg-accent" style={{ width: `${pct}%` }} />
+        </div>
+
+        {/* Card Footer (fixed 60px height) */}
+        <div className="p-3 h-[60px] shrink-0 flex flex-col justify-between">
+          <h3
+            className={`text-xs font-bold line-clamp-1 transition-colors ${isSelected
+              ? "text-accent"
+              : "text-text-primary group-hover:text-accent"
+              }`}
+            title={anime.title_romaji}
+          >
+            {anime.title_romaji}
+          </h3>
+          <div className="flex items-center justify-between text-[11px] text-text-muted">
+            <span className="truncate">{anime.studios[0] || anime.format}</span>
+            {anime.user_score > 0 && (
+              <span className="flex items-center gap-0.5 text-amber-400 font-mono font-semibold shrink-0">
+                <Star className="w-3 h-3 fill-amber-400" />
+                {anime.user_score}
+              </span>
+            )}
+          </div>
+        </div>
       </div>
     );
-  }
+  };
 
-  if (viewMode === "compact") {
+  const renderCompactCard = (anime: AnimeEntry) => {
+    const isSelected = selectedSet.has(anime.id);
+    return (
+      <div
+        key={anime.id}
+        style={{ height: layout.cardHeight }}
+        onClick={(e) => handleItemClick(e, anime)}
+        onDoubleClick={(e) => handleItemDoubleClick(e, anime)}
+        onContextMenu={(e) => handleContextMenu(e, anime)}
+        title="Click to select • Ctrl+Click to multi-select • Double-click to open details"
+        className={`group flex gap-4 p-3.5 rounded-2xl cursor-pointer transition-[color,background-color,border-color,box-shadow] ${isSelected
+          ? "bg-accent/10 border border-accent ring-2 ring-accent/30 shadow-md"
+          : "bg-bg-secondary border border-border-subtle hover:border-accent/60"
+          }`}
+      >
+        <div className="relative w-20 h-28 shrink-0">
+          <img
+            src={getOptimizedCoverUrl(anime.cover_image, "medium")}
+            alt={anime.title_romaji}
+            loading="lazy"
+            decoding="async"
+            className="w-20 h-28 object-cover rounded-xl"
+          />
+          {anime.sync_pending && (
+            <PendingSyncDot className="absolute top-1.5 right-1.5 ring-2 ring-black/60" />
+          )}
+        </div>
+
+        <div className="flex-1 min-w-0 flex flex-col justify-between">
+          <div>
+            <div className="flex items-center justify-between gap-2">
+              <h3
+                className={`text-sm font-bold truncate ${isSelected ? "text-accent" : "text-text-primary"
+                  }`}
+              >
+                {anime.title_romaji}
+              </h3>
+              <span className="px-2 py-0.5 rounded bg-bg-tertiary text-[10px] font-mono text-text-secondary shrink-0">
+                {anime.format}
+              </span>
+            </div>
+            <p className="text-[11px] text-text-muted line-clamp-2 mt-1">
+              {anime.synopsis}
+            </p>
+          </div>
+
+          <div className="flex items-center justify-between gap-2 pt-2 border-t border-border-subtle text-xs">
+            <div className="flex items-center gap-2">
+              <span className="font-mono font-bold text-accent">
+                Ep {anime.user_progress} / {anime.episodes ?? "?"}
+              </span>
+              {anime.local_episode_count > 0 && (
+                <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 text-[10px] font-mono">
+                  {formatEpisodeRanges(anime.available_episodes)} on disk
+                </span>
+              )}
+            </div>
+
+            <div
+              className="flex items-center gap-1"
+              onClick={(e) => e.stopPropagation()}
+              onDoubleClick={(e) => e.stopPropagation()}
+            >
+              <button
+                onClick={() => onStepEpisode(anime, -1)}
+                className="p-1.5 rounded-lg bg-bg-primary hover:bg-bg-tertiary border border-border-subtle text-text-secondary"
+              >
+                <Minus className="w-3 h-3" />
+              </button>
+              <button
+                onClick={() => onStepEpisode(anime, 1)}
+                className="px-2.5 py-1 rounded-lg bg-accent hover:bg-accent-hover text-white font-semibold text-xs flex items-center gap-1"
+              >
+                <Plus className="w-3 h-3" />1
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderTableRow = (anime: AnimeEntry) => {
+    const pct = anime.episodes
+      ? Math.min(100, Math.round((anime.user_progress / anime.episodes) * 100))
+      : 50;
+    const isSelected = selectedSet.has(anime.id);
+
+    return (
+      <tr
+        key={anime.id}
+        style={{ height: layout.rowHeight }}
+        onClick={(e) => handleItemClick(e, anime)}
+        onDoubleClick={(e) => handleItemDoubleClick(e, anime)}
+        onContextMenu={(e) => handleContextMenu(e, anime)}
+        title="Click to select • Ctrl+Click to multi-select • Double-click to open details"
+        className={`cursor-pointer transition-colors ${isSelected
+          ? "bg-accent/15 hover:bg-accent/20 shadow-[inset_3px_0_0_0_rgb(var(--accent-primary))]"
+          : "hover:bg-bg-tertiary/60"
+          }`}
+      >
+        <td className="py-2 pl-4 pr-3 flex items-center gap-3">
+          <img
+            src={getOptimizedCoverUrl(anime.cover_image, "medium")}
+            alt={anime.title_romaji}
+            loading="lazy"
+            decoding="async"
+            className="w-7 h-10 object-cover rounded shrink-0"
+          />
+          <div className="min-w-0">
+            <div
+              className={`font-semibold truncate max-w-md ${isSelected ? "text-accent" : "text-text-primary"
+                }`}
+            >
+              {anime.sync_pending && (
+                <PendingSyncDot className="inline-block mr-1.5 align-middle" />
+              )}
+              {anime.title_romaji}
+            </div>
+            <div className="text-[10px] text-text-muted truncate max-w-md">
+              {anime.studios.join(", ")}
+              {anime.user_started_at ? ` • Started ${anime.user_started_at}` : ""}
+            </div>
+          </div>
+        </td>
+        <td className="py-2 px-3 font-mono text-[11px] text-text-secondary">
+          {anime.format}
+        </td>
+        <td className="py-2 px-3 w-44">
+          <div className="flex items-center justify-between text-[11px] font-mono mb-1">
+            <span>
+              {anime.user_progress} / {anime.episodes ?? "?"}
+            </span>
+            <span className="text-text-muted">{pct}%</span>
+          </div>
+          <div className="w-full h-1.5 rounded-full bg-bg-tertiary overflow-hidden">
+            <div className="h-full bg-accent rounded-full" style={{ width: `${pct}%` }} />
+          </div>
+        </td>
+        <td className="py-2 px-3 font-mono text-[11px]">
+          {anime.local_episode_count > 0 ? (
+            <span className="text-emerald-400 font-semibold">
+              {formatEpisodeRanges(anime.available_episodes)} on disk
+            </span>
+          ) : (
+            <span className="text-text-muted">-</span>
+          )}
+        </td>
+        <td className="py-2 px-3 font-mono font-bold text-amber-400">
+          {anime.user_score > 0 ? anime.user_score : "-"}
+        </td>
+        <td className="py-2 px-3 text-[11px] text-text-secondary">
+          {anime.season || ""} {anime.season_year || ""}
+        </td>
+        <td
+          className="py-2 px-4 text-right"
+          onClick={(e) => e.stopPropagation()}
+          onDoubleClick={(e) => e.stopPropagation()}
+        >
+          <div className="flex items-center justify-end gap-1">
+            <button
+              onClick={() => onStepEpisode(anime, -1)}
+              className="p-1.5 rounded bg-bg-primary hover:bg-bg-tertiary border border-border-subtle text-text-secondary"
+            >
+              <Minus className="w-3 h-3" />
+            </button>
+            <button
+              onClick={() => onStepEpisode(anime, 1)}
+              className="px-2 py-1 rounded bg-accent hover:bg-accent-hover text-white font-mono font-bold text-[11px]"
+            >
+              +1
+            </button>
+          </div>
+        </td>
+      </tr>
+    );
+  };
+
+  if (viewMode === "grid" || viewMode === "compact") {
+    const renderCard = viewMode === "grid" ? renderGridCard : renderCompactCard;
     return (
       <div ref={containerRef} className="w-full">
         {topSpacerHeight > 0 && <div style={{ height: topSpacerHeight }} />}
-        <div
-          className="grid gap-4"
-          style={{
-            gridTemplateColumns: `repeat(${layout.cols}, minmax(0, 1fr))`,
-          }}
-        >
-          {visibleItems.map((anime) => {
-            const isSelected = selectedSet.has(anime.id);
-            return (
-              <div
-                key={anime.id}
-                style={{ height: layout.cardHeight }}
-                onClick={(e) => handleItemClick(e, anime)}
-                onDoubleClick={(e) => handleItemDoubleClick(e, anime)}
-                onContextMenu={(e) => handleContextMenu(e, anime)}
-                title="Click to select • Ctrl+Click to multi-select • Double-click to open details"
-                className={`group flex gap-4 p-3.5 rounded-2xl cursor-pointer transition-[color,background-color,border-color,box-shadow] ${isSelected
-                  ? "bg-accent/10 border border-accent ring-2 ring-accent/30 shadow-md"
-                  : "bg-bg-secondary border border-border-subtle hover:border-accent/60"
-                  }`}
-              >
-                <div className="relative w-20 h-28 shrink-0">
-                  <img
-                    src={getOptimizedCoverUrl(anime.cover_image, "medium")}
-                    alt={anime.title_romaji}
-                    loading="lazy"
-                    decoding="async"
-                    className="w-20 h-28 object-cover rounded-xl"
-                  />
-                  {anime.sync_pending && (
-                    <PendingSyncDot className="absolute top-1.5 right-1.5 ring-2 ring-black/60" />
-                  )}
-                </div>
-
-                <div className="flex-1 min-w-0 flex flex-col justify-between">
-                  <div>
-                    <div className="flex items-center justify-between gap-2">
-                      <h3
-                        className={`text-sm font-bold truncate ${isSelected ? "text-accent" : "text-text-primary"
-                          }`}
-                      >
-                        {anime.title_romaji}
-                      </h3>
-                      <span className="px-2 py-0.5 rounded bg-bg-tertiary text-[10px] font-mono text-text-secondary shrink-0">
-                        {anime.format}
-                      </span>
-                    </div>
-                    <p className="text-[11px] text-text-muted line-clamp-2 mt-1">
-                      {anime.synopsis}
-                    </p>
-                  </div>
-
-                  <div className="flex items-center justify-between gap-2 pt-2 border-t border-border-subtle text-xs">
-                    <div className="flex items-center gap-2">
-                      <span className="font-mono font-bold text-accent">
-                        Ep {anime.user_progress} / {anime.episodes ?? "?"}
-                      </span>
-                      {anime.local_episode_count > 0 && (
-                        <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 text-[10px] font-mono">
-                          {formatEpisodeRanges(anime.available_episodes)} on disk
-                        </span>
-                      )}
-                    </div>
-
-                    <div
-                      className="flex items-center gap-1"
-                      onClick={(e) => e.stopPropagation()}
-                      onDoubleClick={(e) => e.stopPropagation()}
-                    >
-                      <button
-                        onClick={() => onStepEpisode(anime, -1)}
-                        className="p-1.5 rounded-lg bg-bg-primary hover:bg-bg-tertiary border border-border-subtle text-text-secondary"
-                      >
-                        <Minus className="w-3 h-3" />
-                      </button>
-                      <button
-                        onClick={() => onStepEpisode(anime, 1)}
-                        className="px-2.5 py-1 rounded-lg bg-accent hover:bg-accent-hover text-white font-semibold text-xs flex items-center gap-1"
-                      >
-                        <Plus className="w-3 h-3" />1
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
+        {visibleRows.map((row) =>
+          row.kind === "header" ? (
+            <div
+              key={rowKey(row)}
+              style={{ height: row.height }}
+              className="flex items-end pb-2.5 px-1"
+            >
+              <GroupHeading group={row.group} />
+            </div>
+          ) : (
+            <div
+              key={rowKey(row)}
+              className="grid"
+              style={{
+                gridTemplateColumns: `repeat(${layout.cols}, minmax(0, 1fr))`,
+                columnGap: layout.gap,
+                height: layout.cardHeight,
+                marginBottom: layout.gap,
+              }}
+            >
+              {rowItems(row).map(renderCard)}
+            </div>
+          )
+        )}
         {bottomSpacerHeight > 0 && <div style={{ height: bottomSpacerHeight }} />}
         {contextMenuPortal}
       </div>
@@ -634,109 +813,17 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
               <td colSpan={7} className="p-0 border-0" />
             </tr>
           )}
-          {visibleItems.map((anime) => {
-            const pct = anime.episodes
-              ? Math.min(
-                100,
-                Math.round((anime.user_progress / anime.episodes) * 100)
-              )
-              : 50;
-            const isSelected = selectedSet.has(anime.id);
-
-            return (
-              <tr
-                key={anime.id}
-                style={{ height: layout.rowHeight }}
-                onClick={(e) => handleItemClick(e, anime)}
-                onDoubleClick={(e) => handleItemDoubleClick(e, anime)}
-                onContextMenu={(e) => handleContextMenu(e, anime)}
-                title="Click to select • Ctrl+Click to multi-select • Double-click to open details"
-                className={`cursor-pointer transition-colors ${isSelected
-                  ? "bg-accent/15 hover:bg-accent/20 shadow-[inset_3px_0_0_0_rgb(var(--accent-primary))]"
-                  : "hover:bg-bg-tertiary/60"
-                  }`}
-              >
-                <td className="py-2 pl-4 pr-3 flex items-center gap-3">
-                  <img
-                    src={getOptimizedCoverUrl(anime.cover_image, "medium")}
-                    alt={anime.title_romaji}
-                    loading="lazy"
-                    decoding="async"
-                    className="w-7 h-10 object-cover rounded shrink-0"
-                  />
-                  <div className="min-w-0">
-                    <div
-                      className={`font-semibold truncate max-w-md ${isSelected ? "text-accent" : "text-text-primary"
-                        }`}
-                    >
-                      {anime.sync_pending && (
-                        <PendingSyncDot className="inline-block mr-1.5 align-middle" />
-                      )}
-                      {anime.title_romaji}
-                    </div>
-                    <div className="text-[10px] text-text-muted truncate max-w-md">
-                      {anime.studios.join(", ")}
-                      {anime.user_started_at
-                        ? ` • Started ${anime.user_started_at}`
-                        : ""}
-                    </div>
-                  </div>
-                </td>
-                <td className="py-2 px-3 font-mono text-[11px] text-text-secondary">
-                  {anime.format}
-                </td>
-                <td className="py-2 px-3 w-44">
-                  <div className="flex items-center justify-between text-[11px] font-mono mb-1">
-                    <span>
-                      {anime.user_progress} / {anime.episodes ?? "?"}
-                    </span>
-                    <span className="text-text-muted">{pct}%</span>
-                  </div>
-                  <div className="w-full h-1.5 rounded-full bg-bg-tertiary overflow-hidden">
-                    <div
-                      className="h-full bg-accent rounded-full"
-                      style={{ width: `${pct}%` }}
-                    />
-                  </div>
-                </td>
-                <td className="py-2 px-3 font-mono text-[11px]">
-                  {anime.local_episode_count > 0 ? (
-                    <span className="text-emerald-400 font-semibold">
-                      {formatEpisodeRanges(anime.available_episodes)} on disk
-                    </span>
-                  ) : (
-                    <span className="text-text-muted">-</span>
-                  )}
-                </td>
-                <td className="py-2 px-3 font-mono font-bold text-amber-400">
-                  {anime.user_score > 0 ? anime.user_score : "-"}
-                </td>
-                <td className="py-2 px-3 text-[11px] text-text-secondary">
-                  {anime.season || ""} {anime.season_year || ""}
-                </td>
-                <td
-                  className="py-2 px-4 text-right"
-                  onClick={(e) => e.stopPropagation()}
-                  onDoubleClick={(e) => e.stopPropagation()}
-                >
-                  <div className="flex items-center justify-end gap-1">
-                    <button
-                      onClick={() => onStepEpisode(anime, -1)}
-                      className="p-1.5 rounded bg-bg-primary hover:bg-bg-tertiary border border-border-subtle text-text-secondary"
-                    >
-                      <Minus className="w-3 h-3" />
-                    </button>
-                    <button
-                      onClick={() => onStepEpisode(anime, 1)}
-                      className="px-2 py-1 rounded bg-accent hover:bg-accent-hover text-white font-mono font-bold text-[11px]"
-                    >
-                      +1
-                    </button>
-                  </div>
+          {visibleRows.map((row) =>
+            row.kind === "header" ? (
+              <tr key={rowKey(row)} style={{ height: row.height }} className="bg-bg-primary/40">
+                <td colSpan={7} className="px-4 pb-2 align-bottom">
+                  <GroupHeading group={row.group} />
                 </td>
               </tr>
-            );
-          })}
+            ) : (
+              rowItems(row).map(renderTableRow)
+            )
+          )}
           {bottomSpacerHeight > 0 && (
             <tr style={{ height: bottomSpacerHeight }} aria-hidden="true">
               <td colSpan={7} className="p-0 border-0" />
@@ -748,6 +835,21 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
     </div>
   );
 };
+
+/** Status label, icon and count above a group of search results. */
+function GroupHeading({ group }: { group: WatchlistGroup }) {
+  const option = STATUS_OPTIONS.find((o) => o.id === group.status);
+  const Icon = option?.icon;
+  return (
+    <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-text-secondary">
+      {Icon && <Icon className={`w-3.5 h-3.5 ${option.color}`} />}
+      <span>{group.label}</span>
+      <span className="px-1.5 py-0.5 rounded-full bg-bg-tertiary text-[10px] font-mono text-text-muted normal-case tracking-normal">
+        {group.items.length}
+      </span>
+    </div>
+  );
+}
 
 /**
  * Tiny amber dot marking an entry with a local change still queued for AniList.
