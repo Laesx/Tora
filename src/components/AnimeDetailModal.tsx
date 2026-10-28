@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { AnimeEntry, LocalEpisodeFile } from "../types";
 import { formatBytes, formatCountdown, getOptimizedCoverUrl, toraApi } from "../api";
+import { open } from "@tauri-apps/plugin-dialog";
 
 interface AnimeDetailModalProps {
   anime: AnimeEntry;
@@ -128,9 +129,9 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
     try {
       const parsedSynonyms = includeMetadata
         ? synonymsInput
-            .split(",")
-            .map((s) => s.trim())
-            .filter(Boolean)
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean)
         : null;
 
       const updated = await toraApi.updateAnimeEntry({
@@ -217,6 +218,61 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
       showToast(`Playing next episode (#${nextEp})`, "info");
     } else {
       showToast(`No local file for episode ${nextEp}`, "info");
+    }
+  };
+
+  const handleOpenAniList = async () => {
+    try {
+      await toraApi.openExternalUrl(anime.site_url || `https://anilist.co/anime/${anime.id}`);
+    } catch (e: any) {
+      showToast(String(e), "error");
+    }
+  };
+
+  const handleBrowseFolder = async () => {
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: "Select Anime Folder",
+        defaultPath: anime.custom_folder || undefined
+      });
+      if (selected && typeof selected === "string") {
+        setCustomFolder(selected);
+      }
+    } catch {
+      // Fallback if dialog cancelled
+    }
+  };
+
+  const hasFolder = Boolean(
+    customFolder.trim() ||
+    anime.custom_folder?.trim() ||
+    localFiles.length > 0 ||
+    anime.local_episode_count > 0
+  );
+
+  const handleOpenFolder = async () => {
+    try {
+      const target = customFolder.trim() || anime.custom_folder?.trim();
+      if (target) {
+        await toraApi.revealInExplorer(target);
+        return;
+      }
+      if (localFiles.length > 0 && localFiles[0].file_path) {
+        await toraApi.revealInExplorer(localFiles[0].file_path);
+        return;
+      }
+      if (anime.local_episode_count > 0) {
+        const files = await toraApi.getLocalEpisodes(anime.id);
+        if (files.length > 0) {
+          await toraApi.revealInExplorer(files[0].file_path);
+          return;
+        }
+      }
+      showToast(`No local folder linked for "${anime.title_romaji}"`, "error");
+    } catch (e: any) {
+      showToast(String(e), "error");
     }
   };
 
@@ -338,9 +394,7 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
 
             {anime.site_url && (
               <a
-                href={anime.site_url}
-                target="_blank"
-                rel="noreferrer"
+                onClick={handleOpenAniList}
                 className="ml-auto flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs text-text-secondary hover:text-accent transition"
               >
                 AniList
@@ -381,268 +435,268 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
           )}
 
           {inList && (
-          <>
-          {/* Tracker & Watchlist Controls */}
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-3 bg-bg-tertiary/40 p-4 rounded-xl border border-border-subtle">
-            <div>
-              <label className="block text-[11px] font-medium text-text-muted uppercase mb-1">
-                Watch Status
-              </label>
-              <select
-                value={status}
-                onChange={(e) => {
-                  const nextSt = e.target.value;
-                  setStatus(nextSt);
-                  handleSave(nextSt, progress, score, repeats, false);
-                }}
-                className="w-full px-2.5 py-2 rounded-lg bg-bg-primary border border-border-subtle text-xs text-text-primary focus:outline-none focus:border-accent"
-              >
-                <option value="CURRENT">Watching</option>
-                <option value="PLANNING">Plan to Watch</option>
-                <option value="COMPLETED">Completed</option>
-                <option value="PAUSED">Paused / On Hold</option>
-                <option value="DROPPED">Dropped</option>
-                <option value="REPEATING">Rewatching</option>
-              </select>
-            </div>
-
-            <div>
-              <label className="block text-[11px] font-medium text-text-muted uppercase mb-1">
-                Episode Progress
-              </label>
-              <div className="flex items-center gap-1">
-                <button
-                  onClick={() => handleQuickEpisodeStep(-1)}
-                  className="p-2 rounded-lg bg-bg-primary border border-border-subtle hover:border-accent text-text-secondary hover:text-text-primary"
-                >
-                  <Minus className="w-3.5 h-3.5" />
-                </button>
-                <div className="flex-1 text-center font-mono text-xs font-semibold bg-bg-primary py-2 rounded-lg border border-border-subtle">
-                  {progress} / {anime.episodes ?? "?"}
-                </div>
-                <button
-                  onClick={() => handleQuickEpisodeStep(1)}
-                  className="p-2 rounded-lg bg-bg-primary border border-border-subtle hover:border-accent text-text-secondary hover:text-text-primary"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-[11px] font-medium text-text-muted uppercase mb-1">
-                Your Score ({score}/100)
-              </label>
-              <input
-                type="number"
-                min={0}
-                max={100}
-                step={1}
-                value={score}
-                onChange={(e) => setScore(Number(e.target.value))}
-                onBlur={() => handleSave(status, progress, score, repeats, false)}
-                className="w-full px-3 py-2 rounded-lg bg-bg-primary border border-border-subtle text-xs font-mono text-text-primary focus:outline-none focus:border-accent"
-              />
-            </div>
-
-            <div>
-              <label className="block text-[11px] font-medium text-text-muted uppercase mb-1">
-                Rewatch Count
-              </label>
-              <input
-                type="number"
-                min={0}
-                max={99}
-                value={repeats}
-                onChange={(e) => setRepeats(Number(e.target.value))}
-                onBlur={() => handleSave(status, progress, score, repeats, false)}
-                className="w-full px-3 py-2 rounded-lg bg-bg-primary border border-border-subtle text-xs font-mono text-text-primary focus:outline-none focus:border-accent"
-              />
-            </div>
-
-            <div className="md:col-span-2">
-              <div className="flex items-center justify-between mb-1">
-                <label className="block text-[11px] font-medium text-text-muted uppercase">
-                  Date Started
-                </label>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const today = new Date().toISOString().slice(0, 10);
-                    setStartedAt(today);
-                    handleSave(status, progress, score, repeats, false, today, completedAt);
-                  }}
-                  className="text-[10px] font-semibold text-accent hover:underline"
-                >
-                  Set Today
-                </button>
-              </div>
-              <input
-                type="date"
-                value={startedAt}
-                onChange={(e) => {
-                  const nextDate = e.target.value;
-                  setStartedAt(nextDate);
-                  handleSave(status, progress, score, repeats, false, nextDate, completedAt);
-                }}
-                className="w-full px-3 py-2 rounded-lg bg-bg-primary border border-border-subtle text-xs font-mono text-text-primary focus:outline-none focus:border-accent"
-              />
-            </div>
-
-            <div className="md:col-span-2">
-              <div className="flex items-center justify-between mb-1">
-                <label className="block text-[11px] font-medium text-text-muted uppercase">
-                  Date Completed
-                </label>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const today = new Date().toISOString().slice(0, 10);
-                    setCompletedAt(today);
-                    handleSave(status, progress, score, repeats, false, startedAt, today);
-                  }}
-                  className="text-[10px] font-semibold text-accent hover:underline"
-                >
-                  Set Today
-                </button>
-              </div>
-              <input
-                type="date"
-                value={completedAt}
-                onChange={(e) => {
-                  const nextDate = e.target.value;
-                  setCompletedAt(nextDate);
-                  handleSave(status, progress, score, repeats, false, startedAt, nextDate);
-                }}
-                className="w-full px-3 py-2 rounded-lg bg-bg-primary border border-border-subtle text-xs font-mono text-text-primary focus:outline-none focus:border-accent"
-              />
-            </div>
-          </div>
-
-          {/* Interactive Episode Availability Grid */}
-          <div className="space-y-2.5">
-            <div className="flex items-center justify-between">
-              <h3 className="text-xs font-semibold uppercase tracking-wider text-text-secondary flex items-center gap-2">
-                <Film className="w-4 h-4 text-accent" />
-                Episode Grid & Local Disk Availability ({localFiles.length} files on disk)
-              </h3>
-              <div className="flex items-center gap-3 text-[11px] text-text-muted">
-                <span className="flex items-center gap-1">
-                  <span className="w-2.5 h-2.5 rounded-sm bg-amber-500 inline-block" />
-                  Unwatched on Disk
-                </span>
-                <span className="flex items-center gap-1">
-                  <span className="w-2.5 h-2.5 rounded-sm bg-emerald-500/80 inline-block" />
-                  Watched on Disk
-                </span>
-                <span className="flex items-center gap-1">
-                  <span className="w-2.5 h-2.5 rounded-sm bg-accent/30 inline-block" />
-                  Watched
-                </span>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-8 sm:grid-cols-12 gap-1.5 p-3 rounded-xl bg-bg-primary/60 border border-border-subtle">
-              {Array.from({ length: totalGridCount }, (_, idx) => idx + 1).map(
-                (epNum) => {
-                  const hasLocal =
-                    anime.available_episodes.includes(epNum) ||
-                    localFiles.some((f) => f.episode_number === epNum);
-                  const isWatched = epNum <= progress;
-                  let btnClass =
-                    "bg-bg-tertiary text-text-muted border-border-subtle hover:border-text-secondary";
-                  if (hasLocal && !isWatched) {
-                    btnClass =
-                      "bg-amber-500/20 text-amber-300 border-amber-500/60 font-bold hover:bg-amber-500 hover:text-black shadow-sm";
-                  } else if (hasLocal && isWatched) {
-                    btnClass =
-                      "bg-emerald-500/20 text-emerald-300 border-emerald-500/50 hover:bg-emerald-500 hover:text-black";
-                  } else if (isWatched) {
-                    btnClass =
-                      "bg-accent/15 text-accent border-accent/30 hover:bg-accent/30";
-                  }
-
-                  return (
-                    <button
-                      key={epNum}
-                      onClick={() => handlePlayEpisodeNumber(epNum)}
-                      title={
-                        hasLocal
-                          ? `Episode ${epNum} available on disk — Click to play`
-                          : `Episode ${epNum} — Click to search torrent`
-                      }
-                      className={`py-1.5 rounded-md text-xs font-mono border transition flex items-center justify-center gap-0.5 ${btnClass}`}
-                    >
-                      {epNum}
-                    </button>
-                  );
-                }
-              )}
-            </div>
-          </div>
-
-          {/* Local Files List across Hard Drives */}
-          {localFiles.length > 0 && (
-            <div className="space-y-2">
-              <h4 className="text-xs font-semibold uppercase tracking-wider text-text-secondary flex items-center gap-1.5">
-                <HardDrive className="w-3.5 h-3.5 text-accent" />
-                Matched Local Video Files
-              </h4>
-              <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
-                {localFiles.map((f) => (
-                  <div
-                    key={f.id}
-                    className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-bg-primary border border-border-subtle hover:border-accent/50 text-xs transition"
+            <>
+              {/* Tracker & Watchlist Controls */}
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-3 bg-bg-tertiary/40 p-4 rounded-xl border border-border-subtle">
+                <div>
+                  <label className="block text-[11px] font-medium text-text-muted uppercase mb-1">
+                    Watch Status
+                  </label>
+                  <select
+                    value={status}
+                    onChange={(e) => {
+                      const nextSt = e.target.value;
+                      setStatus(nextSt);
+                      handleSave(nextSt, progress, score, repeats, false);
+                    }}
+                    className="w-full px-2.5 py-2 rounded-lg bg-bg-primary border border-border-subtle text-xs text-text-primary focus:outline-none focus:border-accent"
                   >
-                    <div className="flex items-center gap-2 min-w-0">
-                      <span className="px-1.5 py-0.5 rounded bg-bg-tertiary font-mono text-[10px] text-text-secondary shrink-0">
-                        {f.drive_root}
-                      </span>
-                      <span className="px-1.5 py-0.5 rounded bg-accent/20 text-accent font-mono font-semibold shrink-0">
-                        Ep {f.episode_number ?? "?"}
-                      </span>
-                      {f.release_group && (
-                        <span className="px-1.5 py-0.5 rounded bg-bg-elevated text-text-secondary text-[10px] shrink-0">
-                          [{f.release_group}]
-                        </span>
-                      )}
-                      {f.resolution && (
-                        <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 text-[10px] font-mono shrink-0">
-                          {f.resolution}
-                        </span>
-                      )}
-                      <span
-                        className="truncate text-text-primary"
-                        title={f.file_path}
-                      >
-                        {f.file_name}
-                      </span>
+                    <option value="CURRENT">Watching</option>
+                    <option value="PLANNING">Plan to Watch</option>
+                    <option value="COMPLETED">Completed</option>
+                    <option value="PAUSED">Paused / On Hold</option>
+                    <option value="DROPPED">Dropped</option>
+                    <option value="REPEATING">Rewatching</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-medium text-text-muted uppercase mb-1">
+                    Episode Progress
+                  </label>
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => handleQuickEpisodeStep(-1)}
+                      className="p-2 rounded-lg bg-bg-primary border border-border-subtle hover:border-accent text-text-secondary hover:text-text-primary"
+                    >
+                      <Minus className="w-3.5 h-3.5" />
+                    </button>
+                    <div className="flex-1 text-center font-mono text-xs font-semibold bg-bg-primary py-2 rounded-lg border border-border-subtle">
+                      {progress} / {anime.episodes ?? "?"}
                     </div>
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <span className="text-[10px] font-mono text-text-muted">
-                        {formatBytes(f.file_size)}
-                      </span>
-                      <button
-                        onClick={() => toraApi.playEpisodeFile(f.file_path)}
-                        className="p-1.5 rounded bg-accent/20 hover:bg-accent text-accent hover:text-white transition"
-                        title="Play file"
-                      >
-                        <Play className="w-3.5 h-3.5 fill-current" />
-                      </button>
-                      <button
-                        onClick={() => toraApi.revealInExplorer(f.file_path)}
-                        className="p-1.5 rounded bg-bg-tertiary hover:bg-bg-elevated text-text-secondary hover:text-text-primary transition"
-                        title="Reveal in Windows Explorer"
-                      >
-                        <FolderOpen className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
+                    <button
+                      onClick={() => handleQuickEpisodeStep(1)}
+                      className="p-2 rounded-lg bg-bg-primary border border-border-subtle hover:border-accent text-text-secondary hover:text-text-primary"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                    </button>
                   </div>
-                ))}
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-medium text-text-muted uppercase mb-1">
+                    Your Score ({score}/100)
+                  </label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={100}
+                    step={1}
+                    value={score}
+                    onChange={(e) => setScore(Number(e.target.value))}
+                    onBlur={() => handleSave(status, progress, score, repeats, false)}
+                    className="w-full px-3 py-2 rounded-lg bg-bg-primary border border-border-subtle text-xs font-mono text-text-primary focus:outline-none focus:border-accent"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-medium text-text-muted uppercase mb-1">
+                    Rewatch Count
+                  </label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={99}
+                    value={repeats}
+                    onChange={(e) => setRepeats(Number(e.target.value))}
+                    onBlur={() => handleSave(status, progress, score, repeats, false)}
+                    className="w-full px-3 py-2 rounded-lg bg-bg-primary border border-border-subtle text-xs font-mono text-text-primary focus:outline-none focus:border-accent"
+                  />
+                </div>
+
+                <div className="md:col-span-2">
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-[11px] font-medium text-text-muted uppercase">
+                      Date Started
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const today = new Date().toISOString().slice(0, 10);
+                        setStartedAt(today);
+                        handleSave(status, progress, score, repeats, false, today, completedAt);
+                      }}
+                      className="text-[10px] font-semibold text-accent hover:underline"
+                    >
+                      Set Today
+                    </button>
+                  </div>
+                  <input
+                    type="date"
+                    value={startedAt}
+                    onChange={(e) => {
+                      const nextDate = e.target.value;
+                      setStartedAt(nextDate);
+                      handleSave(status, progress, score, repeats, false, nextDate, completedAt);
+                    }}
+                    className="w-full px-3 py-2 rounded-lg bg-bg-primary border border-border-subtle text-xs font-mono text-text-primary focus:outline-none focus:border-accent"
+                  />
+                </div>
+
+                <div className="md:col-span-2">
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-[11px] font-medium text-text-muted uppercase">
+                      Date Completed
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const today = new Date().toISOString().slice(0, 10);
+                        setCompletedAt(today);
+                        handleSave(status, progress, score, repeats, false, startedAt, today);
+                      }}
+                      className="text-[10px] font-semibold text-accent hover:underline"
+                    >
+                      Set Today
+                    </button>
+                  </div>
+                  <input
+                    type="date"
+                    value={completedAt}
+                    onChange={(e) => {
+                      const nextDate = e.target.value;
+                      setCompletedAt(nextDate);
+                      handleSave(status, progress, score, repeats, false, startedAt, nextDate);
+                    }}
+                    className="w-full px-3 py-2 rounded-lg bg-bg-primary border border-border-subtle text-xs font-mono text-text-primary focus:outline-none focus:border-accent"
+                  />
+                </div>
               </div>
-            </div>
-          )}
-          </>
+
+              {/* Interactive Episode Availability Grid */}
+              <div className="space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-text-secondary flex items-center gap-2">
+                    <Film className="w-4 h-4 text-accent" />
+                    Episode Grid & Local Disk Availability ({localFiles.length} files on disk)
+                  </h3>
+                  <div className="flex items-center gap-3 text-[11px] text-text-muted">
+                    <span className="flex items-center gap-1">
+                      <span className="w-2.5 h-2.5 rounded-sm bg-amber-500 inline-block" />
+                      Unwatched on Disk
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <span className="w-2.5 h-2.5 rounded-sm bg-emerald-500/80 inline-block" />
+                      Watched on Disk
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <span className="w-2.5 h-2.5 rounded-sm bg-accent/30 inline-block" />
+                      Watched
+                    </span>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-8 sm:grid-cols-12 gap-1.5 p-3 rounded-xl bg-bg-primary/60 border border-border-subtle">
+                  {Array.from({ length: totalGridCount }, (_, idx) => idx + 1).map(
+                    (epNum) => {
+                      const hasLocal =
+                        anime.available_episodes.includes(epNum) ||
+                        localFiles.some((f) => f.episode_number === epNum);
+                      const isWatched = epNum <= progress;
+                      let btnClass =
+                        "bg-bg-tertiary text-text-muted border-border-subtle hover:border-text-secondary";
+                      if (hasLocal && !isWatched) {
+                        btnClass =
+                          "bg-amber-500/20 text-amber-300 border-amber-500/60 font-bold hover:bg-amber-500 hover:text-black shadow-sm";
+                      } else if (hasLocal && isWatched) {
+                        btnClass =
+                          "bg-emerald-500/20 text-emerald-300 border-emerald-500/50 hover:bg-emerald-500 hover:text-black";
+                      } else if (isWatched) {
+                        btnClass =
+                          "bg-accent/15 text-accent border-accent/30 hover:bg-accent/30";
+                      }
+
+                      return (
+                        <button
+                          key={epNum}
+                          onClick={() => handlePlayEpisodeNumber(epNum)}
+                          title={
+                            hasLocal
+                              ? `Episode ${epNum} available on disk — Click to play`
+                              : `Episode ${epNum} — Click to search torrent`
+                          }
+                          className={`py-1.5 rounded-md text-xs font-mono border transition flex items-center justify-center gap-0.5 ${btnClass}`}
+                        >
+                          {epNum}
+                        </button>
+                      );
+                    }
+                  )}
+                </div>
+              </div>
+
+              {/* Local Files List across Hard Drives */}
+              {localFiles.length > 0 && (
+                <div className="space-y-2">
+                  <h4 className="text-xs font-semibold uppercase tracking-wider text-text-secondary flex items-center gap-1.5">
+                    <HardDrive className="w-3.5 h-3.5 text-accent" />
+                    Matched Local Video Files
+                  </h4>
+                  <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
+                    {localFiles.map((f) => (
+                      <div
+                        key={f.id}
+                        className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-bg-primary border border-border-subtle hover:border-accent/50 text-xs transition"
+                      >
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="px-1.5 py-0.5 rounded bg-bg-tertiary font-mono text-[10px] text-text-secondary shrink-0">
+                            {f.drive_root}
+                          </span>
+                          <span className="px-1.5 py-0.5 rounded bg-accent/20 text-accent font-mono font-semibold shrink-0">
+                            Ep {f.episode_number ?? "?"}
+                          </span>
+                          {f.release_group && (
+                            <span className="px-1.5 py-0.5 rounded bg-bg-elevated text-text-secondary text-[10px] shrink-0">
+                              [{f.release_group}]
+                            </span>
+                          )}
+                          {f.resolution && (
+                            <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 text-[10px] font-mono shrink-0">
+                              {f.resolution}
+                            </span>
+                          )}
+                          <span
+                            className="truncate text-text-primary"
+                            title={f.file_path}
+                          >
+                            {f.file_name}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <span className="text-[10px] font-mono text-text-muted">
+                            {formatBytes(f.file_size)}
+                          </span>
+                          <button
+                            onClick={() => toraApi.playEpisodeFile(f.file_path)}
+                            className="p-1.5 rounded bg-accent/20 hover:bg-accent text-accent hover:text-white transition"
+                            title="Play file"
+                          >
+                            <Play className="w-3.5 h-3.5 fill-current" />
+                          </button>
+                          <button
+                            onClick={() => toraApi.revealInExplorer(f.file_path)}
+                            className="p-1.5 rounded bg-bg-tertiary hover:bg-bg-elevated text-text-secondary hover:text-text-primary transition"
+                            title="Reveal in Windows Explorer"
+                          >
+                            <FolderOpen className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
           )}
 
           {/* Synopsis & Metadata */}
@@ -688,75 +742,86 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
 
           {/* Notes, Custom Folder & Recognition Aliases */}
           {inList && (
-          <div className="space-y-3 bg-bg-tertiary/30 p-4 rounded-xl border border-border-subtle">
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-text-secondary flex items-center gap-1.5">
-              <Tag className="w-3.5 h-3.5 text-accent" />
-              Recognition Aliases, Custom Folder & Notes
-            </h3>
+            <div className="space-y-3 bg-bg-tertiary/30 p-4 rounded-xl border border-border-subtle">
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-text-secondary flex items-center gap-1.5">
+                <Tag className="w-3.5 h-3.5 text-accent" />
+                Settings
+              </h3>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[11px] text-text-muted mb-1">
+                    Title Aliases
+                  </label>
+                  <input
+                    type="text"
+                    value={synonymsInput}
+                    onChange={(e) => setSynonymsInput(e.target.value)}
+                    placeholder="e.g. Frieren, Sousou no Frieren"
+                    className="w-full px-3 py-2 rounded-lg bg-bg-primary border border-border-subtle text-xs text-text-primary focus:outline-none focus:border-accent"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[11px] text-text-muted mb-1">
+                    Anime Folder Path
+                  </label>
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="text"
+                      value={customFolder}
+                      onChange={(e) => setCustomFolder(e.target.value)}
+                      placeholder="e.g. D:\Anime\Sousou no Frieren"
+                      className="flex-1 min-w-0 px-3 py-2 rounded-lg bg-bg-primary border border-border-subtle text-xs font-mono text-text-primary focus:outline-none focus:border-accent"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleOpenFolder}
+                      disabled={!hasFolder}
+                      title={hasFolder ? "Open folder in Explorer" : "No folder available"}
+                      className="self-stretch px-2.5 flex items-center justify-center rounded-lg bg-bg-tertiary hover:bg-bg-elevated border border-border-subtle hover:border-accent text-text-secondary hover:text-text-primary transition shrink-0 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:border-border-subtle disabled:hover:bg-bg-tertiary disabled:hover:text-text-secondary"
+                    >
+                      <FolderOpen className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+
               <div>
                 <label className="block text-[11px] text-text-muted mb-1">
-                  Title Aliases / Synonyms (comma-separated for Anitomy matching)
+                  Personal Notes (synced with AniList)
                 </label>
-                <input
-                  type="text"
-                  value={synonymsInput}
-                  onChange={(e) => setSynonymsInput(e.target.value)}
-                  placeholder="e.g. Frieren, Sousou no Frieren"
+                <textarea
+                  rows={2}
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                  placeholder="Add personal thoughts, release group preferences, etc."
                   className="w-full px-3 py-2 rounded-lg bg-bg-primary border border-border-subtle text-xs text-text-primary focus:outline-none focus:border-accent"
                 />
               </div>
 
-              <div>
-                <label className="block text-[11px] text-text-muted mb-1">
-                  Dedicated Anime Folder Path (for Library & qBittorrent)
-                </label>
-                <input
-                  type="text"
-                  value={customFolder}
-                  onChange={(e) => setCustomFolder(e.target.value)}
-                  placeholder="e.g. D:\Anime\Sousou no Frieren"
-                  className="w-full px-3 py-2 rounded-lg bg-bg-primary border border-border-subtle text-xs font-mono text-text-primary focus:outline-none focus:border-accent"
-                />
+              <div className="flex items-center justify-between pt-1">
+                <button
+                  onClick={async () => {
+                    await toraApi.deleteAnimeEntry(anime.id);
+                    onDeleted(anime.id);
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-red-400 hover:bg-red-500/15 transition"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  Remove from Library
+                </button>
+
+                <button
+                  onClick={() => handleSave(status, progress, score, repeats, true)}
+                  disabled={saving}
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-accent hover:bg-accent-hover text-white text-xs font-semibold transition"
+                >
+                  <Save className="w-3.5 h-3.5" />
+                  {saving ? "Saving..." : "Save Details"}
+                </button>
               </div>
             </div>
-
-            <div>
-              <label className="block text-[11px] text-text-muted mb-1">
-                Personal Notes (synced with AniList)
-              </label>
-              <textarea
-                rows={2}
-                value={notes}
-                onChange={(e) => setNotes(e.target.value)}
-                placeholder="Add personal thoughts, release group preferences, etc."
-                className="w-full px-3 py-2 rounded-lg bg-bg-primary border border-border-subtle text-xs text-text-primary focus:outline-none focus:border-accent"
-              />
-            </div>
-
-            <div className="flex items-center justify-between pt-1">
-              <button
-                onClick={async () => {
-                  await toraApi.deleteAnimeEntry(anime.id);
-                  onDeleted(anime.id);
-                }}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-red-400 hover:bg-red-500/15 transition"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-                Remove from Library
-              </button>
-
-              <button
-                onClick={() => handleSave(status, progress, score, repeats, true)}
-                disabled={saving}
-                className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-accent hover:bg-accent-hover text-white text-xs font-semibold transition"
-              >
-                <Save className="w-3.5 h-3.5" />
-                {saving ? "Saving..." : "Save Details"}
-              </button>
-            </div>
-          </div>
           )}
         </div>
       </div>
