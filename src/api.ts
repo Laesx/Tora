@@ -13,6 +13,7 @@ import {
   ScanSummary,
   SeasonalAnime,
   SeasonResult,
+  SignOutOutcome,
   SyncStatus,
   SyncSummary,
   ThemePreset,
@@ -322,7 +323,7 @@ export const toraApi = {
 
   startAnilistOauth: () => invoke<string>("start_anilist_oauth"),
 
-  signOutTracker: () => invoke<AppSettings>("sign_out_tracker"),
+  signOutTracker: () => invoke<SignOutOutcome>("sign_out_tracker"),
 
   openExternalUrl: (url: string) => invoke<void>("open_external_url", { url }),
 };

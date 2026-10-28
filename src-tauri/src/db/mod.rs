@@ -606,6 +606,9 @@ const SEEDED_TORRENT_RULE_NAMES: [&str; 2] = [
     "Dandadan - Erai-raws 1080p Auto",
 ];
 const SEED_MARKER_KEY: &str = "seeded_kusuriya_s3";
+/// `app_settings` key holding the AniList user id the local list belongs to. Deliberately not part of
+/// `AppSettings`, so a frontend settings save can never overwrite it.
+const LIST_OWNER_KEY: &str = "list_owner_user_id";
 
 /// `watch_history.player_name` of rows logged from manual progress changes (not a media player).
 pub const MANUAL_HISTORY_PLAYER: &str = "Manual";
@@ -1184,6 +1187,39 @@ fn run_data_migrations(conn: &mut Connection) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     }
 
+    // Lists created before owner tracking belong to the account that was signed in at the time.
+    let has_owner: bool = tx
+        .query_row(
+            "SELECT 1 FROM app_settings WHERE key = ?1",
+            params![LIST_OWNER_KEY],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .is_some();
+    if !has_owner {
+        let signed_in_user: Option<i64> = tx
+            .query_row(
+                "SELECT value_json FROM app_settings WHERE key = 'main'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+            .and_then(|v| v.get("anilist_user_id").and_then(|id| id.as_i64()));
+        let has_entries: bool = tx
+            .query_row("SELECT EXISTS(SELECT 1 FROM anime_entries)", [], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        if let (Some(user_id), true) = (signed_in_user, has_entries) {
+            tx.execute(
+                "INSERT INTO app_settings (key, value_json) VALUES (?1, ?2)",
+                params![LIST_OWNER_KEY, user_id.to_string()],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+
     tx.commit().map_err(|e| e.to_string())
 }
 
@@ -1356,8 +1392,8 @@ impl Database {
 
         // Central matcher-cache invalidation: any INSERT / UPDATE / DELETE (incl. upserts and
         // `INSERT OR REPLACE`) on the tables the matcher index is built from bumps the generation.
-        // Both are rowid tables, so the hook fires for every row change (no `DELETE FROM` without
-        // WHERE exists for them, which would hit SQLite's truncate optimization and skip the hook).
+        // Both are rowid tables, so the hook fires for every row change. The one `DELETE FROM` without
+        // WHERE (`reset_for_account_switch`) hits SQLite's truncate optimization and bumps it manually.
         let matcher_generation = Arc::new(AtomicU64::new(0));
         let hook_generation = matcher_generation.clone();
         conn.update_hook(Some(
@@ -2480,6 +2516,70 @@ impl Database {
         )
         .map(|n| n as usize)
         .map_err(|e| e.to_string())
+    }
+
+    /// AniList user id the local list belongs to (`None` before the first sign-in).
+    pub fn list_owner(&self) -> Result<Option<i64>, String> {
+        let conn = self.reader()?;
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT value_json FROM app_settings WHERE key = ?1",
+                params![LIST_OWNER_KEY],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        Ok(raw.and_then(|v| v.trim().parse::<i64>().ok()))
+    }
+
+    pub fn set_list_owner(&self, user_id: i64) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT OR REPLACE INTO app_settings (key, value_json) VALUES (?1, ?2)",
+            params![LIST_OWNER_KEY, user_id.to_string()],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// A different AniList account signed in: drop everything that belonged to the previous one in one
+    /// transaction (list entries with their custom folders, queued pushes and deletions, watch history,
+    /// title aliases) and make `new_owner` the owner. Machine data stays: library folders and the indexed
+    /// files (only unmatched), settings, torrent rules (unlinked from anime) and the public metadata caches.
+    /// Returns how many unsent changes of the previous account were discarded.
+    pub fn reset_for_account_switch(&self, new_owner: i64) -> Result<usize, String> {
+        let discarded = {
+            let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            let discarded: i64 = tx
+                .query_row(
+                    "SELECT (SELECT COUNT(*) FROM anime_entries WHERE sync_pending = 1)
+                          + (SELECT COUNT(*) FROM tracker_pending_deletions)",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            tx.execute_batch(
+                "UPDATE local_episodes SET matched_anime_id = NULL, watched = 0
+                   WHERE matched_anime_id IS NOT NULL OR watched != 0;
+                 UPDATE torrent_rules SET anime_id = NULL WHERE anime_id IS NOT NULL;
+                 DELETE FROM tracker_pending_deletions;
+                 DELETE FROM watch_history;
+                 DELETE FROM title_aliases;
+                 DELETE FROM anime_entries;",
+            )
+            .map_err(|e| e.to_string())?;
+            tx.execute(
+                "INSERT OR REPLACE INTO app_settings (key, value_json) VALUES (?1, ?2)",
+                params![LIST_OWNER_KEY, new_owner.to_string()],
+            )
+            .map_err(|e| e.to_string())?;
+            tx.commit().map_err(|e| e.to_string())?;
+            discarded as usize
+        };
+        // `DELETE FROM` without WHERE hits SQLite's truncate optimization, which skips the update hook.
+        self.bump_matcher_generation();
+        Ok(discarded)
     }
 
     /// Build a fresh (uncached) in-memory AnimeMatcherIndex in a single SQL pass.
@@ -4021,6 +4121,29 @@ mod tests {
 
         drop(db);
         let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_list_owner_migration_adopts_the_signed_in_account() {
+        let db = Database::open_in_memory().unwrap();
+        assert_eq!(db.list_owner().unwrap(), None);
+        let mut s = db.get_settings().unwrap();
+        s.anilist_user_id = Some(42);
+        db.save_settings(&s).unwrap();
+        let migrate = |db: &Database| run_data_migrations(&mut db.conn.lock().unwrap()).unwrap();
+
+        // An empty list has no owner yet
+        migrate(&db);
+        assert_eq!(db.list_owner().unwrap(), None);
+
+        db.upsert_anime_entry(&test_entry(1, "Alpha")).unwrap();
+        migrate(&db);
+        assert_eq!(db.list_owner().unwrap(), Some(42));
+
+        // An existing owner is never overwritten
+        db.set_list_owner(7).unwrap();
+        migrate(&db);
+        assert_eq!(db.list_owner().unwrap(), Some(7));
     }
 
     #[test]

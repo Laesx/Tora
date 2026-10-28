@@ -383,6 +383,24 @@ export interface TrackerEntrySyncedEvent {
   entry: AnimeEntry;
 }
 
+/** Result of `sign_out_tracker`: queued changes are sent one last time before the token is cleared. */
+export interface SignOutOutcome {
+  pushed: number;
+  deleted: number;
+  /** Changes still queued; they are sent when the same account signs in again. */
+  unsent: number;
+  settings: AppSettings;
+}
+
+/** A different AniList account signed in: the previous account's list data was wiped. */
+export interface TrackerAccountSwitchedEvent {
+  previous_user_id: number | null;
+  user_id: number;
+  username: string;
+  /** Unsent changes of the previous account that were dropped. */
+  discarded_changes: number;
+}
+
 export interface ThemePreset {
   id: string;
   name: string;

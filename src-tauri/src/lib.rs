@@ -14,8 +14,8 @@ use crate::detection::anitomy::{parse_filename, AnitomyElements};
 use crate::library::scanner::{DriveStorageSummary, LibraryMonitorHandle, ScanSummary};
 use crate::plugins::{PluginManager, SeasonalAnime, TrackerPluginDescriptor, TrackerUserProfile};
 use crate::sync::{
-    AiringScheduleResult, ChangeSource, SeasonResult, SyncEmitter, SyncStatus, SyncSummary, TrackerSyncService,
-    UserStateChange,
+    AiringScheduleResult, ChangeSource, SeasonResult, SignOutOutcome, SyncEmitter, SyncStatus, SyncSummary,
+    TrackerSyncService, UserStateChange,
 };
 use crate::torrents::{
     search_torrents, send_to_qbittorrent, test_qbittorrent_connection, TorrentItem,
@@ -138,19 +138,19 @@ async fn verify_tracker_account(
         .plugins
         .get(&plugin_id)
         .ok_or_else(|| "Tracker plugin not found".to_string())?;
-    let profile = plugin
-        .verify_account(&username, token.as_deref())
-        .await?;
+    let token = token
+        .filter(|t| !t.trim().is_empty())
+        .ok_or_else(|| "AniList sign-in requires an OAuth access token".to_string())?;
+    let profile = plugin.verify_account(&username, Some(&token)).await?;
 
-    let mut settings = state.db.get_settings()?;
-    settings.active_tracker_plugin = plugin_id;
-    settings.anilist_username = profile.username.clone();
-    settings.anilist_user_id = Some(profile.user_id);
-    settings.anilist_avatar = profile.avatar_url.clone();
-    if let Some(t) = token {
-        settings.anilist_token = t;
+    // Same owner: just refreshes the stored profile. A different account wipes the previous one's list.
+    let outcome = state.sync.sign_in(&token, &profile).await?;
+    if outcome.account_switched {
+        let sync = state.sync.clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = sync.pull("post_auth").await;
+        });
     }
-    state.db.save_settings(&settings)?;
 
     Ok(profile)
 }
@@ -954,19 +954,8 @@ async fn open_external_url(url: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn sign_out_tracker(state: State<'_, AppState>) -> Result<AppSettings, String> {
-    let db = state.db.clone();
-    tokio::task::spawn_blocking(move || {
-        let mut settings = db.get_settings()?;
-        settings.anilist_username.clear();
-        settings.anilist_token.clear();
-        settings.anilist_user_id = None;
-        settings.anilist_avatar = None;
-        db.save_settings(&settings)?;
-        db.get_settings()
-    })
-    .await
-    .map_err(|e| e.to_string())?
+async fn sign_out_tracker(state: State<'_, AppState>) -> Result<SignOutOutcome, String> {
+    state.sync.sign_out().await
 }
 
 const OAUTH_CALLBACK_HTML: &str = r#"<!DOCTYPE html>
@@ -1157,13 +1146,12 @@ async fn handle_oauth_http_stream(
                     .ok_or_else(|| "AniList plugin not found".to_string())?;
                 let profile = plugin.verify_account("", Some(&token)).await?;
 
-                let mut settings = db.get_settings()?;
-                settings.active_tracker_plugin = "anilist".into();
-                settings.anilist_username = profile.username.clone();
-                settings.anilist_token = token.clone();
-                settings.anilist_user_id = Some(profile.user_id);
-                settings.anilist_avatar = profile.avatar_url.clone();
-                db.save_settings(&settings)?;
+                // Keeps the list for the same account; a different account wipes the previous one's list.
+                sync.sign_in(&token, &profile).await?;
+                let db = db.clone();
+                let settings = tokio::task::spawn_blocking(move || db.get_settings())
+                    .await
+                    .map_err(|e| e.to_string())??;
                 Ok((settings, profile))
             }
             .await;

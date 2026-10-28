@@ -13,16 +13,19 @@
 //! - `tracker-auth-invalid`  `{ message }`
 //! - `tracker-entry-synced`  `{ entry }`
 //! - `library-changed`       `ScanSummary` (after a pull, when background matching bound new local files)
+//! - `tracker-account-switched` `{ previous_user_id, user_id, username, discarded_changes }`
 //!
-//! Without an AniList token the service does nothing remote: edits are written locally but not queued,
-//! deletes create no tombstones, and `pull` fails with "Not signed in to AniList".
+//! Edits and deletes are always queued (`sync_pending` / tombstones), signed in or not; they are only sent
+//! while signed in, so changes made while signed out reach AniList on the owner's next sign-in. Without a
+//! token `pull` fails with "Not signed in to AniList". The local list belongs to one account
+//! (`Database::list_owner`): a different account signing in wipes it ([`TrackerSyncService::sign_in`]).
 
 use crate::db::{AnimeEntry, AppSettings, BatchAnimeUpdatePatch, Database};
 use crate::detection::anisthesia::DetectedMediaSession;
 use crate::library::scanner::ScanSummary;
 use crate::plugins::{
     AiringScheduleItem, PluginManager, SeasonalAnime, TrackerEntryUpdate, TrackerError, TrackerPlugin,
-    MEDIA_DETAILS_CHUNK,
+    TrackerUserProfile, MEDIA_DETAILS_CHUNK,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -46,6 +49,7 @@ pub const EVENT_AUTH_INVALID: &str = "tracker-auth-invalid";
 pub const EVENT_ENTRY_SYNCED: &str = "tracker-entry-synced";
 /// Same event (and `ScanSummary` payload) the library scanner / watcher emits.
 pub const EVENT_LIBRARY_CHANGED: &str = "library-changed";
+pub const EVENT_ACCOUNT_SWITCHED: &str = "tracker-account-switched";
 
 /// Plugin id used for all sync traffic (login is always AniList OAuth).
 const TRACKER_PLUGIN_ID: &str = "anilist";
@@ -482,6 +486,26 @@ pub struct SyncStatus {
     pub pending_deletions: usize,
 }
 
+/// Result of [`TrackerSyncService::sign_in`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SignInOutcome {
+    /// A different account than the list owner signed in; the previous account's list data was wiped.
+    pub account_switched: bool,
+    pub previous_user_id: Option<i64>,
+    /// Unsent changes (pending entries + queued deletions) of the previous account that were dropped.
+    pub discarded_changes: usize,
+}
+
+/// Result of [`TrackerSyncService::sign_out`], returned by the `sign_out_tracker` command.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignOutOutcome {
+    pub pushed: usize,
+    pub deleted: usize,
+    /// Changes still queued after the final flush; they are sent when the same account signs in again.
+    pub unsent: usize,
+    pub settings: AppSettings,
+}
+
 #[derive(Debug, Default)]
 struct FlushOutcome {
     succeeded: usize,
@@ -632,8 +656,8 @@ impl TrackerSyncService {
 
     // ----------------------------------------------------------------- local mutations (push)
 
-    /// Apply one user-state change locally and, when signed in, push it to AniList in the background.
-    /// Returns the updated entry immediately. Callers must not hold the `active_session` lock.
+    /// Apply one user-state change locally (always queued) and, when signed in, push it to AniList in the
+    /// background. Returns the updated entry immediately. Callers must not hold the `active_session` lock.
     pub async fn apply_local_update(
         self: &Arc<Self>,
         change: UserStateChange,
@@ -652,7 +676,7 @@ impl TrackerSyncService {
         let (entry, signed_in) = self
             .blocking(move |db| {
                 let signed_in = has_token(&db.get_settings()?);
-                let entry = write_local_change(db, &change, &today, signed_in)?;
+                let entry = write_local_change(db, &change, &today, true)?;
                 Ok((entry, signed_in))
             })
             .await?;
@@ -678,7 +702,7 @@ impl TrackerSyncService {
         let (entries, signed_in) = self
             .blocking(move |db| {
                 let signed_in = has_token(&db.get_settings()?);
-                let entries = write_batch_change(db, &patch, &today, signed_in)?;
+                let entries = write_batch_change(db, &patch, &today, true)?;
                 Ok((entries, signed_in))
             })
             .await?;
@@ -750,7 +774,7 @@ impl TrackerSyncService {
                     entry.user_started_at = st.user_started_at;
                     entry.user_completed_at = st.user_completed_at;
                     entry.updated_at = chrono::Utc::now().timestamp();
-                    entry.sync_pending = signed_in;
+                    entry.sync_pending = true;
                     db.upsert_anime_entry(&entry)?;
                     if signed_in {
                         Some(media_id)
@@ -773,20 +797,15 @@ impl TrackerSyncService {
         Ok(list)
     }
 
-    /// Delete entries locally right away. When signed in, a tombstone per entry queues the AniList delete
-    /// (flushed in the background now, retried on the next pull). Returns the full list.
+    /// Delete entries locally right away. A tombstone per entry queues the AniList delete (flushed in the
+    /// background now when signed in, otherwise on the next pull). Returns the full list.
     pub async fn delete_entries(self: &Arc<Self>, ids: Vec<i64>) -> Result<Vec<AnimeEntry>, String> {
         let deleted_ids = ids.clone();
         let (list, queued) = self
             .blocking(move |db| {
                 let signed_in = has_token(&db.get_settings()?);
-                let queued = if signed_in {
-                    !db.delete_entries_with_tombstones(&ids)?.is_empty()
-                } else {
-                    db.batch_delete_anime_entries(&ids)?;
-                    false
-                };
-                Ok((db.list_anime_entries()?, queued))
+                let queued = !db.delete_entries_with_tombstones(&ids)?.is_empty();
+                Ok((db.list_anime_entries()?, queued && signed_in))
             })
             .await?;
 
@@ -994,6 +1013,104 @@ impl TrackerSyncService {
         Ok((out.succeeded, out.failed))
     }
 
+    /// Adopt a verified AniList account and save its token/profile. If the list has no owner yet or belongs
+    /// to this account, the local list and its queued changes are kept (the next pull sends them). A
+    /// different account wipes the previous account's list data ([`Database::reset_for_account_switch`]),
+    /// clears the playback match and emits `tracker-account-switched`. Callers run `pull("post_auth")` after.
+    pub async fn sign_in(
+        &self,
+        token: &str,
+        profile: &TrackerUserProfile,
+    ) -> Result<SignInOutcome, String> {
+        let _op = self.op_lock.lock().await;
+        let token = token.trim().to_string();
+        if token.is_empty() {
+            return Err("AniList sign-in requires an OAuth access token".into());
+        }
+        let p = profile.clone();
+        let outcome = self
+            .blocking(move |db| {
+                let previous = db.list_owner()?;
+                let mut outcome = SignInOutcome {
+                    previous_user_id: previous,
+                    ..Default::default()
+                };
+                match previous {
+                    Some(owner) if owner != p.user_id => {
+                        outcome.account_switched = true;
+                        outcome.discarded_changes = db.reset_for_account_switch(p.user_id)?;
+                    }
+                    Some(_) => {}
+                    None => db.set_list_owner(p.user_id)?,
+                }
+                let mut settings = db.get_settings()?;
+                settings.active_tracker_plugin = TRACKER_PLUGIN_ID.into();
+                settings.anilist_username = p.username.clone();
+                settings.anilist_user_id = Some(p.user_id);
+                settings.anilist_avatar = p.avatar_url.clone();
+                settings.anilist_token = token;
+                db.save_settings(&settings)?;
+                Ok(outcome)
+            })
+            .await?;
+
+        if outcome.account_switched {
+            if let Ok(mut last) = self.last_synced_at.lock() {
+                *last = None;
+            }
+            let matched = self
+                .active_session
+                .lock()
+                .ok()
+                .and_then(|guard| guard.as_ref().and_then(|s| s.matched_anime_id));
+            if let Some(id) = matched {
+                self.unmatch_active_session(&[id]);
+            }
+            self.emit(
+                EVENT_ACCOUNT_SWITCHED,
+                json!({
+                    "previous_user_id": outcome.previous_user_id,
+                    "user_id": profile.user_id,
+                    "username": profile.username,
+                    "discarded_changes": outcome.discarded_changes,
+                }),
+            );
+        }
+        Ok(outcome)
+    }
+
+    /// Send queued deletions and changes one last time, then clear the token and profile. The list and its
+    /// owner stay, so anything that could not be sent goes out when the same account signs in again.
+    pub async fn sign_out(&self) -> Result<SignOutOutcome, String> {
+        let _op = self.op_lock.lock().await;
+        let (mut pushed, mut deleted) = (0, 0);
+        if let Some(token) = self.current_token().await? {
+            let deletions = self.flush_deletions_inner(&token).await;
+            deleted = deletions.succeeded;
+            if deletions.auth_error.is_none() {
+                pushed = self.flush_pending_inner(&token).await.succeeded;
+            }
+        }
+        let (unsent, settings) = self
+            .blocking(|db| {
+                let unsent = db.count_pending()? + db.count_pending_deletions()?;
+                let mut settings = db.get_settings()?;
+                settings.anilist_username.clear();
+                settings.anilist_token.clear();
+                settings.anilist_user_id = None;
+                settings.anilist_avatar = None;
+                db.save_settings(&settings)?;
+                Ok((unsent, db.get_settings()?))
+            })
+            .await?;
+        Ok(SignOutOutcome {
+            pushed,
+            deleted,
+            unsent,
+            settings,
+        })
+    }
+
     /// Full two-way sync: flush queued deletions and pushes, fetch the AniList list and merge it
     /// (newest wins; remote-missing entries are deleted unless pending). Only changed rows are written and
     /// returned (delta). Local files are matched afterwards in the background, and only for new entries or
@@ -1019,9 +1136,29 @@ impl TrackerSyncService {
         self.emit(EVENT_SYNC_STARTED, json!({ "reason": reason }));
 
         let op = self.op_lock.lock().await;
-        let result = self
-            .pull_inner(&token, settings.anilist_user_id, reason)
-            .await;
+        // Re-read under the lock: a sign-in may have switched the account while this pull was waiting.
+        let result = match self
+            .blocking(|db| Ok((db.get_settings()?, db.list_owner()?)))
+            .await
+        {
+            Ok((settings, owner)) if !settings.anilist_token.trim().is_empty() => {
+                self.pull_inner(
+                    settings.anilist_token.trim(),
+                    owner,
+                    settings.anilist_user_id,
+                    reason,
+                )
+                .await
+            }
+            Ok(_) => Err(PullFailure {
+                error: TrackerError::Unauthorized("Not signed in to AniList".into()),
+                auth_reported: true,
+            }),
+            Err(m) => Err(PullFailure {
+                error: TrackerError::Api(m),
+                auth_reported: false,
+            }),
+        };
         drop(op);
         drop(progress_guard);
 
@@ -1055,13 +1192,47 @@ impl TrackerSyncService {
     }
 
     /// Returns the delta summary plus the ids whose local files should be matched in the background.
+    /// `owner` is the account the local list belongs to and `signed_in_user` the stored account of `token`
+    /// (both set by [`sign_in`](Self::sign_in)). The token's real account is resolved first; if it differs
+    /// from either, the local list must never reach it, so the pull stops before flushing or merging.
     async fn pull_inner(
         &self,
         token: &str,
-        expected_user_id: Option<i64>,
+        owner: Option<i64>,
+        signed_in_user: Option<i64>,
         reason: &str,
     ) -> Result<(SyncSummary, Vec<i64>), PullFailure> {
         let started = Instant::now();
+        let mismatch = |viewer: i64, owner: i64| PullFailure {
+            error: TrackerError::Api(format!(
+                "The local list belongs to AniList user {} but the signed-in account is {}; sign in again to switch accounts",
+                owner, viewer
+            )),
+            auth_reported: false,
+        };
+        let plugin = self.plugin().map_err(|error| PullFailure {
+            error,
+            auth_reported: false,
+        })?;
+        // Resolve the token's account BEFORE anything is sent with it (cached per token by the plugin).
+        let viewer = plugin.viewer_id(token).await.map_err(|error| PullFailure {
+            error,
+            auth_reported: false,
+        })?;
+        for expected in [signed_in_user, owner].into_iter().flatten() {
+            if expected != viewer {
+                return Err(mismatch(viewer, expected));
+            }
+        }
+        if owner.is_none() {
+            // A list from before owner tracking (or never signed in): it now belongs to this account.
+            self.blocking(move |db| db.set_list_owner(viewer))
+                .await
+                .map_err(|m| PullFailure {
+                    error: TrackerError::Api(m),
+                    auth_reported: false,
+                })?;
+        }
 
         let phase = Instant::now();
         let deletions = self.flush_deletions_inner(token).await;
@@ -1082,10 +1253,6 @@ impl TrackerSyncService {
             });
         }
 
-        let plugin = self.plugin().map_err(|error| PullFailure {
-            error,
-            auth_reported: false,
-        })?;
         let phase = Instant::now();
         let snapshot = self
             .limiter
@@ -1098,16 +1265,8 @@ impl TrackerSyncService {
         let fetch_ms = phase.elapsed().as_millis();
         let fetched = snapshot.entries.len();
 
-        let mut delete_missing = true;
-        let mut skipped_reason = None;
-        if let Some(uid) = expected_user_id {
-            if uid != snapshot.viewer_id {
-                delete_missing = false;
-                skipped_reason = Some(format!(
-                    "AniList account mismatch (signed-in viewer {} vs stored user {}); skipped deleting local entries",
-                    snapshot.viewer_id, uid
-                ));
-            }
+        if snapshot.viewer_id != viewer {
+            return Err(mismatch(snapshot.viewer_id, viewer));
         }
 
         let remote_entries = snapshot.entries;
@@ -1119,7 +1278,7 @@ impl TrackerSyncService {
                     .into_iter()
                     .map(|t| t.media_id)
                     .collect();
-                db.merge_remote_list(&remote_entries, &skip, delete_missing)
+                db.merge_remote_list(&remote_entries, &skip, true)
             })
             .await
             .map_err(|m| PullFailure {
@@ -1212,7 +1371,7 @@ impl TrackerSyncService {
             pushed: pushes.succeeded,
             push_failed: pushes.failed,
             remote_deleted: deletions.succeeded,
-            deletion_skipped_reason: skipped_reason.or(stats.deletion_skipped_reason),
+            deletion_skipped_reason: stats.deletion_skipped_reason,
             changed,
             removed_ids: stats.removed_ids,
         };
@@ -1838,6 +1997,9 @@ mod tests {
         ) -> BoxFuture<'a, Result<TrackerUserProfile, String>> {
             Box::pin(async { Err("mock".to_string()) })
         }
+        fn viewer_id<'a>(&'a self, _token: &'a str) -> BoxFuture<'a, Result<i64, TrackerError>> {
+            Box::pin(async move { Ok(self.viewer_id) })
+        }
         fn fetch_user_list<'a>(
             &'a self,
             _token: &'a str,
@@ -2311,7 +2473,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pull_skips_deletion_on_viewer_mismatch_and_requires_token() {
+    async fn pull_refuses_viewer_mismatch_and_requires_token() {
         let db = Arc::new(Database::open_in_memory().unwrap());
         let mock = Arc::new(MockTracker {
             viewer_id: 7,
@@ -2323,13 +2485,22 @@ mod tests {
             "Not signed in to AniList"
         );
 
+        // Token belongs to viewer 7 but the stored account is 42: nothing is flushed or merged
         sign_in(&db, 42);
-        db.upsert_anime_entry(&test_entry(2, "Local")).unwrap();
+        let mut local = test_entry(2, "Local");
+        local.sync_pending = true;
+        db.upsert_anime_entry(&local).unwrap();
         *mock.remote.lock().unwrap() = vec![test_entry(9, "Other")];
-        let summary = svc.pull("manual").await.unwrap();
-        assert_eq!(summary.deleted, 0);
-        assert!(summary.deletion_skipped_reason.is_some());
-        assert!(db.get_anime_entry_by_id(2).is_ok());
+        assert!(svc.pull("manual").await.unwrap_err().contains("belongs to AniList user"));
+        assert!(db.get_anime_entry_by_id(2).unwrap().sync_pending);
+        assert!(db.get_anime_entry_by_id(9).is_err());
+        assert!(mock.saves.lock().unwrap().is_empty());
+
+        // Same for a list owned by another account than the signed-in one
+        sign_in(&db, 7);
+        db.set_list_owner(42).unwrap();
+        assert!(svc.pull("manual").await.unwrap_err().contains("belongs to AniList user 42"));
+        assert!(mock.saves.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -2430,6 +2601,153 @@ mod tests {
         assert!(db.get_anime_entry_by_id(10).is_err());
         wait_until(|| db.count_pending_deletions().unwrap() == 0).await;
         assert_eq!(*mock.deletes.lock().unwrap(), vec![(10, None)]);
+    }
+
+    fn profile(user_id: i64, username: &str) -> TrackerUserProfile {
+        TrackerUserProfile {
+            user_id,
+            username: username.into(),
+            avatar_url: None,
+            anime_count: 0,
+            episodes_watched: 0,
+            authenticated: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn signed_out_edits_are_queued_and_sent_when_the_owner_signs_back_in() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let mock = Arc::new(MockTracker {
+            viewer_id: 42,
+            ..Default::default()
+        });
+        let (svc, _events) = service(db.clone(), mock.clone());
+        svc.sign_in("token", &profile(42, "alice")).await.unwrap();
+        assert_eq!(db.list_owner().unwrap(), Some(42));
+        let mut e = test_entry(1, "Alpha");
+        e.episodes = Some(12);
+        db.upsert_anime_entry(&e).unwrap();
+        db.upsert_anime_entry(&test_entry(2, "Beta")).unwrap();
+
+        let out = svc.sign_out().await.unwrap();
+        assert_eq!(out.unsent, 0);
+        assert!(out.settings.anilist_token.is_empty());
+        assert_eq!(db.list_owner().unwrap(), Some(42));
+
+        // Signed out: written locally and queued, nothing sent
+        let updated = svc.apply_local_update(step_for(1, 3)).await.unwrap();
+        assert!(updated.sync_pending);
+        svc.delete_entries(vec![2]).await.unwrap();
+        assert_eq!(db.count_pending_deletions().unwrap(), 1);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(mock.saves.lock().unwrap().is_empty());
+        assert!(mock.deletes.lock().unwrap().is_empty());
+
+        // Same account signs back in: the list is kept and the next pull sends the queue
+        let outcome = svc.sign_in("token", &profile(42, "alice")).await.unwrap();
+        assert!(!outcome.account_switched);
+        *mock.remote.lock().unwrap() = vec![e.clone()];
+        let summary = svc.pull("post_auth").await.unwrap();
+        assert_eq!((summary.pushed, summary.remote_deleted), (1, 1));
+        assert_eq!(mock.saves.lock().unwrap()[0].progress, 3);
+        assert_eq!(*mock.deletes.lock().unwrap(), vec![(2, None)]);
+        assert_eq!(db.get_anime_entry_by_id(1).unwrap().user_progress, 3);
+    }
+
+    #[tokio::test]
+    async fn sign_out_sends_the_queue_before_clearing_the_token() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let mock = Arc::new(MockTracker {
+            viewer_id: 42,
+            ..Default::default()
+        });
+        let (svc, _events) = service(db.clone(), mock.clone());
+        svc.sign_in("token", &profile(42, "alice")).await.unwrap();
+        let mut e = test_entry(1, "Alpha");
+        e.sync_pending = true;
+        db.upsert_anime_entry(&e).unwrap();
+
+        *mock.save_error.lock().unwrap() = Some(TrackerError::Network("offline".into()));
+        let out = svc.sign_out().await.unwrap();
+        assert_eq!((out.pushed, out.unsent), (0, 1));
+        assert!(db.get_settings().unwrap().anilist_token.is_empty());
+
+        svc.sign_in("token", &profile(42, "alice")).await.unwrap();
+        *mock.save_error.lock().unwrap() = None;
+        let out = svc.sign_out().await.unwrap();
+        assert_eq!((out.pushed, out.unsent), (1, 0));
+    }
+
+    #[tokio::test]
+    async fn a_different_account_wipes_the_previous_list_and_keeps_machine_data() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let mock = Arc::new(MockTracker {
+            viewer_id: 7,
+            ..Default::default()
+        });
+        let (svc, events) = service(db.clone(), mock.clone());
+        svc.sign_in("token-a", &profile(42, "alice")).await.unwrap();
+
+        let mut a = test_entry(1, "Alpha");
+        a.sync_pending = true;
+        a.custom_folder = Some("C:/lib/Alpha".into());
+        db.upsert_anime_entry(&a).unwrap();
+        db.upsert_anime_entry(&test_entry(2, "Beta")).unwrap();
+        db.bind_title_alias("alpha alias", 1).unwrap();
+        db.delete_entries_with_tombstones(&[2]).unwrap();
+        db.record_watch_history(Some(1), "Alpha", 1, "mpv", "alpha-01.mkv", true)
+            .unwrap();
+        insert_local_file(&db, "C:/lib/alpha-01.mkv", "Alpha", 1, Some(1));
+        db.save_torrent_rule(&crate::db::TorrentRule {
+            id: 0,
+            name: "Alpha rule".into(),
+            enabled: true,
+            anime_title_filter: String::new(),
+            anime_id: Some(1),
+            release_group: String::new(),
+            resolution: "1080p".into(),
+            exclude_keywords: String::new(),
+            action: "highlight".into(),
+            only_unwatched: true,
+        })
+        .unwrap();
+        let generation = db.matcher_generation();
+
+        let outcome = svc.sign_in("token-b", &profile(7, "bob")).await.unwrap();
+        assert!(outcome.account_switched);
+        assert_eq!(outcome.previous_user_id, Some(42));
+        assert_eq!(outcome.discarded_changes, 2);
+        assert_eq!(db.list_owner().unwrap(), Some(7));
+        let settings = db.get_settings().unwrap();
+        assert_eq!((settings.anilist_user_id, settings.anilist_token.as_str()), (Some(7), "token-b"));
+
+        // Account data is gone…
+        assert!(db.list_anime_entries().unwrap().is_empty());
+        assert_eq!(db.count_pending_deletions().unwrap(), 0);
+        assert!(db.list_watch_history(10, 0).unwrap().is_empty());
+        assert_ne!(db.matcher_generation(), generation);
+        assert!(db.matcher_index().unwrap().user_aliases.is_empty());
+        // …machine data stays: the indexed file (unmatched) and the torrent rule (unlinked)
+        assert_eq!(matched_of(&db, "C:/lib/alpha-01.mkv"), None);
+        let rules = db.list_torrent_rules().unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].anime_id, None);
+        let switched = events
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(n, _)| n == EVENT_ACCOUNT_SWITCHED)
+            .map(|(_, v)| v.clone())
+            .unwrap();
+        assert_eq!(switched["discarded_changes"], 2);
+        assert_eq!(switched["username"], "bob");
+
+        // The new account's list is imported fresh; nothing from the old account was ever sent
+        *mock.remote.lock().unwrap() = vec![test_entry(9, "Bob's anime")];
+        let summary = svc.pull("post_auth").await.unwrap();
+        assert_eq!(summary.added, 1);
+        assert!(mock.saves.lock().unwrap().is_empty());
+        assert!(mock.deletes.lock().unwrap().is_empty());
     }
 
     #[test]

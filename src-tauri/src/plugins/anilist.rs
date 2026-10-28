@@ -322,7 +322,7 @@ impl AniListPlugin {
     }
 
     /// Resolve the authenticated viewer id (cached per token).
-    async fn viewer_id(&self, token: &str) -> Result<i64, TrackerError> {
+    async fn cached_viewer_id(&self, token: &str) -> Result<i64, TrackerError> {
         if let Ok(guard) = self.viewer_cache.lock() {
             if let Some((cached_tok, id)) = guard.as_ref() {
                 if cached_tok == token {
@@ -819,6 +819,10 @@ impl TrackerPlugin for AniListPlugin {
         })
     }
 
+    fn viewer_id<'a>(&'a self, token: &'a str) -> BoxFuture<'a, Result<i64, TrackerError>> {
+        Box::pin(async move { self.cached_viewer_id(token.trim()).await })
+    }
+
     fn fetch_user_list<'a>(
         &'a self,
         token: &'a str,
@@ -830,7 +834,7 @@ impl TrackerPlugin for AniListPlugin {
                     "AniList OAuth token is required to sync the list.".into(),
                 ));
             }
-            let viewer_id = self.viewer_id(token).await?;
+            let viewer_id = self.cached_viewer_id(token).await?;
 
             let query = format!(
                 r#"
@@ -1228,7 +1232,7 @@ impl TrackerPlugin for AniListPlugin {
             let entry_id = match list_entry_id {
                 Some(id) => id,
                 None => {
-                    let viewer_id = self.viewer_id(token).await?;
+                    let viewer_id = self.cached_viewer_id(token).await?;
                     let lookup = self
                         .graphql_request(
                             "query ($userId: Int, $mediaId: Int) { MediaList(userId: $userId, mediaId: $mediaId) { id } }",

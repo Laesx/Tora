@@ -40,6 +40,7 @@ import {
   DetectedMediaSession,
   ScanSummary,
   SyncSummary,
+  TrackerAccountSwitchedEvent,
   TrackerEntrySyncedEvent,
   TrackerSyncErrorEvent,
   TrackerSyncFailedEvent,
@@ -384,6 +385,28 @@ export const App: React.FC = () => {
           .getAppSettings()
           .then(setSettings)
           .catch(() => { });
+      }),
+
+      // A different AniList account signed in: the previous account's list was wiped and the new
+      // account's list is imported next (it arrives through tracker-list-synced)
+      listen<TrackerAccountSwitchedEvent>("tracker-account-switched", (event) => {
+        for (const pending of Object.values(pendingStepRef.current)) {
+          clearTimeout(pending.timer);
+        }
+        pendingStepRef.current = {};
+        setPendingStepSnapshots({});
+        setAnimeList([]);
+        setSelectedAnime(null);
+        setSelectedAnimeIds([]);
+        setQuickMenuAnimeId(null);
+        setLastSyncedAt(null);
+        const { username, discarded_changes } = event.payload;
+        showToast(
+          discarded_changes > 0
+            ? `Switched to @${username}. ${discarded_changes} unsent change${discarded_changes === 1 ? "" : "s"} from the previous account ${discarded_changes === 1 ? "was" : "were"} discarded.`
+            : `Switched to @${username}. Importing their AniList list…`,
+          discarded_changes > 0 ? "error" : "info"
+        );
       }),
 
       // A background push succeeded: replace the entry (clears sync_pending)
@@ -735,11 +758,16 @@ export const App: React.FC = () => {
 
   const handleConfirmSignOut = async () => {
     try {
-      const updated = await toraApi.signOutTracker();
+      const { settings: updated, unsent } = await toraApi.signOutTracker();
       setSettings(updated);
       setSignOutModalOpen(false);
       setIsAuthorizingAnilist(false);
-      showToast("Signed out of AniList", "info");
+      showToast(
+        unsent > 0
+          ? `Signed out of AniList. ${unsent} change${unsent === 1 ? "" : "s"} couldn't be sent; ${unsent === 1 ? "it" : "they"} will be sent next time this account signs in.`
+          : "Signed out of AniList",
+        unsent > 0 ? "error" : "info"
+      );
     } catch (err: any) {
       showToast(String(err), "error");
     }

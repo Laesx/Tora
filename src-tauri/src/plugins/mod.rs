@@ -224,6 +224,9 @@ pub trait TrackerPlugin: Send + Sync {
         token: &'a str,
     ) -> BoxFuture<'a, Result<RemoteListSnapshot, TrackerError>>;
 
+    /// User id of the account `token` belongs to (implementations cache it per token).
+    fn viewer_id<'a>(&'a self, token: &'a str) -> BoxFuture<'a, Result<i64, TrackerError>>;
+
     /// Fetch full media metadata for `ids` (no user-list fields). Callers should pass at most
     /// [`MEDIA_DETAILS_CHUNK`] ids per call (one request each); larger inputs are split into
     /// sequential requests. Unknown ids are simply missing from the result.
@@ -312,6 +315,11 @@ impl TrackerPlugin for StubTrackerPlugin {
         &'a self,
         _token: &'a str,
     ) -> BoxFuture<'a, Result<RemoteListSnapshot, TrackerError>> {
+        let err = self.not_configured();
+        Box::pin(async move { Err(err) })
+    }
+
+    fn viewer_id<'a>(&'a self, _token: &'a str) -> BoxFuture<'a, Result<i64, TrackerError>> {
         let err = self.not_configured();
         Box::pin(async move { Err(err) })
     }
