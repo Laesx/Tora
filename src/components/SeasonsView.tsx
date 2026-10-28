@@ -1,4 +1,5 @@
 import React, {
+  useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -32,6 +33,7 @@ import {
   shiftSeason,
 } from "../seasons";
 import { AnimePosterCard, POSTER_CARD_FOOTER_HEIGHT } from "./AnimePosterCard";
+import { SeasonAnimeMenu } from "./SeasonAnimeMenu";
 
 interface SeasonsViewProps {
   animeList: AnimeEntry[];
@@ -41,6 +43,8 @@ interface SeasonsViewProps {
   onOpenAnime: (anime: AnimeEntry) => void;
   onAddAnime: (anime: AnimeEntry, status: "CURRENT" | "PLANNING") => void;
   onGlobalSearch: (query: string) => void;
+  onChangeStatus: (anime: AnimeEntry, status: string, label: string) => void;
+  onRemoveAnime: (anime: AnimeEntry) => void;
   showToast: (msg: string, type?: "success" | "info" | "error") => void;
 }
 
@@ -170,9 +174,13 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
   onOpenAnime,
   onAddAnime,
   onGlobalSearch,
+  onChangeStatus,
+  onRemoveAnime,
   showToast,
 }) => {
   const nowSeason = useMemo(() => currentSeason(), []);
+  const [menu, setMenu] = useState<{ anime: SeasonalAnime; x: number; y: number } | null>(null);
+  const closeMenu = useCallback(() => setMenu(null), []);
   const [selected, setSelected] = useState<SeasonKey>(nowSeason);
   const [result, setResult] = useState<SeasonResult | null>(null);
   const [loading, setLoading] = useState(false);
@@ -246,7 +254,7 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
 
   // ←/→ move between seasons when no field is focused
   useEffect(() => {
-    if (!keyboardEnabled || pickerOpen) return;
+    if (!keyboardEnabled || pickerOpen || menu) return;
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
       if (
@@ -264,7 +272,7 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [keyboardEnabled, pickerOpen]);
+  }, [keyboardEnabled, pickerOpen, menu]);
 
   const listById = useMemo(
     () => new Map(animeList.map((a) => [a.id, a])),
@@ -727,6 +735,9 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
                       imageHeight={layout.imageHeight}
                       onOpen={onOpenAnime}
                       onAdd={onAddAnime}
+                      onContextMenu={(anime, e) =>
+                        setMenu({ anime: anime as SeasonalAnime, x: e.clientX, y: e.clientY })
+                      }
                     />
                   ))}
                 </div>
@@ -734,6 +745,21 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
             )}
         </div>
       </div>
+
+      {menu && (
+        <SeasonAnimeMenu
+          key={`${menu.anime.id}-${menu.x}-${menu.y}`}
+          anime={menu.anime}
+          listEntry={listById.get(menu.anime.id)}
+          anchor={{ x: menu.x, y: menu.y }}
+          onClose={closeMenu}
+          onOpen={onOpenAnime}
+          onAdd={onAddAnime}
+          onChangeStatus={onChangeStatus}
+          onRemove={onRemoveAnime}
+          showToast={showToast}
+        />
+      )}
     </div>
   );
 };

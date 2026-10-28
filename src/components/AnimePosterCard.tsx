@@ -23,6 +23,7 @@ interface AnimePosterCardProps {
   imageHeight?: number;
   onOpen: (anime: AnimeEntry) => void;
   onAdd: (anime: AnimeEntry, status: "CURRENT" | "PLANNING") => void;
+  onContextMenu?: (anime: AnimeEntry, e: React.MouseEvent) => void;
 }
 
 /** Poster card for remote anime (Seasons / Search): whole card opens the drawer, quick-add when not in the list. */
@@ -32,6 +33,7 @@ export const AnimePosterCard: React.FC<AnimePosterCardProps> = ({
   imageHeight,
   onOpen,
   onAdd,
+  onContextMenu,
 }) => {
   const status = listEntry ? LIST_STATUS_META[listEntry.user_status] : null;
   const countdown = formatCountdown(anime.next_airing_at);
@@ -39,6 +41,15 @@ export const AnimePosterCard: React.FC<AnimePosterCardProps> = ({
   return (
     <div
       onClick={() => onOpen(anime)}
+      onContextMenu={
+        onContextMenu
+          ? (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            onContextMenu(anime, e);
+          }
+          : undefined
+      }
       className="group bg-bg-primary border border-border-subtle rounded-xl overflow-hidden flex flex-col hover:border-accent/60 transition shadow-sm cursor-pointer"
     >
       <div

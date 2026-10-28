@@ -1309,6 +1309,13 @@ export const App: React.FC = () => {
                 setGlobalSearchQuery(q);
                 setActiveTab("search");
               }}
+              onChangeStatus={(anime, status, label) =>
+                handleBatchUpdate(
+                  { anime_ids: [anime.id], user_status: status },
+                  `Moved "${anime.title_romaji}" to ${label}`
+                )
+              }
+              onRemoveAnime={handleDeleteAnime}
               showToast={showToast}
             />
           )}

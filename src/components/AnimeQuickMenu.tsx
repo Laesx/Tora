@@ -41,7 +41,7 @@ interface AnimeQuickMenuProps {
   showToast: (msg: string, type?: "success" | "info" | "error") => void;
 }
 
-const STATUS_OPTIONS = [
+export const STATUS_OPTIONS = [
   { id: "CURRENT", label: "Watching", icon: Tv, color: "text-accent" },
   { id: "PLANNING", label: "Plan to Watch", icon: Clock, color: "text-sky-400" },
   { id: "COMPLETED", label: "Completed", icon: CheckCircle2, color: "text-emerald-400" },
