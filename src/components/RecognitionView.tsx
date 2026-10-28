@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
   Activity,
-  Square,
   CheckCircle2,
   Clock,
   Tv,
@@ -23,7 +22,6 @@ interface RecognitionViewProps {
   animeList: AnimeEntry[];
   settings: AppSettings;
   onUpdateSettings: (next: AppSettings) => Promise<void>;
-  onSimulate: (playerName: string | null, windowTitle: string | null) => Promise<void>;
   onLinkDetectedEpisode: (animeId: number, aliasTitle: string) => Promise<void>;
   showToast: (msg: string, type?: "success" | "info" | "error") => void;
 }
@@ -33,7 +31,6 @@ export const RecognitionView: React.FC<RecognitionViewProps> = ({
   animeList,
   settings,
   onUpdateSettings,
-  onSimulate,
   onLinkDetectedEpisode,
   showToast,
 }) => {
@@ -148,15 +145,6 @@ export const RecognitionView: React.FC<RecognitionViewProps> = ({
                 >
                   <Link2 className="w-3.5 h-3.5" />
                   Change Linked Anime
-                </button>
-              )}
-              {activeSession.player_id === "simulated" && (
-                <button
-                  onClick={() => onSimulate(null, null)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500/15 hover:bg-red-500/25 text-red-400 text-xs font-semibold transition"
-                >
-                  <Square className="w-3.5 h-3.5 fill-current" />
-                  Stop Simulated Session
                 </button>
               )}
             </div>
@@ -338,8 +326,8 @@ export const RecognitionView: React.FC<RecognitionViewProps> = ({
             <strong className="text-text-primary">
               mpv, VLC, MPC-HC, MPC-BE, or PotPlayer
             </strong>{" "}
-            to detect playback automatically, or use the{" "}
-            <strong className="text-accent">Testing</strong> tab in the sidebar to simulate playback and inspect filenames.
+            to detect playback automatically. Use{" "}
+            <strong className="text-accent">Settings → Diagnostics</strong> to inspect how filenames are parsed.
           </div>
         )}
       </div>

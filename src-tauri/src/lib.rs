@@ -32,7 +32,6 @@ pub struct AppState {
     pub plugins: Arc<PluginManager>,
     pub monitor: LibraryMonitorHandle,
     pub active_session: Arc<Mutex<Option<DetectedMediaSession>>>,
-    pub simulated_session: Mutex<Option<(String, String)>>, // (player_name, window_title)
     pub oauth_listener_active: Arc<AtomicBool>,
     /// Single owner of user-list mutations and AniList push/pull.
     pub sync: Arc<TrackerSyncService>,
@@ -294,15 +293,6 @@ async fn play_episode_file(state: State<'_, AppState>, file_path: String) -> Res
         }
     }
 
-    if let Some(fname) = std::path::Path::new(&file_path)
-        .file_name()
-        .and_then(|n| n.to_str())
-    {
-        if let Ok(mut sim) = state.simulated_session.lock() {
-            *sim = Some(("System Media Player".into(), fname.to_string()));
-        }
-    }
-
     Ok(format!("Playing {}", file_path))
 }
 
@@ -474,29 +464,9 @@ async fn test_parse_filename(
 }
 
 #[tauri::command]
-async fn simulate_playback_session(
-    state: State<'_, AppState>,
-    player_name: Option<String>,
-    window_title: Option<String>,
-) -> Result<Option<DetectedMediaSession>, String> {
-    {
-        let mut sim = state
-            .simulated_session
-            .lock()
-            .map_err(|e| e.to_string())?;
-        match (player_name, window_title) {
-            (Some(p), Some(t)) if !t.trim().is_empty() => {
-                *sim = Some((p, t));
-            }
-            _ => {
-                *sim = None;
-                let mut active = state.active_session.lock().map_err(|e| e.to_string())?;
-                *active = None;
-                return Ok(None);
-            }
-        }
-    }
-    poll_media_recognition(state).await
+async fn dismiss_playback_session(state: State<'_, AppState>) -> Result<(), String> {
+    *state.active_session.lock().map_err(|e| e.to_string())? = None;
+    Ok(())
 }
 
 /// A scrobble decided under the `active_session` lock and executed after it is released:
@@ -518,17 +488,12 @@ async fn poll_media_recognition(
     }
 
     let now = chrono::Utc::now().timestamp();
-    let sim_clone = state
-        .simulated_session
-        .lock()
-        .map_err(|e| e.to_string())?
-        .clone();
     let players = settings.players.clone();
 
     // Run Win32 window enumeration on blocking pool so main thread is never touched
     let detected_candidate = tokio::task::spawn_blocking(move || {
-        if let Some((player, win, cleaned, parsed)) = detect_active_media_player(&players) {
-            Some((
+        detect_active_media_player(&players).map(|(player, win, cleaned, parsed)| {
+            (
                 player.id,
                 player.name,
                 win.process_id,
@@ -536,21 +501,8 @@ async fn poll_media_recognition(
                 win.window_title,
                 cleaned,
                 parsed,
-            ))
-        } else {
-            sim_clone.map(|(p_name, w_title)| {
-                let parsed = parse_filename(&w_title);
-                (
-                    "simulated".to_string(),
-                    p_name,
-                    std::process::id(),
-                    "simulated://player".to_string(),
-                    w_title.clone(),
-                    w_title,
-                    parsed,
-                )
-            })
-        }
+            )
+        })
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -1312,7 +1264,6 @@ pub fn run() {
                 plugins,
                 monitor,
                 active_session,
-                simulated_session: Mutex::new(None),
                 oauth_listener_active,
                 sync: sync.clone(),
                 unmatched_check_generation: AtomicU64::new(u64::MAX),
@@ -1350,7 +1301,7 @@ pub fn run() {
             reveal_in_explorer,
             create_demo_library_files,
             test_parse_filename,
-            simulate_playback_session,
+            dismiss_playback_session,
             poll_media_recognition,
             link_detected_episode_to_anime,
             get_watch_history,

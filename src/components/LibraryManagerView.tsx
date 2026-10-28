@@ -184,32 +184,16 @@ export const LibraryManagerView: React.FC<LibraryManagerViewProps> = ({
   }, [episodes, searchQuery, driveFilter, matchFilter]);
 
   return (
-    <div className="p-6 space-y-6 max-w-7xl mx-auto">
-      {/* Header & Global Scan Actions */}
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h1 className="text-xl font-bold text-text-primary flex items-center gap-2.5">
-            <HardDrive className="w-6 h-6 text-accent" />
-            Multi-Drive Episode Library Manager
-          </h1>
-          <p className="text-xs text-text-secondary mt-0.5">
-            Index tens of thousands of anime episodes across multiple hard drives with parallel Anitomy filename parsing.
-          </p>
-        </div>
-
-        <div className="flex items-center gap-2.5">
-
-          <button
-            onClick={handleScanAll}
-            disabled={scanning}
-            className="flex items-center gap-2 px-4 py-2 rounded-xl bg-accent hover:bg-accent-hover text-white text-xs font-semibold shadow-sm transition"
-          >
-            <RefreshCw
-              className={`w-4 h-4 ${scanning ? "animate-spin" : ""}`}
-            />
-            {scanning ? "Scanning Drives..." : "Rescan All Drives"}
-          </button>
-        </div>
+    <div className="space-y-6">
+      {/* Header */}
+      <div>
+        <h2 className="text-base font-bold text-text-primary flex items-center gap-2">
+          <HardDrive className="w-5 h-5 text-accent" />
+          Library Folders
+        </h2>
+        <p className="text-xs text-text-secondary mt-0.5">
+          Index tens of thousands of anime episodes across multiple hard drives with parallel Anitomy filename parsing.
+        </p>
       </div>
 
       {/* Scan performance banner */}
@@ -290,10 +274,23 @@ export const LibraryManagerView: React.FC<LibraryManagerViewProps> = ({
 
       {/* Add Folder Form + Root Folders List */}
       <div className="bg-bg-secondary border border-border-subtle rounded-2xl p-5 space-y-4">
-        <h2 className="text-sm font-bold text-text-primary flex items-center gap-2">
-          <FolderPlus className="w-4 h-4 text-accent" />
-          Root Library Folders (Across Any Hard Drive or NAS)
-        </h2>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="text-sm font-bold text-text-primary flex items-center gap-2">
+            <FolderPlus className="w-4 h-4 text-accent" />
+            Root Library Folders (Across Any Hard Drive or NAS)
+          </h2>
+
+          <button
+            onClick={handleScanAll}
+            disabled={scanning}
+            className="flex items-center gap-2 px-3.5 py-1.5 rounded-xl bg-accent hover:bg-accent-hover disabled:opacity-60 text-white text-xs font-semibold shadow-sm transition"
+          >
+            <RefreshCw
+              className={`w-3.5 h-3.5 ${scanning ? "animate-spin" : ""}`}
+            />
+            {scanning ? "Scanning Drives..." : "Rescan All Drives"}
+          </button>
+        </div>
 
         <form
           onSubmit={handleAddFolder}
@@ -338,8 +335,7 @@ export const LibraryManagerView: React.FC<LibraryManagerViewProps> = ({
         {folders.length === 0 ? (
           <div className="text-center py-8 border border-dashed border-border-subtle rounded-xl text-xs text-text-muted space-y-2">
             <p>
-              No library folders configured yet. Add a folder path above or click{" "}
-              <strong className="text-text-primary">Generate Demo Library</strong> to test multi-folder episode indexing immediately!
+              No library folders configured yet. Add a folder path above to start indexing episodes.
             </p>
           </div>
         ) : (

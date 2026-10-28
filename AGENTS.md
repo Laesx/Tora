@@ -62,14 +62,14 @@ Tora/
 │   ├── styles/
 │   │   └── index.css                     # Tailwind CSS v4 stylesheets, custom theme variables & scrollbars
 │   └── components/
+│       ├── AnitomyParserPanel.tsx        # Interactive Anitomy filename / window title parser (Settings → Diagnostics)
 │       ├── AnimeDetailModal.tsx          # Slide-over drawer for editing progress, score, notes, custom folder & synonyms
 │       ├── AnimeQuickMenu.tsx            # Context menu for anime cards (+1 episode, mark status, open folder, copy title)
 │       ├── CommandPalette.tsx            # Ctrl+K fuzzy command palette & global search
 │       ├── DiscoverAndScheduleView.tsx   # Remote AniList seasonal anime browser & weekly airing schedule countdowns
-│       ├── LibraryManagerView.tsx        # Multi-drive folder manager, disk usage breakdown & virtualized episode table
+│       ├── LibraryManagerView.tsx        # Multi-drive folder manager, disk usage & virtualized episode table (Settings → Library)
 │       ├── RecognitionView.tsx           # Live player detection, unmatched episode linking prompt & watch history log
-│       ├── SettingsAndPluginsView.tsx    # Theme selector, AniList account sync, recognition delay & qBittorrent config
-│       ├── TestingView.tsx               # Media player simulator, interactive Anitomy token parser & player registry
+│       ├── SettingsView.tsx              # Sectioned settings: Appearance, Tracker, Library, Playback & Detection (Anisthesia players), Torrents, Diagnostics
 │       ├── TorrentsView.tsx              # Nyaa/AnimeTosho RSS search, feed preview & automated torrent rule editor
 │       └── VirtualWatchlist.tsx          # Viewport-windowed virtual grid/list for Grid, Compact & Table display modes
 └── src-tauri/                            # Tauri v2 Rust Backend & Native C++ Bindings

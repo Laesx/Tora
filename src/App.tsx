@@ -2,7 +2,6 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
   Tv,
-  HardDrive,
   Magnet,
   Compass,
   Activity,
@@ -15,8 +14,6 @@ import {
   Sparkles,
   CheckCircle2,
   Shuffle,
-  Palette,
-  FlaskConical,
   AlertTriangle,
   LogOut,
   LogIn,
@@ -37,27 +34,22 @@ import {
   TrackerSyncStartedEvent,
 } from "./types";
 import {
-  THEME_PRESETS,
   applyThemeToDocument,
   toraApi,
 } from "./api";
 import { AnimeDetailModal } from "./components/AnimeDetailModal";
 import { VirtualWatchlist } from "./components/VirtualWatchlist";
-import { LibraryManagerView } from "./components/LibraryManagerView";
 import { TorrentsView } from "./components/TorrentsView";
 import { RecognitionView } from "./components/RecognitionView";
-import { TestingView } from "./components/TestingView";
 import { DiscoverAndScheduleView } from "./components/DiscoverAndScheduleView";
-import { SettingsAndPluginsView } from "./components/SettingsAndPluginsView";
+import { SettingsView } from "./components/SettingsView";
 import { CommandPalette } from "./components/CommandPalette";
 
 type NavTab =
   | "watchlist"
-  | "library"
   | "torrents"
   | "discover"
   | "recognition"
-  | "testing"
   | "settings";
 
 // Unix timestamp (seconds or milliseconds) -> short relative label for the sync button tooltip
@@ -569,18 +561,9 @@ export const App: React.FC = () => {
     };
   };
 
-  const handleSimulatePlayback = async (
-    playerName: string | null,
-    windowTitle: string | null
-  ) => {
-    const session = await toraApi.simulatePlaybackSession(
-      playerName,
-      windowTitle
-    );
-    setActiveSession(session);
-    if (session) {
-      setActiveTab("recognition");
-    }
+  const handleDismissSession = async () => {
+    await toraApi.dismissPlaybackSession();
+    setActiveSession(null);
   };
 
   const handleLinkDetectedEpisode = async (
@@ -597,18 +580,6 @@ export const App: React.FC = () => {
     await refreshAnimeList();
   };
 
-  const handleCycleTheme = async () => {
-    if (!settings) return;
-    const idx = THEME_PRESETS.findIndex((t) => t.id === settings.theme);
-    const nextPreset = THEME_PRESETS[(idx + 1) % THEME_PRESETS.length];
-    applyThemeToDocument(nextPreset.id, nextPreset.defaultAccent);
-    await handleUpdateSettings({
-      ...settings,
-      theme: nextPreset.id,
-      accent_color: nextPreset.defaultAccent,
-    });
-    showToast(`Theme: ${nextPreset.name}`, "info");
-  };
 
   const statusCounts = useMemo(() => {
     const counts: Record<string, number> = { ALL: animeList.length };
@@ -656,11 +627,6 @@ export const App: React.FC = () => {
         return updB - updA;
       });
   }, [animeList, statusFilter, searchQuery, sortBy, pendingStepSnapshots]);
-
-  const totalLocalFilesMatched = useMemo(
-    () => animeList.reduce((acc, a) => acc + a.local_episode_count, 0),
-    [animeList]
-  );
 
   // Sync requires an OAuth token; a bare username no longer counts as signed in
   const isSignedIn = Boolean(settings?.anilist_token?.trim());
@@ -871,11 +837,15 @@ export const App: React.FC = () => {
             </div>
 
             <button
-              onClick={handleCycleTheme}
-              className="p-2 rounded-lg bg-bg-tertiary hover:bg-bg-elevated text-text-secondary hover:text-accent transition"
-              title="Cycle Theme"
+              onClick={() => setActiveTab("settings")}
+              className={`p-2 rounded-lg transition shrink-0 cursor-pointer ${
+                activeTab === "settings"
+                  ? "bg-accent text-white shadow-sm"
+                  : "bg-bg-tertiary hover:bg-bg-elevated text-text-secondary hover:text-accent"
+              }`}
+              title="Settings"
             >
-              <Palette className="w-4 h-4" />
+              <Settings className="w-4 h-4" />
             </button>
           </div>
 
@@ -909,24 +879,6 @@ export const App: React.FC = () => {
               <span className="text-[11px] font-mono opacity-80">
                 {animeList.length}
               </span>
-            </button>
-
-            <button
-              onClick={() => setActiveTab("library")}
-              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${activeTab === "library"
-                ? "bg-accent text-white shadow-sm"
-                : "text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
-                }`}
-            >
-              <span className="flex items-center gap-2.5">
-                <HardDrive className="w-4 h-4" />
-                Multi-Drive Library
-              </span>
-              {totalLocalFilesMatched > 0 && (
-                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300">
-                  {totalLocalFilesMatched}
-                </span>
-              )}
             </button>
 
             <button
@@ -971,101 +923,76 @@ export const App: React.FC = () => {
               )}
             </button>
 
-            <button
-              onClick={() => setActiveTab("testing")}
-              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${activeTab === "testing"
-                ? "bg-accent text-white shadow-sm"
-                : "text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
-                }`}
-            >
-              <span className="flex items-center gap-2.5">
-                <FlaskConical className="w-4 h-4" />
-                Testing
-              </span>
-            </button>
-
-            <button
-              onClick={() => setActiveTab("settings")}
-              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${activeTab === "settings"
-                ? "bg-accent text-white shadow-sm"
-                : "text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
-                }`}
-            >
-              <span className="flex items-center gap-2.5">
-                <Settings className="w-4 h-4" />
-                Themes & Plugins
-              </span>
-            </button>
           </nav>
         </div>
 
         {/* Bottom Account & AniList Auth Section */}
         <div className="p-3">
           {isSignedIn && settings ? (
-            <div className="flex items-center justify-between gap-2 p-2 rounded-xl bg-bg-primary border border-border-subtle">
-              <button
-                onClick={handleOpenAnilistProfile}
-                className="flex items-center gap-2.5 min-w-0 flex-1 text-left group cursor-pointer"
-                title={`Open @${settings.anilist_username} on AniList`}
-              >
-                {settings.anilist_avatar ? (
-                  <img
-                    src={settings.anilist_avatar}
-                    alt={settings.anilist_username}
-                    className="w-9 h-9 rounded-full object-cover border border-border-subtle group-hover:border-accent transition shrink-0 bg-bg-tertiary"
-                  />
-                ) : (
-                  <div className="w-9 h-9 rounded-full bg-accent/15 border border-accent/30 group-hover:border-accent flex items-center justify-center text-accent font-bold text-xs shrink-0 transition">
-                    {settings.anilist_username ? (
-                      settings.anilist_username.charAt(0).toUpperCase()
-                    ) : (
-                      <User className="w-4 h-4" />
-                    )}
+              <div className="flex items-center justify-between gap-2 p-2 rounded-xl bg-bg-primary border border-border-subtle">
+                <button
+                  onClick={handleOpenAnilistProfile}
+                  className="flex items-center gap-2.5 min-w-0 flex-1 text-left group cursor-pointer"
+                  title={`Open @${settings.anilist_username} on AniList`}
+                >
+                  {settings.anilist_avatar ? (
+                    <img
+                      src={settings.anilist_avatar}
+                      alt={settings.anilist_username}
+                      className="w-9 h-9 rounded-full object-cover border border-border-subtle group-hover:border-accent transition shrink-0 bg-bg-tertiary"
+                    />
+                  ) : (
+                    <div className="w-9 h-9 rounded-full bg-accent/15 border border-accent/30 group-hover:border-accent flex items-center justify-center text-accent font-bold text-xs shrink-0 transition">
+                      {settings.anilist_username ? (
+                        settings.anilist_username.charAt(0).toUpperCase()
+                      ) : (
+                        <User className="w-4 h-4" />
+                      )}
+                    </div>
+                  )}
+                  <div className="min-w-0 flex-1">
+                    <div className="text-xs font-bold text-text-primary group-hover:text-accent transition truncate flex items-center gap-1">
+                      <span className="truncate">
+                        {settings.anilist_username || "AniList User"}
+                      </span>
+                      <ExternalLink className="w-3 h-3 opacity-0 group-hover:opacity-100 transition shrink-0 text-accent" />
+                    </div>
+                    <div className="text-[10px] text-text-muted truncate">
+                      AniList Profile
+                    </div>
                   </div>
-                )}
+                </button>
+
+                <button
+                  onClick={() => setSignOutModalOpen(true)}
+                  className="p-2 rounded-lg text-text-muted hover:text-rose-400 hover:bg-rose-500/10 transition shrink-0 cursor-pointer"
+                  title="Sign Out"
+                >
+                  <LogOut className="w-4 h-4" />
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={handleStartAnilistLogin}
+                className="w-full flex items-center gap-3 p-3 rounded-xl bg-gradient-to-r from-accent/15 via-bg-primary to-bg-primary border border-accent/40 hover:border-accent hover:from-accent/25 transition text-left group cursor-pointer shadow-sm"
+              >
+                <div className="w-9 h-9 rounded-xl bg-accent text-white flex items-center justify-center shrink-0 shadow-sm group-hover:scale-105 transition">
+                  <LogIn className="w-4 h-4" />
+                </div>
                 <div className="min-w-0 flex-1">
-                  <div className="text-xs font-bold text-text-primary group-hover:text-accent transition truncate flex items-center gap-1">
-                    <span className="truncate">
-                      {settings.anilist_username || "AniList User"}
-                    </span>
-                    <ExternalLink className="w-3 h-3 opacity-0 group-hover:opacity-100 transition shrink-0 text-accent" />
+                  <div className="text-xs font-bold text-text-primary group-hover:text-accent transition">
+                    {isAuthorizingAnilist
+                      ? "Waiting for AniList..."
+                      : "Sign in with AniList"}
                   </div>
                   <div className="text-[10px] text-text-muted truncate">
-                    AniList Profile
+                    {isAuthorizingAnilist
+                      ? "Authorize in browser or click to retry"
+                      : "Click to authorize & sync your list"}
                   </div>
                 </div>
               </button>
-
-              <button
-                onClick={() => setSignOutModalOpen(true)}
-                className="p-2 rounded-lg text-text-muted hover:text-rose-400 hover:bg-rose-500/10 transition shrink-0 cursor-pointer"
-                title="Sign Out"
-              >
-                <LogOut className="w-4 h-4" />
-              </button>
-            </div>
-          ) : (
-            <button
-              onClick={handleStartAnilistLogin}
-              className="w-full flex items-center gap-3 p-3 rounded-xl bg-gradient-to-r from-accent/15 via-bg-primary to-bg-primary border border-accent/40 hover:border-accent hover:from-accent/25 transition text-left group cursor-pointer shadow-sm"
-            >
-              <div className="w-9 h-9 rounded-xl bg-accent text-white flex items-center justify-center shrink-0 shadow-sm group-hover:scale-105 transition">
-                <LogIn className="w-4 h-4" />
-              </div>
-              <div className="min-w-0 flex-1">
-                <div className="text-xs font-bold text-text-primary group-hover:text-accent transition">
-                  {isAuthorizingAnilist
-                    ? "Waiting for AniList..."
-                    : "Sign in with AniList"}
-                </div>
-                <div className="text-[10px] text-text-muted truncate">
-                  {isAuthorizingAnilist
-                    ? "Authorize in browser or click to retry"
-                    : "Click to authorize & sync your list"}
-                </div>
-              </div>
-            </button>
-          )}
+            )}
         </div>
       </aside>
 
@@ -1122,7 +1049,7 @@ export const App: React.FC = () => {
                 </button>
               )}
               <button
-                onClick={() => handleSimulatePlayback(null, null)}
+                onClick={handleDismissSession}
                 className="px-2 py-1 rounded bg-bg-tertiary hover:bg-bg-elevated text-text-secondary text-[11px]"
               >
                 Dismiss
@@ -1310,16 +1237,6 @@ export const App: React.FC = () => {
             </div>
           )}
 
-          {activeTab === "library" && (
-            <LibraryManagerView
-              animeList={animeList}
-              refreshTick={libraryRefreshTick}
-              onRefreshAnimeList={() => refreshAnimeList()}
-              onSelectAnime={(a) => setSelectedAnime(a)}
-              showToast={showToast}
-            />
-          )}
-
           {activeTab === "torrents" && (
             <TorrentsView
               animeList={animeList}
@@ -1344,27 +1261,19 @@ export const App: React.FC = () => {
               animeList={animeList}
               settings={settings}
               onUpdateSettings={handleUpdateSettings}
-              onSimulate={handleSimulatePlayback}
               onLinkDetectedEpisode={handleLinkDetectedEpisode}
               showToast={showToast}
             />
           )}
 
-          {activeTab === "testing" && settings && (
-            <TestingView
-              activeSession={activeSession}
-              settings={settings}
-              onUpdateSettings={handleUpdateSettings}
-              onSimulate={handleSimulatePlayback}
-              showToast={showToast}
-            />
-          )}
-
           {activeTab === "settings" && settings && (
-            <SettingsAndPluginsView
+            <SettingsView
               settings={settings}
               onUpdateSettings={handleUpdateSettings}
-              onRefreshAnimeList={refreshAnimeList}
+              animeList={animeList}
+              libraryRefreshTick={libraryRefreshTick}
+              onRefreshAnimeList={() => refreshAnimeList()}
+              onSelectAnime={(a) => setSelectedAnime(a)}
               showToast={showToast}
             />
           )}
@@ -1391,10 +1300,6 @@ export const App: React.FC = () => {
             setSelectedAnime(null);
             setTorrentSearchQuery(q);
             setActiveTab("torrents");
-          }}
-          onSimulatePlayback={(fname) => {
-            handleSimulatePlayback("mpv", fname);
-            showToast(`Simulating playback: ${fname}`, "info");
           }}
           showToast={showToast}
         />

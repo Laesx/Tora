@@ -144,7 +144,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
               className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-bg-tertiary text-left text-text-primary transition"
             >
               <HardDrive className="w-4 h-4 text-accent" />
-              <span>Rescan All Multi-Drive Library Folders</span>
+              <span>Rescan All Library Folders</span>
             </button>
             <button
               onClick={() => {

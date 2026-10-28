@@ -11,7 +11,6 @@ import {
   Tv,
   HardDrive,
   ExternalLink,
-  Sparkles,
   Trash2,
   Save,
   Film,
@@ -26,7 +25,6 @@ interface AnimeDetailModalProps {
   onUpdated: (updated: AnimeEntry) => void;
   onDeleted: (animeId: number) => void;
   onSearchTorrents: (query: string) => void;
-  onSimulatePlayback: (title: string) => void;
   showToast: (msg: string, type?: "success" | "info" | "error") => void;
 }
 
@@ -36,7 +34,6 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
   onUpdated,
   onDeleted,
   onSearchTorrents,
-  onSimulatePlayback,
   showToast,
 }) => {
   const [status, setStatus] = useState(anime.user_status);
@@ -200,8 +197,7 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
       await toraApi.playEpisodeFile(file.file_path);
       showToast(`Playing next episode (#${nextEp})`, "info");
     } else {
-      const simName = `[SubsPlease] ${anime.title_romaji} - ${String(nextEp).padStart(2, "0")} (1080p).mkv`;
-      onSimulatePlayback(simName);
+      showToast(`No local file for episode ${nextEp}`, "info");
     }
   };
 
@@ -310,21 +306,6 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
             >
               <Search className="w-3.5 h-3.5 text-accent" />
               Find Ep {progress + 1} Torrent
-            </button>
-
-            <button
-              onClick={() =>
-                onSimulatePlayback(
-                  `[SubsPlease] ${anime.title_romaji} - ${String(
-                    progress + 1
-                  ).padStart(2, "0")} (1080p).mkv`
-                )
-              }
-              className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-bg-elevated hover:bg-bg-primary text-text-secondary hover:text-text-primary text-xs font-medium border border-border-subtle transition"
-              title="Simulate media player detection for the next episode"
-            >
-              <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-              Simulate Scrobble
             </button>
 
             {anime.site_url && (

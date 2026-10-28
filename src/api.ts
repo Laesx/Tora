@@ -247,14 +247,7 @@ export const toraApi = {
   testParseFilename: (input: string) =>
     invoke<FilenameTestResult>("test_parse_filename", { input }),
 
-  simulatePlaybackSession: (
-    playerName?: string | null,
-    windowTitle?: string | null
-  ) =>
-    invoke<DetectedMediaSession | null>("simulate_playback_session", {
-      playerName: playerName ?? null,
-      windowTitle: windowTitle ?? null,
-    }),
+  dismissPlaybackSession: () => invoke<void>("dismiss_playback_session"),
 
   pollMediaRecognition: () =>
     invoke<DetectedMediaSession | null>("poll_media_recognition"),
