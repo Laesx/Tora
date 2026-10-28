@@ -104,11 +104,8 @@ export const RecognitionView: React.FC<RecognitionViewProps> = ({
         <div>
           <h1 className="text-xl font-bold text-text-primary flex items-center gap-2.5">
             <Activity className="w-6 h-6 text-accent" />
-            Episode Detection
+            Now Playing
           </h1>
-          <p className="text-xs text-text-secondary mt-0.5">
-            Real-time media player detection & automatic progress tracking. Unmatched titles pause auto-update and prompt you to link the anime once.
-          </p>
         </div>
 
         <div className="flex items-center gap-3">
@@ -124,7 +121,7 @@ export const RecognitionView: React.FC<RecognitionViewProps> = ({
               }
               className="rounded accent-accent"
             />
-            <span>Live Win32 Player Detection</span>
+            <span>Enable Media Detection</span>
           </label>
         </div>
       </div>
@@ -132,10 +129,10 @@ export const RecognitionView: React.FC<RecognitionViewProps> = ({
       {/* Live Active Session Status Card */}
       <div className="bg-bg-secondary border border-border-subtle rounded-2xl p-5 space-y-4">
         <div className="flex items-center justify-between">
-          <h2 className="text-sm font-bold text-text-primary flex items-center gap-2">
+          {/* <h2 className="text-sm font-bold text-text-primary flex items-center gap-2">
             <Tv className="w-4 h-4 text-accent" />
             Active Media Player Session
-          </h2>
+          </h2> */}
           {activeSession ? (
             <div className="flex items-center gap-2">
               {activeSession.matched_anime_id && !isRelinking && (
@@ -151,7 +148,7 @@ export const RecognitionView: React.FC<RecognitionViewProps> = ({
           ) : (
             <span className="text-xs text-text-muted flex items-center gap-1.5">
               <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-              Polling Windows media players every 2s...
+              Nothing playing...
             </span>
           )}
         </div>
@@ -160,8 +157,8 @@ export const RecognitionView: React.FC<RecognitionViewProps> = ({
           <div className="space-y-4">
             <div
               className={`flex flex-wrap items-center gap-5 p-4 rounded-xl bg-bg-primary border ${activeSession.matched_anime_id
-                  ? "border-accent/40"
-                  : "border-amber-500/50"
+                ? "border-accent/40"
+                : "border-amber-500/50"
                 }`}
             >
               {activeSession.matched_cover_image && (
@@ -274,8 +271,8 @@ export const RecognitionView: React.FC<RecognitionViewProps> = ({
                         type="button"
                         onClick={() => setSelectedAnimeId(anime.id)}
                         className={`flex items-center gap-3 p-2.5 rounded-xl border text-left transition ${isSelected
-                            ? "bg-accent/20 border-accent text-text-primary"
-                            : "bg-bg-secondary border-border-subtle text-text-secondary hover:text-text-primary hover:border-border-subtle/80"
+                          ? "bg-accent/20 border-accent text-text-primary"
+                          : "bg-bg-secondary border-border-subtle text-text-secondary hover:text-text-primary hover:border-border-subtle/80"
                           }`}
                       >
                         <img
@@ -324,10 +321,10 @@ export const RecognitionView: React.FC<RecognitionViewProps> = ({
           <div className="p-5 rounded-xl bg-bg-primary/60 border border-border-subtle text-xs text-text-secondary">
             Open any video file in{" "}
             <strong className="text-text-primary">
-              mpv, VLC, MPC-HC, MPC-BE, or PotPlayer
+              a compatible player
             </strong>{" "}
-            to detect playback automatically. Use{" "}
-            <strong className="text-accent">Settings → Diagnostics</strong> to inspect how filenames are parsed.
+            to detect playback automatically. Go to{" "}
+            <strong className="text-accent">Settings → Playback & Detection</strong> to see the supported players.
           </div>
         )}
       </div>
@@ -336,12 +333,12 @@ export const RecognitionView: React.FC<RecognitionViewProps> = ({
       <div className="bg-bg-secondary border border-border-subtle rounded-2xl p-5 space-y-3">
         <h2 className="text-sm font-bold text-text-primary flex items-center gap-2">
           <History className="w-4 h-4 text-accent" />
-          Recent Recognition & Scrobble History
+          History
         </h2>
 
         {history.length === 0 ? (
           <div className="py-12 text-center text-xs text-text-muted">
-            No episodes scrobbled yet. Play an episode in your media player to start tracking!
+            No history yet. Play an episode in your media player to start tracking!
           </div>
         ) : (
           <div className="divide-y divide-border-subtle max-h-96 overflow-y-auto pr-1">

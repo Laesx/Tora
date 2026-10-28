@@ -162,32 +162,27 @@ export const TorrentsView: React.FC<TorrentsViewProps> = ({
         <div>
           <h1 className="text-xl font-bold text-text-primary flex items-center gap-2.5">
             <Magnet className="w-6 h-6 text-accent" />
-            Torrent Search & Smart RSS Filters
+            Torrent Search
           </h1>
-          <p className="text-xs text-text-secondary mt-0.5">
-            Live Nyaa.si & AnimeTosho RSS feeds enriched with Anitomy tags, watchlist matching, and qBittorrent / Magnet integration.
-          </p>
         </div>
 
         <div className="flex items-center gap-1.5 bg-bg-secondary p-1 rounded-xl border border-border-subtle">
           <button
             onClick={() => setSubTab("search")}
-            className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 ${
-              subTab === "search"
+            className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 ${subTab === "search"
                 ? "bg-accent text-white"
                 : "text-text-secondary hover:text-text-primary"
-            }`}
+              }`}
           >
             <Search className="w-3.5 h-3.5" />
             Torrent Feed & Search
           </button>
           <button
             onClick={() => setSubTab("rules")}
-            className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 ${
-              subTab === "rules"
+            className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 ${subTab === "rules"
                 ? "bg-accent text-white"
                 : "text-text-secondary hover:text-text-primary"
-            }`}
+              }`}
           >
             <SlidersHorizontal className="w-3.5 h-3.5" />
             Smart Filter Rules ({rules.length})
@@ -243,11 +238,10 @@ export const TorrentsView: React.FC<TorrentsViewProps> = ({
               <button
                 type="button"
                 onClick={() => setOnlyHighlighted(!onlyHighlighted)}
-                className={`px-3 py-2.5 rounded-xl text-xs font-medium border transition flex items-center gap-1.5 ${
-                  onlyHighlighted
+                className={`px-3 py-2.5 rounded-xl text-xs font-medium border transition flex items-center gap-1.5 ${onlyHighlighted
                     ? "bg-amber-500/20 border-amber-500 text-amber-300"
                     : "bg-bg-primary border-border-subtle text-text-secondary hover:text-text-primary"
-                }`}
+                  }`}
               >
                 <Filter className="w-3.5 h-3.5" />
                 Watchlist / Rules Only
@@ -326,24 +320,22 @@ export const TorrentsView: React.FC<TorrentsViewProps> = ({
                   return (
                     <div
                       key={`${item.info_hash || idx}-${idx}`}
-                      className={`p-3.5 flex flex-wrap items-center justify-between gap-3 transition text-xs ${
-                        isAuto
+                      className={`p-3.5 flex flex-wrap items-center justify-between gap-3 transition text-xs ${isAuto
                           ? "bg-emerald-500/10 hover:bg-emerald-500/15"
                           : isHighlight
-                          ? "bg-amber-500/10 hover:bg-amber-500/15"
-                          : "hover:bg-bg-tertiary/40"
-                      }`}
+                            ? "bg-amber-500/10 hover:bg-amber-500/15"
+                            : "hover:bg-bg-tertiary/40"
+                        }`}
                     >
                       <div className="flex-1 min-w-[280px] space-y-1.5">
                         {/* Anitomy Badges Row */}
                         <div className="flex flex-wrap items-center gap-1.5">
                           {item.matched_rule_name && (
                             <span
-                              className={`px-2 py-0.5 rounded font-semibold text-[10px] flex items-center gap-1 ${
-                                isAuto
+                              className={`px-2 py-0.5 rounded font-semibold text-[10px] flex items-center gap-1 ${isAuto
                                   ? "bg-emerald-500 text-black"
                                   : "bg-amber-500 text-black"
-                              }`}
+                                }`}
                             >
                               <Sparkles className="w-3 h-3" />
                               Rule: {item.matched_rule_name}

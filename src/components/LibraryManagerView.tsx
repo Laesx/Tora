@@ -191,9 +191,6 @@ export const LibraryManagerView: React.FC<LibraryManagerViewProps> = ({
           <HardDrive className="w-5 h-5 text-accent" />
           Library Folders
         </h2>
-        <p className="text-xs text-text-secondary mt-0.5">
-          Index tens of thousands of anime episodes across multiple hard drives with parallel Anitomy filename parsing.
-        </p>
       </div>
 
       {/* Scan performance banner */}
@@ -277,7 +274,7 @@ export const LibraryManagerView: React.FC<LibraryManagerViewProps> = ({
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h2 className="text-sm font-bold text-text-primary flex items-center gap-2">
             <FolderPlus className="w-4 h-4 text-accent" />
-            Root Library Folders (Across Any Hard Drive or NAS)
+            Library Folders
           </h2>
 
           <button
@@ -317,7 +314,7 @@ export const LibraryManagerView: React.FC<LibraryManagerViewProps> = ({
               type="text"
               value={newLabel}
               onChange={(e) => setNewLabel(e.target.value)}
-              placeholder="Optional label (e.g. NVMe Seasonal Drive)"
+              placeholder="Optional label"
               className="w-full px-3.5 py-2 rounded-xl bg-bg-primary border border-border-subtle text-xs text-text-primary focus:outline-none focus:border-accent"
             />
           </div>
@@ -450,7 +447,7 @@ export const LibraryManagerView: React.FC<LibraryManagerViewProps> = ({
               const endRow = Math.min(
                 totalRows,
                 Math.ceil((tableScrollTop + viewportHeight) / rowHeight) +
-                  overscan
+                overscan
               );
               const visibleEpisodes = filteredEpisodes.slice(startRow, endRow);
               const topSpacer = startRow * rowHeight;
