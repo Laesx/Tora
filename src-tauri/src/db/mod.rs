@@ -1,7 +1,7 @@
 use crate::detection::anisthesia::{default_players, PlayerDefinition};
 use crate::detection::anitomy::{extract_effective_season, normalize_anime_title, AnitomyElements};
 use crate::detection::relations::relations_db;
-use crate::plugins::{AiringScheduleItem, SeasonalAnime};
+use crate::plugins::{AiringScheduleItem, RemoteListMembership, SeasonalAnime};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use once_cell::sync::Lazy;
@@ -126,6 +126,41 @@ pub struct PendingDeletion {
     pub media_id: i64,
     pub list_entry_id: Option<i64>,
     pub title: String,
+}
+
+/// The tracker's custom lists and which entries are in them. Kept apart from [`AnimeEntry`] so search,
+/// matching and the list reads never see it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CustomListsState {
+    /// List names in the user's tracker order.
+    pub names: Vec<String>,
+    /// Entries in at least one list or hidden from status lists.
+    pub members: Vec<CustomListMember>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CustomListMember {
+    pub anime_id: i64,
+    /// In list order.
+    pub lists: Vec<String>,
+    pub hidden_from_status_lists: bool,
+}
+
+/// One custom-list membership edit applied to every id in `anime_ids`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CustomListChange {
+    pub anime_ids: Vec<i64>,
+    /// Lists to add (`enabled = true`) or remove the entries from.
+    #[serde(default)]
+    pub toggles: Vec<CustomListToggle>,
+    #[serde(default)]
+    pub hidden_from_status_lists: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomListToggle {
+    pub name: String,
+    pub enabled: bool,
 }
 
 /// A season stored in `seasonal_cache` (without its payload).
@@ -1128,6 +1163,30 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, S
     Ok(false)
 }
 
+/// Custom list names in the user's tracker order.
+fn read_custom_list_names(conn: &Connection) -> Result<Vec<String>, String> {
+    let mut stmt = conn
+        .prepare_cached("SELECT name FROM tracker_custom_lists ORDER BY position, name")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
+fn parse_list_names_json(json: &str) -> Vec<String> {
+    serde_json::from_str(json).unwrap_or_default()
+}
+
+/// Order list names like the user's lists (unknown names last, in their current order).
+fn sort_by_list_order(lists: &mut [String], names: &[String]) {
+    lists.sort_by_key(|n| names.iter().position(|x| x == n).unwrap_or(usize::MAX));
+}
+
 fn add_column_if_missing(
     conn: &Connection,
     table: &str,
@@ -1601,6 +1660,18 @@ impl Database {
                 week_to INTEGER NOT NULL,
                 fetched_at INTEGER NOT NULL,
                 payload_json TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS tracker_custom_lists (
+                name TEXT PRIMARY KEY,
+                position INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS anime_custom_lists (
+                anime_id INTEGER PRIMARY KEY REFERENCES anime_entries(id) ON DELETE CASCADE,
+                lists_json TEXT NOT NULL DEFAULT '[]',
+                hidden_from_status_lists INTEGER NOT NULL DEFAULT 0,
+                dirty INTEGER NOT NULL DEFAULT 0
             );",
         )
         .map_err(|e| e.to_string())?;
@@ -2454,19 +2525,32 @@ impl Database {
     /// Record a successful push of `pushed` (the entry snapshot that was sent). Clears `sync_pending` and
     /// adopts the tracker's `updated_at` only if the user fields are still exactly what was pushed; if the
     /// entry was edited meanwhile it stays pending (only the list entry id is stored). Returns whether it cleared.
+    /// `pushed_lists` is the custom-list membership that was sent with it: its dirty flag is cleared the same
+    /// way, and the entry stays pending while a membership change is still unsent.
     pub fn finish_push(
         &self,
         pushed: &AnimeEntry,
         remote_updated_at: i64,
         list_entry_id: i64,
+        pushed_lists: Option<&RemoteListMembership>,
     ) -> Result<bool, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        if let Some(lists) = pushed_lists {
+            let lists_json = serde_json::to_string(&lists.lists).map_err(|e| e.to_string())?;
+            conn.execute(
+                "UPDATE anime_custom_lists SET dirty = 0
+                 WHERE anime_id = ?1 AND lists_json = ?2 AND hidden_from_status_lists = ?3",
+                params![pushed.id, lists_json, lists.hidden_from_status_lists],
+            )
+            .map_err(|e| e.to_string())?;
+        }
         let changed = conn
             .execute(
                 "UPDATE anime_entries SET sync_pending = 0, updated_at = ?1, anilist_list_entry_id = ?2
                  WHERE id = ?3 AND user_status = ?4 AND user_progress = ?5 AND user_score = ?6
                    AND user_repeats = ?7 AND user_notes = ?8
-                   AND user_started_at IS ?9 AND user_completed_at IS ?10",
+                   AND user_started_at IS ?9 AND user_completed_at IS ?10
+                   AND NOT EXISTS (SELECT 1 FROM anime_custom_lists WHERE anime_id = ?3 AND dirty = 1)",
                 params![
                     remote_updated_at,
                     list_entry_id,
@@ -2518,6 +2602,236 @@ impl Database {
         .map_err(|e| e.to_string())
     }
 
+    // ----------------------------------------------------------------- custom lists
+
+    /// Custom list names and memberships (frontend read path).
+    pub fn get_custom_lists(&self) -> Result<CustomListsState, String> {
+        let conn = self.reader()?;
+        let names = read_custom_list_names(&conn)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT anime_id, lists_json, hidden_from_status_lists FROM anime_custom_lists
+                 WHERE lists_json != '[]' OR hidden_from_status_lists != 0
+                 ORDER BY anime_id",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(CustomListMember {
+                    anime_id: r.get(0)?,
+                    lists: parse_list_names_json(&r.get::<_, String>(1)?),
+                    hidden_from_status_lists: r.get(2)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        let mut members = Vec::new();
+        for r in rows {
+            members.push(r.map_err(|e| e.to_string())?);
+        }
+        Ok(CustomListsState { names, members })
+    }
+
+    /// Unsent custom-list membership of an entry, to send with its next push (`None` when not dirty).
+    pub fn dirty_custom_lists(&self, anime_id: i64) -> Result<Option<RemoteListMembership>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT lists_json, hidden_from_status_lists FROM anime_custom_lists
+             WHERE anime_id = ?1 AND dirty = 1",
+            params![anime_id],
+            |r| {
+                Ok(RemoteListMembership {
+                    lists: parse_list_names_json(&r.get::<_, String>(0)?),
+                    hidden_from_status_lists: r.get(1)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|e| e.to_string())
+    }
+
+    /// Apply a membership edit locally. Every entry whose membership changes gets a dirty row and is marked
+    /// `sync_pending` with `updated_at = now`, so the regular push queue sends it. Toggled names must be
+    /// existing lists; an entry removed from every list is no longer hidden from status lists.
+    /// Entries without an AniList id are skipped. Returns the ids that changed.
+    pub fn apply_custom_list_change(
+        &self,
+        change: &CustomListChange,
+        now: i64,
+    ) -> Result<Vec<i64>, String> {
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let names = read_custom_list_names(&tx)?;
+        if let Some(unknown) = change.toggles.iter().find(|t| !names.contains(&t.name)) {
+            return Err(format!("Unknown custom list \"{}\"", unknown.name));
+        }
+        let mut changed = Vec::new();
+        for &id in &change.anime_ids {
+            let media: Option<Option<i64>> = tx
+                .query_row(
+                    "SELECT anilist_id FROM anime_entries WHERE id = ?1",
+                    params![id],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
+            if !matches!(media, Some(Some(_))) {
+                continue;
+            }
+            let (current_lists, current_hidden) = tx
+                .query_row(
+                    "SELECT lists_json, hidden_from_status_lists FROM anime_custom_lists WHERE anime_id = ?1",
+                    params![id],
+                    |r| Ok((parse_list_names_json(&r.get::<_, String>(0)?), r.get::<_, bool>(1)?)),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?
+                .unwrap_or_default();
+            let mut lists = current_lists.clone();
+            for t in &change.toggles {
+                if t.enabled {
+                    if !lists.contains(&t.name) {
+                        lists.push(t.name.clone());
+                    }
+                } else {
+                    lists.retain(|n| n != &t.name);
+                }
+            }
+            sort_by_list_order(&mut lists, &names);
+            let hidden = !lists.is_empty()
+                && change.hidden_from_status_lists.unwrap_or(current_hidden);
+            if lists == current_lists && hidden == current_hidden {
+                continue;
+            }
+            let lists_json = serde_json::to_string(&lists).map_err(|e| e.to_string())?;
+            tx.execute(
+                "INSERT INTO anime_custom_lists (anime_id, lists_json, hidden_from_status_lists, dirty)
+                 VALUES (?1, ?2, ?3, 1)
+                 ON CONFLICT(anime_id) DO UPDATE SET lists_json = excluded.lists_json,
+                     hidden_from_status_lists = excluded.hidden_from_status_lists, dirty = 1",
+                params![id, lists_json, hidden],
+            )
+            .map_err(|e| e.to_string())?;
+            tx.execute(
+                "UPDATE anime_entries SET sync_pending = 1, updated_at = ?1 WHERE id = ?2",
+                params![now, id],
+            )
+            .map_err(|e| e.to_string())?;
+            changed.push(id);
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(changed)
+    }
+
+    /// Diff-only merge of the tracker's custom lists after a pull. The names are rewritten only when they
+    /// changed (removed names are also dropped from unsent local edits). Each entry's membership is replaced
+    /// by the remote one unless it has an unsent local edit (`dirty`). Never writes `anime_entries`, so it
+    /// never invalidates the matcher. `memberships` is keyed by AniList media id. Returns whether anything changed.
+    pub fn merge_remote_custom_lists(
+        &self,
+        names: &[String],
+        memberships: &HashMap<i64, RemoteListMembership>,
+    ) -> Result<bool, String> {
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let mut changed = false;
+
+        let names_changed = read_custom_list_names(&tx)? != names;
+        if names_changed {
+            tx.execute("DELETE FROM tracker_custom_lists", [])
+                .map_err(|e| e.to_string())?;
+            for (i, name) in names.iter().enumerate() {
+                tx.execute(
+                    "INSERT OR IGNORE INTO tracker_custom_lists (name, position) VALUES (?1, ?2)",
+                    params![name, i as i64],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            changed = true;
+        }
+
+        // anime_id -> (lists_json, hidden, dirty)
+        let mut local: HashMap<i64, (String, bool, bool)> = HashMap::new();
+        let mut entries: Vec<(i64, i64)> = Vec::new();
+        {
+            let mut stmt = tx
+                .prepare("SELECT anime_id, lists_json, hidden_from_status_lists, dirty FROM anime_custom_lists")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((r.get::<_, i64>(0)?, (r.get(1)?, r.get(2)?, r.get(3)?)))
+                })
+                .map_err(|e| e.to_string())?;
+            for r in rows {
+                let (id, row) = r.map_err(|e| e.to_string())?;
+                local.insert(id, row);
+            }
+            let mut stmt = tx
+                .prepare("SELECT id, anilist_id FROM anime_entries WHERE anilist_id IS NOT NULL")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
+                .map_err(|e| e.to_string())?;
+            for r in rows {
+                entries.push(r.map_err(|e| e.to_string())?);
+            }
+        }
+
+        for (id, media_id) in entries {
+            let row = local.get(&id);
+            if let Some((lists_json, _, true)) = row {
+                if names_changed {
+                    let lists = parse_list_names_json(lists_json);
+                    let kept: Vec<String> =
+                        lists.iter().filter(|n| names.contains(n)).cloned().collect();
+                    if kept != lists {
+                        let kept_json = serde_json::to_string(&kept).map_err(|e| e.to_string())?;
+                        tx.execute(
+                            "UPDATE anime_custom_lists SET lists_json = ?1,
+                                 hidden_from_status_lists = hidden_from_status_lists AND ?2
+                             WHERE anime_id = ?3",
+                            params![kept_json, !kept.is_empty(), id],
+                        )
+                        .map_err(|e| e.to_string())?;
+                        changed = true;
+                    }
+                }
+                continue;
+            }
+            match (memberships.get(&media_id), row) {
+                (Some(remote), _) => {
+                    let mut lists = remote.lists.clone();
+                    sort_by_list_order(&mut lists, names);
+                    let lists_json = serde_json::to_string(&lists).map_err(|e| e.to_string())?;
+                    let same = row.map_or(false, |(json, hidden, _)| {
+                        *json == lists_json && *hidden == remote.hidden_from_status_lists
+                    });
+                    if !same {
+                        tx.execute(
+                            "INSERT INTO anime_custom_lists (anime_id, lists_json, hidden_from_status_lists, dirty)
+                             VALUES (?1, ?2, ?3, 0)
+                             ON CONFLICT(anime_id) DO UPDATE SET lists_json = excluded.lists_json,
+                                 hidden_from_status_lists = excluded.hidden_from_status_lists, dirty = 0",
+                            params![id, lists_json, remote.hidden_from_status_lists],
+                        )
+                        .map_err(|e| e.to_string())?;
+                        changed = true;
+                    }
+                }
+                (None, Some(_)) => {
+                    tx.execute(
+                        "DELETE FROM anime_custom_lists WHERE anime_id = ?1",
+                        params![id],
+                    )
+                    .map_err(|e| e.to_string())?;
+                    changed = true;
+                }
+                (None, None) => {}
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(changed)
+    }
+
     /// AniList user id the local list belongs to (`None` before the first sign-in).
     pub fn list_owner(&self) -> Result<Option<i64>, String> {
         let conn = self.reader()?;
@@ -2566,6 +2880,8 @@ impl Database {
                  DELETE FROM tracker_pending_deletions;
                  DELETE FROM watch_history;
                  DELETE FROM title_aliases;
+                 DELETE FROM anime_custom_lists;
+                 DELETE FROM tracker_custom_lists;
                  DELETE FROM anime_entries;",
             )
             .map_err(|e| e.to_string())?;
@@ -3920,6 +4236,73 @@ mod tests {
     }
 
     #[test]
+    fn test_custom_lists_finish_push_cascade_and_account_switch() {
+        let db = Database::open_in_memory().expect("db");
+        db.upsert_anime_entries_batch(&[test_entry(1, "Alpha"), test_entry(2, "Beta")])
+            .unwrap();
+        let names = vec!["Favs".to_string(), "Later".to_string()];
+        let mut remote = HashMap::new();
+        remote.insert(
+            2,
+            RemoteListMembership {
+                // Stored in the user's list order whatever order AniList sent
+                lists: vec!["Later".into(), "Favs".into()],
+                hidden_from_status_lists: true,
+            },
+        );
+        assert!(db.merge_remote_custom_lists(&names, &remote).unwrap());
+        assert!(!db.merge_remote_custom_lists(&names, &remote).unwrap());
+        let state = db.get_custom_lists().unwrap();
+        assert_eq!(state.members[0].lists, vec!["Favs", "Later"]);
+
+        // Merges never touch anime_entries, so the matcher stays valid
+        let generation = db.matcher_generation();
+        remote.remove(&2);
+        assert!(db.merge_remote_custom_lists(&names, &remote).unwrap());
+        assert!(db.get_custom_lists().unwrap().members.is_empty());
+        assert_eq!(db.matcher_generation(), generation);
+
+        // A membership edit made during a push keeps the entry pending
+        let change = |name: &str, enabled| CustomListChange {
+            anime_ids: vec![1],
+            toggles: vec![CustomListToggle {
+                name: name.into(),
+                enabled,
+            }],
+            hidden_from_status_lists: None,
+        };
+        assert_eq!(db.apply_custom_list_change(&change("Favs", true), 50).unwrap(), vec![1]);
+        let pushed_entry = db.get_anime_entry_by_id(1).unwrap();
+        assert!(pushed_entry.sync_pending);
+        let pushed_lists = db.dirty_custom_lists(1).unwrap().unwrap();
+        // No-op edits change nothing
+        assert!(db.apply_custom_list_change(&change("Favs", true), 60).unwrap().is_empty());
+        db.apply_custom_list_change(&change("Later", true), 70).unwrap();
+        assert!(!db.finish_push(&pushed_entry, 99, 9, Some(&pushed_lists)).unwrap());
+        assert!(db.get_anime_entry_by_id(1).unwrap().sync_pending);
+        let now_lists = db.dirty_custom_lists(1).unwrap().unwrap();
+        assert_eq!(now_lists.lists, vec!["Favs", "Later"]);
+        let entry = db.get_anime_entry_by_id(1).unwrap();
+        assert!(db.finish_push(&entry, 99, 9, Some(&now_lists)).unwrap());
+        assert_eq!(db.dirty_custom_lists(1).unwrap(), None);
+
+        // Deleting an entry drops its membership; an account switch clears both tables
+        db.delete_entries_with_tombstones(&[1]).unwrap();
+        assert!(db.get_custom_lists().unwrap().members.is_empty());
+        remote.insert(
+            2,
+            RemoteListMembership {
+                lists: vec!["Favs".into()],
+                hidden_from_status_lists: false,
+            },
+        );
+        db.merge_remote_custom_lists(&names, &remote).unwrap();
+        assert_eq!(db.get_custom_lists().unwrap().members.len(), 1);
+        db.reset_for_account_switch(7).unwrap();
+        assert_eq!(db.get_custom_lists().unwrap(), CustomListsState::default());
+    }
+
+    #[test]
     fn test_tombstones_and_finish_push_guard() {
         let db = Database::open_in_memory().expect("db");
         let mut a = test_entry(1, "Alpha");
@@ -3942,11 +4325,11 @@ mod tests {
         assert!(pushed.sync_pending);
         db.update_anime_user_state(2, "CURRENT", 2, 0.0, 0, "", None, None, None, None, true)
             .unwrap();
-        assert!(!db.finish_push(&pushed, 12345, 555).unwrap());
+        assert!(!db.finish_push(&pushed, 12345, 555, None).unwrap());
         let b = db.get_anime_entry_by_id(2).unwrap();
         assert!(b.sync_pending);
         assert_eq!(b.anilist_list_entry_id, Some(555));
-        assert!(db.finish_push(&b, 12345, 555).unwrap());
+        assert!(db.finish_push(&b, 12345, 555, None).unwrap());
         let b = db.get_anime_entry_by_id(2).unwrap();
         assert!(!b.sync_pending);
         assert_eq!(b.updated_at, 12345);

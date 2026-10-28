@@ -5,6 +5,8 @@ import {
   AppSettings,
   BatchAnimeUpdatePatch,
   CachedSeason,
+  CustomListChange,
+  CustomListsState,
   DetectedMediaSession,
   DriveStorageSummary,
   FilenameTestResult,
@@ -184,6 +186,12 @@ export const toraApi = {
 
   batchUpdateAnimeEntries: (patch: BatchAnimeUpdatePatch) =>
     invoke<AnimeEntry[]>("batch_update_anime_entries", { patch }),
+
+  getCustomLists: () => invoke<CustomListsState>("get_custom_lists"),
+
+  // Add to / remove from custom lists or toggle "hidden from status lists"; queued and pushed like any edit
+  setAnimeCustomLists: (change: CustomListChange) =>
+    invoke<CustomListsState>("set_anime_custom_lists", { change }),
 
   batchDeleteAnimeEntries: (animeIds: number[]) =>
     invoke<AnimeEntry[]>("batch_delete_anime_entries", { animeIds }),

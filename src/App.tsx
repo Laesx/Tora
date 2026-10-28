@@ -32,11 +32,15 @@ import {
   X,
   HardDrive,
   Palette,
+  ListChecks,
 } from "lucide-react";
 import {
   AnimeEntry,
   AppSettings,
   BatchAnimeUpdatePatch,
+  CustomListChange,
+  CustomListMember,
+  CustomListsState,
   DetectedMediaSession,
   ScanSummary,
   SyncSummary,
@@ -66,6 +70,13 @@ import { ScheduleView } from "./components/ScheduleView";
 import { SearchView } from "./components/SearchView";
 import { SettingsView } from "./components/SettingsView";
 import { CommandPalette, PaletteCommand } from "./components/CommandPalette";
+import { CustomListsChip } from "./components/CustomListsChip";
+import {
+  applyCustomListChangeLocally,
+  CustomListsApi,
+  CustomListsContext,
+  EMPTY_CUSTOM_LISTS,
+} from "./customLists";
 
 type NavTab =
   | "watchlist"
@@ -127,6 +138,10 @@ export const App: React.FC = () => {
   const mainScrollRef = useRef<HTMLElement | null>(null);
   const [activeTab, setActiveTab] = useState<NavTab>("watchlist");
   const [statusFilter, setStatusFilter] = useState<string>("CURRENT");
+  // Selected AniList custom list; replaces the status filter while set
+  const [customListFilter, setCustomListFilter] = useState<string | null>(null);
+  const [customListsState, setCustomListsState] =
+    useState<CustomListsState>(EMPTY_CUSTOM_LISTS);
   const [searchQuery, setSearchQuery] = useState("");
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   // Scroll-to-and-select request for the watchlist (e.g. an anime picked in the command palette)
@@ -193,6 +208,7 @@ export const App: React.FC = () => {
       setSettings(s);
       applyThemeToDocument(s.theme, s.accent_color);
       setAnimeList(list);
+      refreshCustomLists();
 
       // Seed the sync spinner in case the backend startup pull is already running
       const statusSeq = syncEventSeqRef.current;
@@ -233,6 +249,14 @@ export const App: React.FC = () => {
     } catch (e) {
       console.error("Failed to initialize Tora:", e);
     }
+  };
+
+  // Only uses setters, so it is safe from the listeners registered once on mount
+  const refreshCustomLists = () => {
+    toraApi
+      .getCustomLists()
+      .then(setCustomListsState)
+      .catch((e) => console.error("Failed to load custom lists:", e));
   };
 
   const refreshAnimeList = async (overrideList?: AnimeEntry[]) => {
@@ -346,6 +370,7 @@ export const App: React.FC = () => {
         setIsSyncing(false);
         setLastSyncedAt(Math.floor(Date.now() / 1000));
         applySyncDelta(summary);
+        if (summary.custom_lists_changed) refreshCustomLists();
 
         // Stay quiet at startup when nothing changed; manual / post-auth syncs always confirm
         const msg = describeSyncSummary(summary);
@@ -400,6 +425,8 @@ export const App: React.FC = () => {
         setSelectedAnimeIds([]);
         setQuickMenuAnimeId(null);
         setLastSyncedAt(null);
+        setCustomListsState(EMPTY_CUSTOM_LISTS);
+        setCustomListFilter(null);
         const { username, discarded_changes } = event.payload;
         showToast(
           discarded_changes > 0
@@ -650,13 +677,66 @@ export const App: React.FC = () => {
   };
 
 
+  // Custom lists live beside the list (never in AnimeEntry, so search and matching don't see them)
+  const customListMembers = useMemo(
+    () => new Map<number, CustomListMember>(customListsState.members.map((m) => [m.anime_id, m])),
+    [customListsState]
+  );
+  // Entries hidden from status lists only show in their custom lists, All Anime and search
+  const hiddenFromStatusIds = useMemo(
+    () =>
+      new Set(
+        customListsState.members
+          .filter((m) => m.hidden_from_status_lists)
+          .map((m) => m.anime_id)
+      ),
+    [customListsState]
+  );
+  const customListCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const a of animeList) {
+      for (const name of customListMembers.get(a.id)?.lists ?? []) {
+        counts.set(name, (counts.get(name) ?? 0) + 1);
+      }
+    }
+    return counts;
+  }, [animeList, customListMembers]);
+
+  // Optimistic membership edit; the backend queues and pushes it like any other edit
+  const applyCustomListChange = async (change: CustomListChange) => {
+    setCustomListsState((prev) => applyCustomListChangeLocally(prev, change));
+    try {
+      setCustomListsState(await toraApi.setAnimeCustomLists(change));
+    } catch (err) {
+      refreshCustomLists();
+      throw err;
+    }
+  };
+  const customListsApi = useMemo<CustomListsApi>(
+    () => ({
+      names: customListsState.names,
+      membership: (id) => customListMembers.get(id),
+      apply: applyCustomListChange,
+    }),
+    [customListsState, customListMembers]
+  );
+
+  // The selected list was deleted on AniList: fall back to Watching
+  useEffect(() => {
+    if (customListFilter !== null && !customListsState.names.includes(customListFilter)) {
+      setCustomListFilter(null);
+      setStatusFilter("CURRENT");
+    }
+  }, [customListsState, customListFilter]);
+
   const statusCounts = useMemo(() => {
     const counts: Record<string, number> = { ALL: animeList.length };
     for (const a of animeList) {
+      if (hiddenFromStatusIds.has(a.id)) continue;
       counts[a.user_status] = (counts[a.user_status] || 0) + 1;
     }
     return counts;
-  }, [animeList]);
+  }, [animeList, hiddenFromStatusIds]);
 
   // Shared by the watchlist search and the command palette; rebuilt only when the list changes
   const searchIndex = useMemo(() => buildAnimeSearchIndex(animeList), [animeList]);
@@ -711,14 +791,30 @@ export const App: React.FC = () => {
 
   const filteredAnime = useMemo(() => {
     if (searchGroups) return searchGroups.flatMap((g) => g.items);
+    if (customListFilter !== null) {
+      return animeList
+        .filter((a) => customListMembers.get(a.id)?.lists.includes(customListFilter))
+        .sort(compareBySort);
+    }
     return animeList
       .filter((a) => {
+        if (statusFilter === "ALL") return true;
+        if (hiddenFromStatusIds.has(a.id)) return false;
         const effectiveStatus =
           pendingStepSnapshots[a.id]?.initialStatus ?? a.user_status;
-        return statusFilter === "ALL" || effectiveStatus === statusFilter;
+        return effectiveStatus === statusFilter;
       })
       .sort(compareBySort);
-  }, [animeList, statusFilter, searchGroups, pendingStepSnapshots, compareBySort]);
+  }, [
+    animeList,
+    statusFilter,
+    customListFilter,
+    customListMembers,
+    hiddenFromStatusIds,
+    searchGroups,
+    pendingStepSnapshots,
+    compareBySort,
+  ]);
 
   // Sync requires an OAuth token; a bare username no longer counts as signed in
   const isSignedIn = Boolean(settings?.anilist_token?.trim());
@@ -823,12 +919,22 @@ export const App: React.FC = () => {
     setActiveTab("watchlist");
     setSearchQuery(cmdQuery.trim());
     if (!cmdQuery.trim()) {
+      setCustomListFilter(null);
       setStatusFilter(
-        STATUS_TABS.some((t) => t.id === entry.user_status) ? entry.user_status : "ALL"
+        STATUS_TABS.some((t) => t.id === entry.user_status) &&
+          !hiddenFromStatusIds.has(entry.id)
+          ? entry.user_status
+          : "ALL"
       );
     }
     setFocusRequest((prev) => ({ id: entry.id, nonce: (prev?.nonce ?? 0) + 1 }));
     setSelectedAnime(entry);
+  };
+
+  const openCustomList = (name: string) => {
+    setActiveTab("watchlist");
+    setSearchQuery("");
+    setCustomListFilter(name);
   };
 
   const setViewMode = (mode: "grid" | "compact" | "table") => {
@@ -869,6 +975,13 @@ export const App: React.FC = () => {
         setSelectedAnime(filteredAnime[Math.floor(Math.random() * filteredAnime.length)]);
       },
     },
+    ...customListsState.names.map((name) => ({
+      id: `custom-list-${name}`,
+      label: `Open List: ${name}`,
+      keywords: ["custom list", "anilist list"],
+      icon: ListChecks,
+      run: () => openCustomList(name),
+    })),
     { id: "view-grid", label: "View: Poster Grid", keywords: ["layout", "cards"], icon: LayoutGrid, run: () => setViewMode("grid") },
     { id: "view-compact", label: "View: Detailed Cards", keywords: ["layout", "compact"], icon: Rows, run: () => setViewMode("compact") },
     { id: "view-table", label: "View: Dense Table", keywords: ["layout", "list", "taiga"], icon: List, run: () => setViewMode("table") },
@@ -1043,6 +1156,7 @@ export const App: React.FC = () => {
   };
 
   return (
+    <CustomListsContext.Provider value={customListsApi}>
     <div
       className="flex h-screen w-screen overflow-hidden bg-bg-primary text-text-primary select-none"
       onClick={() => setQuickMenuAnimeId(null)}
@@ -1355,13 +1469,15 @@ export const App: React.FC = () => {
                 {/* Status Tabs */}
                 <div className="flex flex-wrap items-center gap-1 bg-bg-secondary p-1 rounded-xl border border-border-subtle">
                   {STATUS_TABS.map((tab) => {
-                    const active = !isSearching && statusFilter === tab.id;
+                    const active =
+                      !isSearching && customListFilter === null && statusFilter === tab.id;
                     const count = statusCounts[tab.id] || 0;
                     return (
                       <button
                         key={tab.id}
                         onClick={() => {
                           setSearchQuery("");
+                          setCustomListFilter(null);
                           setStatusFilter(tab.id);
                         }}
                         className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 ${active
@@ -1381,6 +1497,14 @@ export const App: React.FC = () => {
                       </button>
                     );
                   })}
+                  {customListsState.names.length > 0 && (
+                    <CustomListsChip
+                      names={customListsState.names}
+                      counts={customListCounts}
+                      active={isSearching ? null : customListFilter}
+                      onSelect={openCustomList}
+                    />
+                  )}
                 </div>
 
                 {/* Search, Sort, Random & View Switcher */}
@@ -1698,6 +1822,7 @@ export const App: React.FC = () => {
             },
             onDeleteAnime: handleDeleteAnime,
             showToast,
+            customLists: customListsApi,
           })
         }
       />
@@ -1763,5 +1888,6 @@ export const App: React.FC = () => {
         </div>
       )}
     </div>
+    </CustomListsContext.Provider>
   );
 };

@@ -20,7 +20,9 @@
 //! token `pull` fails with "Not signed in to AniList". The local list belongs to one account
 //! (`Database::list_owner`): a different account signing in wipes it ([`TrackerSyncService::sign_in`]).
 
-use crate::db::{AnimeEntry, AppSettings, BatchAnimeUpdatePatch, Database};
+use crate::db::{
+    AnimeEntry, AppSettings, BatchAnimeUpdatePatch, CustomListChange, CustomListsState, Database,
+};
 use crate::detection::anisthesia::DetectedMediaSession;
 use crate::library::scanner::ScanSummary;
 use crate::plugins::{
@@ -476,6 +478,8 @@ pub struct SyncSummary {
     pub changed: Vec<AnimeEntry>,
     /// Local entry ids deleted because they are missing on the tracker.
     pub removed_ids: Vec<i64>,
+    /// Custom list names or memberships changed; the frontend refetches `get_custom_lists`.
+    pub custom_lists_changed: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -727,6 +731,33 @@ impl TrackerSyncService {
         Ok(entries)
     }
 
+    /// Add entries to / remove them from custom lists, or toggle "hidden from status lists". Changed entries
+    /// are queued like any edit (`sync_pending` + a dirty membership row) and pushed in the background when
+    /// signed in. Returns the full custom-list state.
+    pub async fn set_custom_lists(
+        self: &Arc<Self>,
+        change: CustomListChange,
+    ) -> Result<CustomListsState, String> {
+        let now = chrono::Utc::now().timestamp();
+        let (state, ids, signed_in) = self
+            .blocking(move |db| {
+                let signed_in = has_token(&db.get_settings()?);
+                let ids = db.apply_custom_list_change(&change, now)?;
+                Ok((db.get_custom_lists()?, ids, signed_in))
+            })
+            .await?;
+
+        if signed_in && !ids.is_empty() {
+            let this = Arc::clone(self);
+            tokio::spawn(async move {
+                for id in ids {
+                    this.push_entry(id).await;
+                }
+            });
+        }
+        Ok(state)
+    }
+
     /// Add an anime (e.g. from Discover). Requires an AniList id. If it is already in the list, its user
     /// state is kept and only metadata is refreshed (no push). Otherwise it is inserted with normalized
     /// status/dates and pushed. Returns the full list.
@@ -847,8 +878,13 @@ impl TrackerSyncService {
         history_id: Option<i64>,
         token: &str,
     ) -> Result<bool, TrackerError> {
-        let Ok(entry) = self
-            .blocking(move |db| db.get_anime_entry_by_id(anime_id))
+        let Ok((entry, dirty_lists)) = self
+            .blocking(move |db| {
+                Ok((
+                    db.get_anime_entry_by_id(anime_id)?,
+                    db.dirty_custom_lists(anime_id)?,
+                ))
+            })
             .await
         else {
             return Ok(false);
@@ -878,6 +914,9 @@ impl TrackerSyncService {
             notes: entry.user_notes.clone(),
             started_at: clean_opt(entry.user_started_at.as_deref()),
             completed_at: clean_opt(entry.user_completed_at.as_deref()),
+            // Membership is only sent with an unsent local edit, so AniList's stays authoritative otherwise
+            custom_lists: dirty_lists.as_ref().map(|m| m.lists.clone()),
+            hidden_from_status_lists: dirty_lists.as_ref().map(|m| m.hidden_from_status_lists),
         };
 
         let result = match self.plugin() {
@@ -894,7 +933,12 @@ impl TrackerSyncService {
                 let pushed = entry.clone();
                 let refreshed = self
                     .blocking(move |db| {
-                        db.finish_push(&pushed, remote.updated_at, remote.list_entry_id)?;
+                        db.finish_push(
+                            &pushed,
+                            remote.updated_at,
+                            remote.list_entry_id,
+                            dirty_lists.as_ref(),
+                        )?;
                         if let Some(h) = history_id {
                             db.mark_watch_history_scrobbled(h)?;
                         }
@@ -1270,15 +1314,21 @@ impl TrackerSyncService {
         }
 
         let remote_entries = snapshot.entries;
+        let custom_list_names = snapshot.custom_lists;
+        let memberships = snapshot.memberships;
         let phase = Instant::now();
-        let stats = self
+        let (stats, custom_lists_changed) = self
             .blocking(move |db| {
                 let skip: HashSet<i64> = db
                     .list_pending_deletions()?
                     .into_iter()
                     .map(|t| t.media_id)
                     .collect();
-                db.merge_remote_list(&remote_entries, &skip, true)
+                let stats = db.merge_remote_list(&remote_entries, &skip, true)?;
+                // Same guard as entry deletions: an empty remote list never wipes local memberships
+                let lists_changed = !remote_entries.is_empty()
+                    && db.merge_remote_custom_lists(&custom_list_names, &memberships)?;
+                Ok((stats, lists_changed))
             })
             .await
             .map_err(|m| PullFailure {
@@ -1374,6 +1424,7 @@ impl TrackerSyncService {
             deletion_skipped_reason: stats.deletion_skipped_reason,
             changed,
             removed_ids: stats.removed_ids,
+            custom_lists_changed,
         };
         Ok((summary, stats.rematch_ids))
     }
@@ -1700,7 +1751,11 @@ impl TrackerSyncService {
 mod tests {
     use super::*;
     use crate::db::test_entry;
-    use crate::plugins::{BoxFuture, RemoteEntryState, RemoteListSnapshot, TrackerUserProfile};
+    use crate::db::CustomListToggle;
+    use crate::plugins::{
+        BoxFuture, RemoteEntryState, RemoteListMembership, RemoteListSnapshot, TrackerUserProfile,
+    };
+    use std::collections::HashMap;
 
     const TODAY: &str = "2026-10-27";
 
@@ -1984,6 +2039,9 @@ mod tests {
         schedule_items: Mutex<Vec<AiringScheduleItem>>,
         /// `(from, to, page)` of every `fetch_airing_schedule_page` call.
         schedule_calls: Mutex<Vec<(i64, i64, u32)>>,
+        custom_lists: Mutex<Vec<String>>,
+        /// By media id.
+        memberships: Mutex<HashMap<i64, RemoteListMembership>>,
     }
 
     impl TrackerPlugin for MockTracker {
@@ -2011,6 +2069,8 @@ mod tests {
                 Ok(RemoteListSnapshot {
                     viewer_id: self.viewer_id,
                     entries: self.remote.lock().unwrap().clone(),
+                    custom_lists: self.custom_lists.lock().unwrap().clone(),
+                    memberships: self.memberships.lock().unwrap().clone(),
                 })
             })
         }
@@ -2334,6 +2394,9 @@ mod tests {
         assert_eq!(summary.deleted, 1); // entry 2
         assert_eq!(*mock.deletes.lock().unwrap(), vec![(3, Some(333))]);
         assert_eq!(mock.saves.lock().unwrap()[0].progress, 3);
+        // No local membership edit: AniList's custom lists are left alone
+        assert_eq!(mock.saves.lock().unwrap()[0].custom_lists, None);
+        assert_eq!(mock.saves.lock().unwrap()[0].hidden_from_status_lists, None);
 
         // Pushed entry: no longer pending, adopted remote updatedAt, kept local progress
         let e1 = db.get_anime_entry_by_id(1).unwrap();
@@ -2361,6 +2424,113 @@ mod tests {
         assert!(status.last_synced_at.is_some());
         assert_eq!(status.pending_count, 0);
         assert_eq!(status.pending_deletions, 0);
+    }
+
+    #[tokio::test]
+    async fn custom_lists_pull_diff_only_edit_push_and_keep_unsent_edits() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        sign_in(&db, 42);
+        let mock = Arc::new(MockTracker {
+            viewer_id: 42,
+            ..Default::default()
+        });
+        let mut a = test_entry(1, "Alpha");
+        a.updated_at = 1_000;
+        let mut b = test_entry(2, "Beta");
+        b.updated_at = 1_000;
+        *mock.remote.lock().unwrap() = vec![a, b];
+        *mock.custom_lists.lock().unwrap() = vec!["Favs".into(), "Later".into()];
+        mock.memberships.lock().unwrap().insert(
+            1,
+            RemoteListMembership {
+                lists: vec!["Favs".into()],
+                hidden_from_status_lists: false,
+            },
+        );
+        let (svc, _events) = service(db.clone(), mock.clone());
+
+        let summary = svc.pull("startup").await.unwrap();
+        assert!(summary.custom_lists_changed);
+        let state = db.get_custom_lists().unwrap();
+        assert_eq!(state.names, vec!["Favs", "Later"]);
+        assert_eq!(state.members.len(), 1);
+        assert_eq!(state.members[0].anime_id, 1);
+        assert_eq!(state.members[0].lists, vec!["Favs"]);
+
+        // Nothing changed remotely: nothing to write
+        let summary = svc.pull("manual").await.unwrap();
+        assert!(!summary.custom_lists_changed);
+        assert!(summary.changed.is_empty());
+
+        // Unknown list names are rejected
+        let bad = CustomListChange {
+            anime_ids: vec![2],
+            toggles: vec![CustomListToggle {
+                name: "Nope".into(),
+                enabled: true,
+            }],
+            hidden_from_status_lists: None,
+        };
+        assert!(svc.set_custom_lists(bad).await.is_err());
+
+        // A local edit is queued, pushed with the full set and then no longer dirty
+        let state = svc
+            .set_custom_lists(CustomListChange {
+                anime_ids: vec![2],
+                toggles: vec![CustomListToggle {
+                    name: "Later".into(),
+                    enabled: true,
+                }],
+                hidden_from_status_lists: Some(true),
+            })
+            .await
+            .unwrap();
+        let member = state.members.iter().find(|m| m.anime_id == 2).unwrap();
+        assert_eq!(member.lists, vec!["Later"]);
+        assert!(member.hidden_from_status_lists);
+        wait_until(|| mock.saves.lock().unwrap().iter().any(|s| s.media_id == 2)).await;
+        let save = mock.saves.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(save.custom_lists, Some(vec!["Later".to_string()]));
+        assert_eq!(save.hidden_from_status_lists, Some(true));
+        wait_until(|| !db.get_anime_entry_by_id(2).unwrap().sync_pending).await;
+        assert_eq!(db.dirty_custom_lists(2).unwrap(), None);
+
+        // An unsent edit (push fails) survives a pull whose remote state differs
+        *mock.save_error.lock().unwrap() = Some(TrackerError::Network("offline".into()));
+        svc.set_custom_lists(CustomListChange {
+            anime_ids: vec![1],
+            toggles: vec![
+                CustomListToggle {
+                    name: "Favs".into(),
+                    enabled: false,
+                },
+                CustomListToggle {
+                    name: "Later".into(),
+                    enabled: true,
+                },
+            ],
+            hidden_from_status_lists: None,
+        })
+        .await
+        .unwrap();
+        svc.pull("manual").await.unwrap();
+        let state = db.get_custom_lists().unwrap();
+        let m1 = state.members.iter().find(|m| m.anime_id == 1).unwrap();
+        assert_eq!(m1.lists, vec!["Later"]);
+        assert!(db.dirty_custom_lists(1).unwrap().is_some());
+        assert!(db.get_anime_entry_by_id(1).unwrap().sync_pending);
+
+        // A list deleted on AniList drops out of unsent edits; removed from every list = not hidden
+        *mock.custom_lists.lock().unwrap() = vec!["Favs".into()];
+        mock.memberships.lock().unwrap().remove(&1);
+        svc.pull("manual").await.unwrap();
+        let state = db.get_custom_lists().unwrap();
+        assert_eq!(state.names, vec!["Favs"]);
+        assert!(state.members.iter().all(|m| m.anime_id != 1));
+        assert_eq!(
+            db.dirty_custom_lists(1).unwrap().map(|m| m.lists),
+            Some(Vec::<String>::new())
+        );
     }
 
     fn insert_local_file(db: &Database, file: &str, title: &str, ep: u32, matched: Option<i64>) {

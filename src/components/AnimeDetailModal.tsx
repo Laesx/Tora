@@ -15,10 +15,13 @@ import {
   Save,
   Film,
   Tag,
+  ListChecks,
 } from "lucide-react";
 import { AnimeEntry, LocalEpisodeFile } from "../types";
 import { formatBytes, formatCountdown, getOptimizedCoverUrl, toraApi } from "../api";
 import { open } from "@tauri-apps/plugin-dialog";
+import { useCustomLists } from "../customLists";
+import { CustomListsPanel } from "./CustomListsPanel";
 
 interface AnimeDetailModalProps {
   anime: AnimeEntry;
@@ -42,6 +45,7 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
   onSearchTorrents,
   showToast,
 }) => {
+  const customListNames = useCustomLists().names;
   const [status, setStatus] = useState(anime.user_status);
   const [progress, setProgress] = useState(anime.user_progress);
   const [score, setScore] = useState(anime.user_score);
@@ -572,6 +576,17 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
                   />
                 </div>
               </div>
+
+              {/* AniList custom lists (hidden when the user has none) */}
+              {customListNames.length > 0 && (
+                <div className="space-y-2">
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-text-secondary flex items-center gap-2">
+                    <ListChecks className="w-4 h-4 text-accent" />
+                    Custom Lists
+                  </h3>
+                  <CustomListsPanel animeIds={[anime.id]} variant="chips" showToast={showToast} />
+                </div>
+              )}
 
               {/* Interactive Episode Availability Grid */}
               <div className="space-y-2.5">

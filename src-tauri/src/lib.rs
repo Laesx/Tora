@@ -6,7 +6,8 @@ pub mod sync;
 pub mod torrents;
 
 use crate::db::{
-    AnimeEntry, AppSettings, BatchAnimeUpdatePatch, CachedSeason, Database, LibraryFolder,
+    AnimeEntry, AppSettings, BatchAnimeUpdatePatch, CachedSeason, CustomListChange,
+    CustomListsState, Database, LibraryFolder,
     LocalEpisodeFile, TorrentRule, WatchHistoryEntry,
 };
 use crate::detection::anisthesia::{detect_active_media_player, DetectedMediaSession};
@@ -96,6 +97,22 @@ async fn batch_update_anime_entries(
     patch: BatchAnimeUpdatePatch,
 ) -> Result<Vec<AnimeEntry>, String> {
     state.sync.apply_batch(patch).await
+}
+
+#[tauri::command]
+async fn get_custom_lists(state: State<'_, AppState>) -> Result<CustomListsState, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || db.get_custom_lists())
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn set_anime_custom_lists(
+    state: State<'_, AppState>,
+    change: CustomListChange,
+) -> Result<CustomListsState, String> {
+    state.sync.set_custom_lists(change).await
 }
 
 #[tauri::command]
@@ -1341,6 +1358,8 @@ pub fn run() {
             get_anime_list,
             update_anime_entry,
             batch_update_anime_entries,
+            get_custom_lists,
+            set_anime_custom_lists,
             batch_delete_anime_entries,
             add_or_upsert_anime,
             delete_anime_entry,

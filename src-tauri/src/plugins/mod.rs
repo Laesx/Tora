@@ -105,6 +105,12 @@ pub struct TrackerEntryUpdate {
     pub started_at: Option<String>,
     /// `YYYY-MM-DD`; `None` clears the date on the tracker.
     pub completed_at: Option<String>,
+    /// Full set of custom lists the entry is in. `None` leaves the tracker's membership unchanged.
+    #[serde(default)]
+    pub custom_lists: Option<Vec<String>>,
+    /// `None` leaves the tracker's flag unchanged.
+    #[serde(default)]
+    pub hidden_from_status_lists: Option<bool>,
 }
 
 /// State the tracker reports back after a successful save.
@@ -123,6 +129,20 @@ pub struct RemoteListSnapshot {
     pub viewer_id: i64,
     /// Deduplicated by media id. Each entry carries `anilist_list_entry_id` and the remote `updated_at`.
     pub entries: Vec<AnimeEntry>,
+    /// The viewer's custom list names in their own order (empty lists included).
+    #[serde(default)]
+    pub custom_lists: Vec<String>,
+    /// Custom-list membership by media id; only entries in at least one list or hidden from status lists.
+    #[serde(default)]
+    pub memberships: HashMap<i64, RemoteListMembership>,
+}
+
+/// Custom-list membership of one remote list entry.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RemoteListMembership {
+    /// Names of the custom lists the entry is in, in the viewer's list order.
+    pub lists: Vec<String>,
+    pub hidden_from_status_lists: bool,
 }
 
 /// One media tag (AniList `MediaTag`).

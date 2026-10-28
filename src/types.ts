@@ -352,6 +352,30 @@ export interface SyncSummary {
   changed: AnimeEntry[];
   // Local entry ids deleted by this sync (missing on AniList)
   removed_ids: number[];
+  // Custom list names or memberships changed: refetch getCustomLists
+  custom_lists_changed: boolean;
+}
+
+// AniList custom lists, kept apart from AnimeEntry so search and matching never see them
+export interface CustomListMember {
+  anime_id: number;
+  // In the user's list order
+  lists: string[];
+  hidden_from_status_lists: boolean;
+}
+
+export interface CustomListsState {
+  // List names in the user's AniList order
+  names: string[];
+  // Entries in at least one list or hidden from status lists
+  members: CustomListMember[];
+}
+
+// One membership edit applied to every id
+export interface CustomListChange {
+  anime_ids: number[];
+  toggles: { name: string; enabled: boolean }[];
+  hidden_from_status_lists?: boolean | null;
 }
 
 export interface SyncStatus {

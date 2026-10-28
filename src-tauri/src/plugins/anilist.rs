@@ -1,13 +1,13 @@
 use crate::db::AnimeEntry;
 use crate::plugins::{
     AiringScheduleItem, AiringSchedulePage, BoxFuture, MediaMetadata, MediaRanking, MediaTag,
-    RemoteEntryState, RemoteListSnapshot, SeasonPage, SeasonalAnime, StudioRef,
+    RemoteEntryState, RemoteListMembership, RemoteListSnapshot, SeasonPage, SeasonalAnime, StudioRef,
     TrackerEntryUpdate, TrackerError, TrackerPlugin, TrackerPluginDescriptor, TrackerUserProfile,
     MEDIA_DETAILS_CHUNK,
 };
 use reqwest::Client;
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 const ANILIST_GRAPHQL_URL: &str = "https://graphql.anilist.co";
@@ -440,6 +440,74 @@ fn snippet(text: &str) -> String {
     out
 }
 
+/// Viewer's custom anime list names in their order, from `MediaListCollection.user.mediaListOptions`.
+fn parse_custom_list_names(collection: &Value) -> Vec<String> {
+    let mut seen = HashSet::new();
+    collection
+        .pointer("/user/mediaListOptions/animeList/customLists")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(|n| n.to_string())
+                .filter(|n| !n.trim().is_empty() && seen.insert(n.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Custom-list membership of one `MediaList` node (`customLists(asArray: true)` + `hiddenFromStatusLists`).
+/// Also accepts the object form (`{ "name": bool }`). `None` when the entry is in no list and not hidden.
+fn parse_list_membership(entry_node: &Value) -> Option<RemoteListMembership> {
+    let mut lists: Vec<String> = Vec::new();
+    match entry_node.get("customLists") {
+        Some(Value::Array(arr)) => {
+            for item in arr {
+                let enabled = item.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+                if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
+                    if enabled && !lists.iter().any(|l| l == name) {
+                        lists.push(name.to_string());
+                    }
+                }
+            }
+        }
+        Some(Value::Object(map)) => {
+            for (name, enabled) in map {
+                if enabled.as_bool().unwrap_or(false) {
+                    lists.push(name.clone());
+                }
+            }
+        }
+        _ => {}
+    }
+    let hidden = entry_node
+        .get("hiddenFromStatusLists")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if lists.is_empty() && !hidden {
+        return None;
+    }
+    Some(RemoteListMembership {
+        lists,
+        hidden_from_status_lists: hidden,
+    })
+}
+
+/// Extra `SaveMediaListEntry` variable declarations and arguments for the custom-list fields that are set.
+fn save_list_extra_args(update: &TrackerEntryUpdate) -> (String, String) {
+    let mut params = String::new();
+    let mut args = String::new();
+    if update.custom_lists.is_some() {
+        params.push_str(", $customLists: [String]");
+        args.push_str(", customLists: $customLists");
+    }
+    if update.hidden_from_status_lists.is_some() {
+        params.push_str(", $hiddenFromStatusLists: Boolean");
+        args.push_str(", hiddenFromStatusLists: $hiddenFromStatusLists");
+    }
+    (params, args)
+}
+
 /// Convert `YYYY-MM-DD` into an AniList `FuzzyDateInput`. `None` / invalid → all-null (clears the date).
 fn fuzzy_date_input(date: Option<&str>) -> Value {
     let parsed = date
@@ -840,6 +908,13 @@ impl TrackerPlugin for AniListPlugin {
                 r#"
                 query ($userId: Int) {{
                     MediaListCollection(userId: $userId, type: ANIME) {{
+                        user {{
+                            mediaListOptions {{
+                                animeList {{
+                                    customLists
+                                }}
+                            }}
+                        }}
                         lists {{
                             name
                             isCustomList
@@ -850,6 +925,8 @@ impl TrackerPlugin for AniListPlugin {
                                 progress
                                 repeat
                                 notes
+                                hiddenFromStatusLists
+                                customLists(asArray: true)
                                 startedAt {{
                                     year
                                     month
@@ -880,8 +957,10 @@ impl TrackerPlugin for AniListPlugin {
                 .filter(|c| !c.is_null())
                 .ok_or_else(|| TrackerError::Api("AniList returned no MediaListCollection".into()))?;
 
+            let custom_lists = parse_custom_list_names(collection);
             let mut seen: HashSet<i64> = HashSet::new();
             let mut entries = Vec::new();
+            let mut memberships: HashMap<i64, RemoteListMembership> = HashMap::new();
             if let Some(lists) = collection.get("lists").and_then(|l| l.as_array()) {
                 // Standard status lists first so the canonical entry wins over custom-list duplicates.
                 let mut ordered: Vec<&Value> = lists.iter().collect();
@@ -901,13 +980,23 @@ impl TrackerPlugin for AniListPlugin {
                         };
                         if let Some(parsed) = Self::parse_media_node(media, Some(entry_node)) {
                             if seen.insert(parsed.id) {
+                                if let (Some(media_id), Some(membership)) =
+                                    (parsed.anilist_id, parse_list_membership(entry_node))
+                                {
+                                    memberships.insert(media_id, membership);
+                                }
                                 entries.push(parsed);
                             }
                         }
                     }
                 }
             }
-            Ok(RemoteListSnapshot { viewer_id, entries })
+            Ok(RemoteListSnapshot {
+                viewer_id,
+                entries,
+                custom_lists,
+                memberships,
+            })
         })
     }
 
@@ -1144,7 +1233,10 @@ impl TrackerPlugin for AniListPlugin {
                     "AniList OAuth token is required to push updates to AniList.".into(),
                 ));
             }
-            let mutation = r#"
+            // Custom-list arguments only when set: an omitted argument leaves AniList's membership alone
+            let (list_params, list_args) = save_list_extra_args(update);
+            let mutation = format!(
+                r#"
                 mutation (
                     $mediaId: Int,
                     $status: MediaListStatus,
@@ -1153,8 +1245,8 @@ impl TrackerPlugin for AniListPlugin {
                     $repeat: Int,
                     $notes: String,
                     $startedAt: FuzzyDateInput,
-                    $completedAt: FuzzyDateInput
-                ) {
+                    $completedAt: FuzzyDateInput{list_params}
+                ) {{
                     SaveMediaListEntry(
                         mediaId: $mediaId,
                         status: $status,
@@ -1163,17 +1255,18 @@ impl TrackerPlugin for AniListPlugin {
                         repeat: $repeat,
                         notes: $notes,
                         startedAt: $startedAt,
-                        completedAt: $completedAt
-                    ) {
+                        completedAt: $completedAt{list_args}
+                    ) {{
                         id
                         status
                         progress
                         updatedAt
-                    }
-                }
-            "#;
+                    }}
+                }}
+            "#
+            );
 
-            let vars = json!({
+            let mut vars = json!({
                 "mediaId": update.media_id,
                 "status": update.status,
                 "progress": update.progress,
@@ -1183,8 +1276,14 @@ impl TrackerPlugin for AniListPlugin {
                 "startedAt": fuzzy_date_input(update.started_at.as_deref()),
                 "completedAt": fuzzy_date_input(update.completed_at.as_deref()),
             });
+            if let Some(lists) = &update.custom_lists {
+                vars["customLists"] = json!(lists);
+            }
+            if let Some(hidden) = update.hidden_from_status_lists {
+                vars["hiddenFromStatusLists"] = json!(hidden);
+            }
 
-            let data = self.graphql_request(mutation, vars, Some(token)).await?;
+            let data = self.graphql_request(&mutation, vars, Some(token)).await?;
             let saved = data
                 .get("SaveMediaListEntry")
                 .filter(|v| !v.is_null())
@@ -1274,6 +1373,65 @@ impl TrackerPlugin for AniListPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_custom_list_names_and_membership() {
+        let collection = json!({
+            "user": { "mediaListOptions": { "animeList": { "customLists": ["Favs", "Empty", "Favs", ""] } } },
+            "lists": []
+        });
+        assert_eq!(parse_custom_list_names(&collection), vec!["Favs", "Empty"]);
+        assert!(parse_custom_list_names(&json!({ "user": null })).is_empty());
+
+        let entry = json!({
+            "customLists": [{ "name": "Favs", "enabled": true }, { "name": "Empty", "enabled": false }],
+            "hiddenFromStatusLists": false
+        });
+        assert_eq!(
+            parse_list_membership(&entry),
+            Some(RemoteListMembership {
+                lists: vec!["Favs".into()],
+                hidden_from_status_lists: false
+            })
+        );
+        let hidden_only = json!({ "customLists": [], "hiddenFromStatusLists": true });
+        assert_eq!(
+            parse_list_membership(&hidden_only),
+            Some(RemoteListMembership {
+                lists: vec![],
+                hidden_from_status_lists: true
+            })
+        );
+        let object_form = json!({ "customLists": { "Favs": true, "Empty": false } });
+        assert_eq!(parse_list_membership(&object_form).unwrap().lists, vec!["Favs"]);
+        assert_eq!(
+            parse_list_membership(&json!({ "customLists": [{ "name": "Favs", "enabled": false }] })),
+            None
+        );
+        assert_eq!(parse_list_membership(&json!({ "customLists": null })), None);
+    }
+
+    #[test]
+    fn save_mutation_sends_custom_lists_only_when_set() {
+        let mut update = TrackerEntryUpdate {
+            media_id: 1,
+            status: "CURRENT".into(),
+            progress: 0,
+            score: 0.0,
+            repeat: 0,
+            notes: String::new(),
+            started_at: None,
+            completed_at: None,
+            custom_lists: None,
+            hidden_from_status_lists: None,
+        };
+        assert_eq!(save_list_extra_args(&update), (String::new(), String::new()));
+        update.custom_lists = Some(vec!["Favs".into()]);
+        update.hidden_from_status_lists = Some(true);
+        let (params, args) = save_list_extra_args(&update);
+        assert!(params.contains("$customLists: [String]") && params.contains("$hiddenFromStatusLists: Boolean"));
+        assert!(args.contains("customLists: $customLists") && args.contains("hiddenFromStatusLists: $hiddenFromStatusLists"));
+    }
 
     #[test]
     fn classify_maps_http_and_graphql_errors() {

@@ -11,8 +11,12 @@ import {
   ExternalLink,
   Copy,
   Trash2,
+  ListChecks,
+  Check,
+  EyeOff,
 } from "lucide-react";
 import { AnimeEntry, BatchAnimeUpdatePatch } from "./types";
+import { CustomListsApi } from "./customLists";
 import {
   anilistAnimeUrl,
   openAnimeFolder,
@@ -49,6 +53,50 @@ export interface AnimeActionHandlers {
   onSearchTorrents: (query: string) => void;
   onDeleteAnime: (anime: AnimeEntry) => void;
   showToast: ShowToast;
+  /** AniList custom lists; the submenu is left out when the user has none */
+  customLists?: CustomListsApi;
+}
+
+/** "Custom Lists" submenu: toggle each list, then hide from / show in status lists. */
+function customListsAction(anime: AnimeEntry, h: AnimeActionHandlers): AnimeAction | null {
+  const api = h.customLists;
+  if (!api || api.names.length === 0) return null;
+  const member = api.membership(anime.id);
+  const inLists = member?.lists ?? [];
+  const apply = (change: Parameters<CustomListsApi["apply"]>[0]) =>
+    void api
+      .apply(change)
+      .catch((err) => h.showToast(`Couldn't update custom lists: ${String(err)}`, "error"));
+  const children: AnimeAction[] = api.names.map((name) => {
+    const on = inLists.includes(name);
+    return {
+      id: `custom-list-${name}`,
+      label: on ? `Remove from ${name}` : `Add to ${name}`,
+      icon: on ? Check : Plus,
+      iconClass: on ? "text-accent" : undefined,
+      hint: on ? "In list" : undefined,
+      run: () => apply({ anime_ids: [anime.id], toggles: [{ name, enabled: !on }] }),
+    };
+  });
+  if (inLists.length > 0) {
+    const hidden = member?.hidden_from_status_lists ?? false;
+    children.push({
+      id: "custom-list-hidden",
+      label: hidden ? "Show in Status Lists" : "Hide from Status Lists",
+      icon: EyeOff,
+      iconClass: hidden ? "text-accent" : undefined,
+      run: () =>
+        apply({ anime_ids: [anime.id], toggles: [], hidden_from_status_lists: !hidden }),
+    });
+  }
+  return {
+    id: "custom-lists",
+    label: "Custom Lists",
+    icon: ListChecks,
+    iconClass: "text-accent",
+    hint: inLists.length > 0 ? inLists.join(", ") : undefined,
+    children,
+  };
 }
 
 export async function copyAnimeTitle(anime: AnimeEntry, showToast: ShowToast) {
@@ -75,6 +123,8 @@ export function buildAnimeActions(
   const hasFolderOrFiles =
     Boolean(anime.custom_folder?.trim()) || anime.local_episode_count > 0;
   const progress = `Ep ${anime.user_progress}/${anime.episodes ?? "?"}`;
+
+  const customLists = customListsAction(anime, h);
 
   return [
     {
@@ -155,6 +205,7 @@ export function buildAnimeActions(
           ),
       })),
     },
+    ...(customLists ? [customLists] : []),
     {
       id: "edit-details",
       label: "Edit Details...",

@@ -23,10 +23,13 @@ import {
   PauseCircle,
   XCircle,
   RotateCcw,
+  ListChecks,
 } from "lucide-react";
 import { AnimeEntry, BatchAnimeUpdatePatch } from "../types";
 import { getOptimizedCoverUrl } from "../api";
 import { openAnimeFolder, playLocalEpisode } from "../nowPlaying";
+import { useCustomLists } from "../customLists";
+import { CustomListsPanel } from "./CustomListsPanel";
 
 interface AnimeQuickMenuProps {
   anime: AnimeEntry;
@@ -58,7 +61,8 @@ type ActiveInlinePanel =
   | "date_started"
   | "date_completed"
   | "score"
-  | "progress";
+  | "progress"
+  | "custom_lists";
 
 export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
   anime,
@@ -97,6 +101,9 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
   const [progressValue, setProgressValue] = useState<number>(
     !isMultiSelect ? anime.user_progress : 0
   );
+
+  const customLists = useCustomLists();
+  const customListNames = customLists.names;
 
   const togglePanel = (panel: ActiveInlinePanel) => {
     setActivePanel((prev) => (prev === panel ? null : panel));
@@ -287,6 +294,24 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
               <span>Mark Completed & Max Episodes</span>
             </span>
           </button>
+          {customListNames.length > 0 && (
+            <>
+              <button onClick={() => togglePanel("custom_lists")} className={itemClass}>
+                <span className="flex items-center gap-2">
+                  <ListChecks className="w-3.5 h-3.5 text-accent" />
+                  <span>Custom Lists...</span>
+                </span>
+                {activePanel === "custom_lists" ? (
+                  <ChevronDown className="w-3.5 h-3.5 text-text-muted" />
+                ) : (
+                  <ChevronRight className="w-3.5 h-3.5 text-text-muted" />
+                )}
+              </button>
+              {activePanel === "custom_lists" && (
+                <CustomListsPanel animeIds={targetIds} variant="menu" showToast={showToast} />
+              )}
+            </>
+          )}
         </div>
 
         <div className="border-t border-border-subtle my-0.5" />
@@ -861,6 +886,23 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
               );
             })}
           </div>
+        )}
+
+        {customListNames.length > 0 && (
+          <>
+            <button onClick={() => togglePanel("custom_lists")} className={itemClass}>
+              <span className="flex items-center gap-2">
+                <ListChecks className="w-3.5 h-3.5 text-accent" />
+                <span>Custom Lists...</span>
+              </span>
+              <span className="font-mono text-[10px] text-text-muted">
+                {customLists.membership(anime.id)?.lists.length || ""}
+              </span>
+            </button>
+            {activePanel === "custom_lists" && (
+              <CustomListsPanel animeIds={[anime.id]} variant="menu" showToast={showToast} />
+            )}
+          </>
         )}
 
         <button onClick={() => togglePanel("date_started")} className={itemClass}>
