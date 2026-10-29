@@ -203,11 +203,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     <button
                       key={l.id}
                       onClick={() => onUpdateSettings({ ...settings, title_language: l.id })}
-                      className={`px-3 py-1 rounded-lg text-xs font-semibold transition ${
-                        (settings.title_language ?? "romaji") === l.id
+                      className={`px-3 py-1 rounded-lg text-xs font-semibold transition ${(settings.title_language ?? "romaji") === l.id
                           ? "bg-accent text-white"
                           : "text-text-secondary hover:text-text-primary"
-                      }`}
+                        }`}
                     >
                       {l.label}
                     </button>
@@ -452,7 +451,7 @@ const AboutSection: React.FC<{
     <>
       <div className="bg-bg-secondary border border-border-subtle rounded-2xl p-5 flex items-center gap-4">
         <div className="w-16 h-16 rounded-2xl bg-accent/15 border border-accent/30 flex items-center justify-center text-3xl font-black text-accent shrink-0">
-          \u864e
+          虎
         </div>
         <div className="min-w-0">
           <h2 className="text-lg font-bold text-text-primary">

@@ -20,7 +20,7 @@ function airingLabel(anime: AiringFields): string {
 }
 
 /**
- * Marks an anime that is currently airing (filled dot) or not aired yet (hollow ring).
+ * Marks an anime that is currently airing (green dot) or not aired yet (red dot).
  * `onCover` adds a dark ring so it reads on top of cover art.
  */
 export const AiringDot: React.FC<{
@@ -33,9 +33,7 @@ export const AiringDot: React.FC<{
   if (!airing && anime.airing_status !== "NOT_YET_RELEASED") return null;
   const label = airingLabel(anime);
   const dim = size === "sm" ? "w-2 h-2" : "w-2.5 h-2.5";
-  const fill = airing
-    ? "bg-emerald-400"
-    : `border-[1.5px] border-emerald-400 ${onCover ? "bg-black/60" : "bg-transparent"}`;
+  const fill = airing ? "bg-emerald-400" : "bg-red-500";
   return (
     <span
       title={label}
