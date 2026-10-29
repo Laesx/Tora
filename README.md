@@ -9,7 +9,7 @@ A fast desktop anime manager inspired by [Taiga](https://github.com/erengy/taiga
 > 
 > The initial list download will take long (upwards of a minute or so) since it has to pull a lot of details.
 
-<!-- ![Tora](docs/screenshots/overview.png) -->
+<!-- ![Tora](docs/screenshots/overview.jpg) -->
 
 ## Compared to Taiga
 
@@ -47,7 +47,7 @@ What you give up:
 - **Battle-tested filename parsing.** We also use [Anitomy](https://github.com/erengy/anitomy), Taiga's filename parser, with some extra fuzzy matching on top.
 - **Sequel episode numbering.** Continuous episode numbers (e.g. `Kusuriya no Hitorigoto - 51`) are redirected to the right season using [anime-relations](https://github.com/erengy/anime-relations).
 
-<!-- ![Now Playing](docs/screenshots/now-playing.png) -->
+<img src="docs/screenshots/now_playing.jpg" alt="Now Playing" width="700" />
 
 ### Library
 
@@ -55,23 +55,26 @@ What you give up:
 - **Live folder watching.** New, renamed and deleted files show up instantly, with no polling.
 - **Folder and alias linking.** Episodes are matched by title, synonyms or folder name. Anything it can't match can be linked by hand once, and the rest of the episodes follow.
 
-<!-- ![Library](docs/screenshots/library.png) -->
-
 ### AniList
 
 - Two-way sync of progress, status, score, dates, rewatches, notes and custom lists.
 - Changes made offline are queued and sent on the next sign-in.
 
-<!-- ![Anime list](docs/screenshots/anime-list.png) -->
-<!-- ![Anime details](docs/screenshots/anime-details.png) -->
+<img src="docs/screenshots/library.jpg" alt="Library" width="700" />
+
+<img src="docs/screenshots/detail_screen.jpg" alt="Anime details" width="700" />
+
+<!-- ![Anime list](docs/screenshots/anime-list.jpg)
+![Anime details](docs/screenshots/anime-details.jpg) -->
 
 ### Seasons and schedule
 
 - Seasonal browser with sorting, grouping and format filters.
 - Weekly airing schedule with countdowns, filtered to your list or all anime.
 
-<!-- ![Seasons](docs/screenshots/seasons.png) -->
-<!-- ![Schedule](docs/screenshots/schedule.png) -->
+<img src="docs/screenshots/seasons.jpg" alt="Seasons" width="700" />
+
+<img src="docs/screenshots/schedule.jpg" alt="Schedule" width="700" />
 
 ### Torrents
 
@@ -79,7 +82,7 @@ What you give up:
 - One card per anime, with the best release picked automatically from your priority tiers, preferred fansubs and filters.
 - Downloads are sent to your torrent client like Taiga does (qBittorrent gets a per-anime save folder and category).
 
-<!-- ![Torrents](docs/screenshots/torrents.png) -->
+<img src="docs/screenshots/torrent_page.jpg" alt="Torrents" width="700" />
 
 ### Everything else
 
@@ -88,8 +91,8 @@ What you give up:
 - `Ctrl+K` command palette.
 - 6 themes plus custom accent colors.
 
-<!-- ![History](docs/screenshots/history.png) -->
-<!-- ![Stats](docs/screenshots/stats.png) -->
+<!-- ![History](docs/screenshots/history.jpg) -->
+<img src="docs/screenshots/stats.jpg" alt="Stats" width="700" />
 
 
 
