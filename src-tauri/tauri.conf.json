@@ -13,8 +13,8 @@
     "windows": [
       {
         "title": "Tora — Anime Library & Tracker",
-        "width": 1380,
-        "height": 880,
+        "width": 1920,
+        "height": 1080,
         "minWidth": 1024,
         "minHeight": 640,
         "resizable": true,

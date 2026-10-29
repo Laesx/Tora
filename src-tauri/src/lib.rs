@@ -339,25 +339,37 @@ async fn bind_title_alias(
 
 #[tauri::command]
 async fn play_episode_file(state: State<'_, AppState>, file_path: String) -> Result<String, String> {
-    let settings = state.db.get_settings()?;
-    let custom_player = settings.custom_media_player_path.trim();
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let settings = db.get_settings()?;
+        let custom_player = settings.custom_media_player_path.trim();
 
-    if !custom_player.is_empty() {
-        Command::new(custom_player)
-            .arg(&file_path)
-            .spawn()
-            .map_err(|e| format!("Failed to launch custom media player: {}", e))?;
-    } else {
-        #[cfg(windows)]
-        {
-            Command::new("cmd")
-                .args(["/C", "start", "", &file_path])
+        if !custom_player.is_empty() {
+            Command::new(custom_player)
+                .arg(&file_path)
                 .spawn()
-                .map_err(|e| format!("Failed to open file with system player: {}", e))?;
+                .map_err(|e| format!("Failed to launch custom media player: {}", e))?;
+        } else if let Err(e) = tauri_plugin_opener::open_path(&file_path, None::<&str>) {
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                const CREATE_NO_WINDOW: u32 = 0x08000000;
+                Command::new("cmd")
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .args(["/C", "start", "", &file_path])
+                    .spawn()
+                    .map_err(|err| format!("Failed to open file with system player: {} (opener error: {})", err, e))?;
+            }
+            #[cfg(not(windows))]
+            {
+                return Err(format!("Failed to open file with system player: {}", e));
+            }
         }
-    }
 
-    Ok(format!("Playing {}", file_path))
+        Ok(format!("Playing {}", file_path))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
