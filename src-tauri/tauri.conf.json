@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Tora — Anime Library & Tracker",
+        "title": "Tora",
         "width": 1920,
         "height": 1080,
         "minWidth": 1024,

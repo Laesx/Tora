@@ -17,33 +17,6 @@
 
 <!-- ![Tora](docs/screenshots/overview.jpg) -->
 
-## Compared to Taiga
-
-Tora uses the same detection and parsing libraries as Taiga, so recognition should work just as well. The main differences:
-
-- **Fuzzy matching.** Titles that don't match exactly (typos, abbreviations, missing words) are still recognized, without crossing into the wrong season.
-- **AniList custom lists.** Read, edited and synced like the regular status lists.
-- **Weekly schedule.** A timetable of what airs each day, with countdowns and breaks marked.
-- **Smarter torrents.** Several feeds checked at once, one card per anime instead of a flat list of releases, and priority tiers to decide which release gets picked.
-- **Modern interface.** Dark themes, a command palette, fuzzy search and stats with an activity heatmap.
-
-What you give up:
-
-- **Fewer trackers.** Only AniList for now (no MyAnimeList or Kitsu).
-- **Heavier.** Tora runs on WebView2, so it uses more memory than Taiga. (Around 300MB total)
-
-
-## Roadmap
-
-- [ ] Add support for Linux and MacOS once it's stable on Windows (the entire auto detection system will be different for these two).
-- [ ] Overhaul the search tab with every option the API provides
-- [ ] Add the app to the system tray.
-- [ ] Make the command palette accessible anywhere in the system with a shorcut so you can quick search anime from anywhere.
-- [ ] Add system notifications when an episode airs (or is available to download).
-- [ ] Add keyboard shortcuts throughout the application.
-- [ ] Improve keyboard navigation throughout the app.
-- [ ] Add support for MyAnimeList and Kitsu (this is low priority and will take a while since it's coupled pretty hard to Anilist currently).
-
 
 ## Features
 
@@ -101,6 +74,32 @@ What you give up:
 <img src="docs/screenshots/stats.jpg" alt="Stats" width="700" />
 
 
+## Compared to Taiga
+
+Tora uses the same detection and parsing libraries as Taiga, so recognition should work just as well. The main differences:
+
+- **Fuzzy matching.** Titles that don't match exactly (typos, abbreviations, missing words) are still recognized, without crossing into the wrong season.
+- **AniList custom lists.** Read, edited and synced like the regular status lists.
+- **Weekly schedule.** A timetable of what airs each day, with countdowns and breaks marked.
+- **Smarter torrents.** Several feeds checked at once, one card per anime instead of a flat list of releases, and priority tiers to decide which release gets picked.
+- **Modern interface.** Dark themes, a command palette, fuzzy search and stats with an activity heatmap.
+
+What you give up:
+
+- **Fewer trackers.** Only AniList for now (no MyAnimeList or Kitsu).
+- **Heavier.** Tora runs on WebView2, so it uses more memory than Taiga. (Around 300MB total)
+
+
+## Roadmap
+
+- [ ] Add support for Linux and MacOS once it's stable on Windows (the entire auto detection system will be different for these two).
+- [ ] Overhaul the search tab with every option the API provides
+- [ ] Add the app to the system tray.
+- [ ] Make the command palette accessible anywhere in the system with a shorcut so you can quick search anime from anywhere.
+- [ ] Add system notifications when an episode airs (or is available to download).
+- [ ] Add keyboard shortcuts throughout the application.
+- [ ] Improve keyboard navigation throughout the app.
+- [ ] Add support for MyAnimeList and Kitsu (this is low priority and will take a while since it's coupled pretty hard to Anilist currently).
 
 
 ## Building
