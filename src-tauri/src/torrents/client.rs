@@ -423,7 +423,7 @@ fn open_default(target: &str) -> Result<(), String> {
 /// Downloads a `.torrent` into `dir` (rejects HTML / error pages, like Taiga) and returns its path.
 pub async fn download_torrent_file(url: &str, title: &str, dir: &Path) -> Result<PathBuf, String> {
     let client = reqwest::Client::builder()
-        .user_agent("Tora/0.1.0 (Anime Library Manager)")
+        .user_agent(crate::USER_AGENT)
         .timeout(std::time::Duration::from_secs(20))
         .build()
         .map_err(|e| e.to_string())?;

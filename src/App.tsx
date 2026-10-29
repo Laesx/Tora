@@ -14,6 +14,9 @@ import { Sidebar } from "@/app/Sidebar";
 import { NowPlayingBanner } from "@/app/NowPlayingBanner";
 import { SignOutModal } from "@/app/SignOutModal";
 import { ShortcutsModal } from "@/app/ShortcutsModal";
+import { ChangelogModal } from "@/app/ChangelogModal";
+import { UpdatePromptModal } from "@/app/UpdatePromptModal";
+import { useAppUpdater } from "@/app/useAppUpdater";
 import { Toast, useToastState } from "@/app/Toast";
 import { useAnimeList } from "@/app/useAnimeList";
 import { useEpisodeStepper } from "@/app/useEpisodeStepper";
@@ -50,6 +53,7 @@ export const App: React.FC = () => {
   const titleOf = useCallback((a: AnimeEntry) => animeTitle(a, titleLanguage), [titleLanguage]);
 
   const [toast, showToast] = useToastState();
+  const updater = useAppUpdater(showToast, settings ? settings.check_updates_on_startup !== false : null);
   const list = useAnimeList(showToast, titleOf);
   const { animeList, selectedAnime, setSelectedAnime } = list;
   const stepper = useEpisodeStepper(list.replaceEntries, showToast, titleOf);
@@ -213,6 +217,7 @@ export const App: React.FC = () => {
     entrySynced: ({ entry }) => {
       if (!stepper.isPending(entry.id)) list.replaceEntries([entry]);
     },
+    relationsUpdated: ({ last_modified }) => showToast(`Anime relations updated (${last_modified})`, "success"),
   });
 
   const handleUpdateSettings = async (next: AppSettings) => {
@@ -373,6 +378,7 @@ export const App: React.FC = () => {
     paletteOpen: cmdOpen,
     signOutOpen: signOutModalOpen,
     shortcutsOpen,
+    updateModalOpen: updater.promptOpen || updater.changelogOpen,
     quickMenuOpen: list.quickMenuAnimeId !== null,
     selectedAnimeIds: list.selectedAnimeIds,
     visibleAnime: watchlist.filteredAnime,
@@ -384,6 +390,7 @@ export const App: React.FC = () => {
     togglePalette: () => setCmdOpen((prev) => !prev),
     closePalette: () => setCmdOpen(false),
     closeSignOut: () => setSignOutModalOpen(false),
+    closeUpdateModal: () => (updater.promptOpen ? updater.closePrompt() : updater.closeChangelog()),
     openShortcuts: () => setShortcutsOpen(true),
     closeShortcuts: () => setShortcutsOpen(false),
     closeQuickMenu: () => list.setQuickMenuAnimeId(null),
@@ -403,6 +410,8 @@ export const App: React.FC = () => {
     syncFromAnilist: handleSyncFromAnilist,
     openRandomAnime,
     openShortcuts: () => setShortcutsOpen(true),
+    checkForUpdates: () => void updater.checkForUpdates(true),
+    openChangelog: updater.openChangelog,
     customListNames: customLists.names,
     openCustomList: (name) => showInWatchlist(() => watchlist.showCustomList(name)),
     setViewMode,
@@ -437,6 +446,10 @@ export const App: React.FC = () => {
         onSignIn={handleStartAnilistLogin}
         onSignOut={() => setSignOutModalOpen(true)}
         onOpenProfile={handleOpenAnilistProfile}
+        version={updater.version}
+        updateDot={updater.showDot}
+        updateChecking={updater.checking}
+        onVersionClick={updater.onVersionClick}
       />
 
       <div className="flex-1 flex flex-col min-w-0 h-full overflow-hidden">
@@ -541,6 +554,9 @@ export const App: React.FC = () => {
               libraryRefreshTick={libraryRefreshTick}
               onRefreshAnimeList={list.refresh}
               sectionRequest={settingsRequest}
+              onCheckForUpdates={() => void updater.checkForUpdates(true)}
+              updateChecking={updater.checking}
+              onOpenChangelog={updater.openChangelog}
             />
           )}
         </main>
@@ -586,6 +602,28 @@ export const App: React.FC = () => {
       )}
 
       {shortcutsOpen && <ShortcutsModal onClose={() => setShortcutsOpen(false)} />}
+
+      {updater.promptOpen && updater.available && (
+        <UpdatePromptModal
+          currentVersion={updater.version}
+          newVersion={updater.available.version}
+          manifestNotes={updater.available.body}
+          progress={updater.progress}
+          onInstall={() => void updater.installUpdate()}
+          onViewChangelog={updater.openChangelog}
+          onLater={updater.closePrompt}
+        />
+      )}
+
+      {updater.changelogOpen && (
+        <ChangelogModal
+          version={updater.version}
+          availableVersion={updater.available?.version ?? null}
+          progress={updater.progress}
+          onInstall={() => void updater.installUpdate()}
+          onClose={updater.closeChangelog}
+        />
+      )}
 
       {toast && <Toast toast={toast} />}
     </div>

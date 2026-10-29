@@ -13,11 +13,14 @@ import {
   Cpu,
   HardDrive,
   FlaskConical,
+  RefreshCw,
+  ScrollText,
 } from "lucide-react";
 import {
   AnimeEntry,
   AppInfo,
   AppSettings,
+  RelationsInfo,
   TrackerPluginDescriptor,
 } from "@/lib/types";
 import { ACCENT_SWATCHES, THEME_PRESETS, applyThemeToDocument } from "@/lib/theme";
@@ -69,6 +72,10 @@ interface SettingsViewProps {
   onRefreshAnimeList: () => Promise<void>;
   /** Section to open (e.g. the Torrents tab's settings button); a new `nonce` opens it again */
   sectionRequest?: { section: SettingsSection; nonce: number } | null;
+  /** About → Updates: manual app + anime-relations check (same as clicking the sidebar version) */
+  onCheckForUpdates: () => void;
+  updateChecking: boolean;
+  onOpenChangelog: () => void;
 }
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
@@ -78,6 +85,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   libraryRefreshTick,
   onRefreshAnimeList,
   sectionRequest,
+  onCheckForUpdates,
+  updateChecking,
+  onOpenChangelog,
 }) => {
   const [plugins, setPlugins] = useState<TrackerPluginDescriptor[]>([]);
   const [section, setSection] = useState<SettingsSection>(sectionRequest?.section ?? "appearance");
@@ -420,6 +430,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
         {section === "about" && (
           <AboutSection
+            settings={settings}
+            onUpdateSettings={onUpdateSettings}
+            onCheckForUpdates={onCheckForUpdates}
+            updateChecking={updateChecking}
+            onOpenChangelog={onOpenChangelog}
             onRestored={async (restored) => {
               applyThemeToDocument(restored.theme, restored.accent_color);
               await onUpdateSettings(restored);
@@ -432,18 +447,32 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 };
 
 const AboutSection: React.FC<{
+  settings: AppSettings;
+  onUpdateSettings: (next: AppSettings) => Promise<void>;
+  onCheckForUpdates: () => void;
+  updateChecking: boolean;
+  onOpenChangelog: () => void;
   onRestored: (settings: AppSettings) => Promise<void>;
-}> = ({ onRestored }) => {
+}> = ({ settings, onUpdateSettings, onCheckForUpdates, updateChecking, onOpenChangelog, onRestored }) => {
   const showToast = useToast();
   const [version, setVersion] = useState<string | null>(null);
   const [tauriVersion, setTauriVersion] = useState<string | null>(null);
   const [info, setInfo] = useState<AppInfo | null>(null);
+  const [relations, setRelations] = useState<RelationsInfo | null>(null);
+
+  const loadRelations = () => toraApi.getRelationsInfo().then(setRelations).catch(console.error);
 
   useEffect(() => {
     getVersion().then(setVersion).catch(console.error);
     getTauriVersion().then(setTauriVersion).catch(console.error);
     toraApi.getAppInfo().then(setInfo).catch(console.error);
+    void loadRelations();
   }, []);
+
+  // A manual check also downloads newer anime relations; show the new date once it finishes.
+  useEffect(() => {
+    if (!updateChecking) void loadRelations();
+  }, [updateChecking]);
 
   const openUrl = (url: string) => toraApi.openExternalUrl(url).catch((e) => showToast(String(e), "error"));
 
@@ -462,6 +491,60 @@ const AboutSection: React.FC<{
           </p>
           {tauriVersion && <p className="text-[11px] text-text-muted mt-1">Tauri {tauriVersion}</p>}
         </div>
+      </div>
+
+      <div className="bg-bg-secondary border border-border-subtle rounded-2xl p-5 space-y-3">
+        <h3 className="text-sm font-bold text-text-primary">Updates</h3>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0 space-y-1">
+            <div className="text-[11px] text-text-muted">
+              App updates come from{" "}
+              <button
+                onClick={() => openUrl("https://github.com/Laesx/Tora/releases")}
+                className="text-accent hover:underline cursor-pointer"
+              >
+                GitHub releases
+              </button>
+              ; episode relations from erengy/anime-relations.
+            </div>
+            <div className="text-xs text-text-primary">
+              Anime relations{" "}
+              <span className="font-mono">{relations?.last_modified || "..."}</span>
+              {relations && (
+                <span className="text-[11px] text-text-muted">
+                  {" "}
+                  · {relations.rule_count} rules · {relations.source === "downloaded" ? "downloaded" : "built in"}
+                </span>
+              )}
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={onOpenChangelog}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-bg-tertiary hover:bg-bg-elevated border border-border-subtle text-text-primary text-xs font-semibold transition"
+            >
+              <ScrollText className="w-3.5 h-3.5" />
+              Changelog
+            </button>
+            <button
+              onClick={onCheckForUpdates}
+              disabled={updateChecking}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-accent hover:bg-accent-hover text-white text-xs font-semibold transition disabled:opacity-60"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${updateChecking ? "animate-spin" : ""}`} />
+              {updateChecking ? "Checking…" : "Check for updates"}
+            </button>
+          </div>
+        </div>
+        <label className="flex items-center gap-2 text-xs text-text-secondary cursor-pointer">
+          <input
+            type="checkbox"
+            checked={settings.check_updates_on_startup}
+            onChange={(e) => void onUpdateSettings({ ...settings, check_updates_on_startup: e.target.checked })}
+            className="rounded accent-accent"
+          />
+          Check for updates on startup (app and anime relations)
+        </label>
       </div>
 
       <div className="bg-bg-secondary border border-border-subtle rounded-2xl p-5 space-y-3">

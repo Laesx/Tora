@@ -308,6 +308,9 @@ pub struct AppSettings {
     /// Has a serde default so settings saved before it existed still deserialize.
     #[serde(default = "default_title_language")]
     pub title_language: String,
+    /// Check GitHub for a new Tora release and a newer `anime-relations.txt` on startup.
+    #[serde(default = "default_true")]
+    pub check_updates_on_startup: bool,
     /// Set when the stored settings were unreadable and defaults are in use (never read back from JSON).
     #[serde(default, skip_deserializing)]
     pub settings_recovered: bool,
@@ -351,6 +354,7 @@ impl Default for AppSettings {
             torrent_auto_download: false,
             players: default_players(),
             title_language: default_title_language(),
+            check_updates_on_startup: true,
             settings_recovered: false,
         }
     }

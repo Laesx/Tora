@@ -20,6 +20,12 @@ interface SidebarProps {
   onSignIn: () => void;
   onSignOut: () => void;
   onOpenProfile: () => void;
+  /** Running app version (empty until known) */
+  version: string;
+  /** Unseen changelog or a postponed update: the version badge shows a dot and opens the changelog */
+  updateDot: boolean;
+  updateChecking: boolean;
+  onVersionClick: () => void;
 }
 
 const navClass = (active: boolean) =>
@@ -61,6 +67,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onSignIn,
   onSignOut,
   onOpenProfile,
+  version,
+  updateDot,
+  updateChecking,
+  onVersionClick,
 }) => (
   <aside className="w-60 bg-bg-secondary border-r border-border-subtle flex flex-col justify-between shrink-0">
     <div className="p-4 space-y-5">
@@ -70,7 +80,17 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <img src={toraMark} alt="" className="w-9 h-9 shrink-0" draggable={false} />
           <div className="font-extrabold text-sm tracking-tight text-text-primary flex items-center gap-1.5">
             TORA
-            <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-accent/15 text-accent">v0.1</span>
+            <button
+              onClick={onVersionClick}
+              disabled={updateChecking}
+              className={`relative text-[10px] font-mono px-1.5 py-0.2 rounded bg-accent/15 text-accent hover:bg-accent/25 transition cursor-pointer disabled:cursor-default ${updateChecking ? "animate-pulse" : ""}`}
+              title={updateDot ? "What's new: open the changelog" : updateChecking ? "Checking for updates…" : "Check for updates"}
+            >
+              v{version || "…"}
+              {updateDot && (
+                <span className="absolute -top-1 -right-1 w-2 h-2 rounded-full bg-accent ring-2 ring-bg-secondary" />
+              )}
+            </button>
           </div>
         </div>
 

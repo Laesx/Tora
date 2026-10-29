@@ -4,6 +4,7 @@ pub mod library;
 pub mod plugins;
 pub mod sync;
 pub mod torrents;
+pub mod updates;
 
 use crate::db::{
     AnimeEntry, AppSettings, BatchAnimeUpdatePatch, CachedSeason, CustomListChange,
@@ -25,6 +26,7 @@ use crate::torrents::config::{
 };
 use crate::torrents::query::{ParsedQuery, Query};
 use crate::torrents::{BoardSource, DownloadRequest, DownloadSummary, TorrentCache};
+use crate::updates::{RelationsInfo, ReleaseNote};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::process::Command;
@@ -32,6 +34,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager, State};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+/// HTTP user agent for every request Tora makes (AniList, feeds, .torrent downloads, GitHub).
+pub const USER_AGENT: &str = concat!("Tora/", env!("CARGO_PKG_VERSION"), " (Anime Library Manager)");
 
 pub struct AppState {
     pub db: Arc<Database>,
@@ -1140,6 +1145,34 @@ fn ensure_library_folder(db: &Database, monitor: &LibraryMonitorHandle, folder: 
     }
 }
 
+/// Download `anime-relations.txt` from GitHub and hot-swap it when newer. Emits `relations-updated`.
+async fn run_relations_update(app: &tauri::AppHandle) -> Result<Option<String>, String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let updated = updates::update_relations(data_dir).await?;
+    if let Some(date) = &updated {
+        let _ = app.emit("relations-updated", serde_json::json!({ "last_modified": date }));
+    }
+    Ok(updated)
+}
+
+#[tauri::command]
+async fn check_relations_update(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    run_relations_update(&app).await
+}
+
+#[tauri::command]
+async fn get_relations_info() -> Result<RelationsInfo, String> {
+    tokio::task::spawn_blocking(updates::relations_info)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Published Tora releases from GitHub (changelog modal).
+#[tauri::command]
+async fn get_changelog() -> Result<Vec<ReleaseNote>, String> {
+    updates::fetch_changelog().await
+}
+
 #[tauri::command]
 async fn open_external_url(url: String) -> Result<(), String> {
     if tauri_plugin_opener::open_url(&url, None::<&str>).is_ok() {
@@ -1486,6 +1519,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             let app_data = app
                 .path()
@@ -1497,6 +1532,12 @@ pub fn run() {
             if let Err(e) = db.backup_settings_if_changed(None) {
                 eprintln!("[settings] startup backup failed: {}", e);
             }
+            // A newer anime-relations downloaded on a previous run, before anything parses filenames.
+            updates::load_cached_relations(&app_data);
+            let check_updates = db
+                .get_settings()
+                .map(|s| s.check_updates_on_startup)
+                .unwrap_or(true);
             let torrent_cache = Arc::new(TorrentCache::new(app_data.join("torrents")));
             let plugins = Arc::new(PluginManager::new());
 
@@ -1552,6 +1593,16 @@ pub fn run() {
                 let _ = sync.pull("startup").await;
             });
 
+            // The app-update check runs in the frontend (it prompts); relations update silently.
+            if check_updates {
+                let relations_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = run_relations_update(&relations_handle).await {
+                        eprintln!("[relations] startup update check failed: {}", e);
+                    }
+                });
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1593,6 +1644,9 @@ pub fn run() {
             get_watch_stats,
             get_stats,
             get_app_info,
+            check_relations_update,
+            get_relations_info,
+            get_changelog,
             get_media_metadata,
             get_torrent_board,
             download_releases,

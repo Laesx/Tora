@@ -486,6 +486,30 @@ export interface ListStats {
   watch_events: WatchEvent[];
 }
 
+/** One published Tora release from GitHub (`get_changelog`) */
+export interface ReleaseNote {
+  /** Version without the leading "v" */
+  version: string;
+  name: string;
+  /** ISO 8601 */
+  published_at: string;
+  html_url: string;
+  /** GitHub-rendered (sanitized) release notes */
+  body_html: string;
+}
+
+/** The anime-relations data in use */
+export interface RelationsInfo {
+  /** `last_modified` from the file's meta section (YYYY-MM-DD) */
+  last_modified: string;
+  rule_count: number;
+  source: "embedded" | "downloaded";
+}
+
+export interface RelationsUpdatedEvent {
+  last_modified: string;
+}
+
 export interface AppInfo {
   data_dir: string;
   db_path: string;
@@ -539,6 +563,8 @@ export interface AppSettings {
   players: PlayerDefinition[];
   /** Which title the UI shows; missing English / Native titles fall back to Romaji */
   title_language: TitleLanguage;
+  /** Check GitHub for a new Tora release and newer anime relations on startup */
+  check_updates_on_startup: boolean;
   /** Stored settings were unreadable; defaults are in use until a backup is restored */
   settings_recovered?: boolean;
 }

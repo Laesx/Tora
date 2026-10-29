@@ -118,3 +118,60 @@
 ::-webkit-scrollbar-thumb:hover {
   background: rgb(var(--accent-primary) / 0.7);
 }
+
+/* GitHub-rendered release notes (changelog modal, update prompt) */
+.release-notes {
+  font-size: 12px;
+  line-height: 1.6;
+  color: rgb(var(--text-secondary));
+}
+
+.release-notes > * + * {
+  margin-top: 0.5rem;
+}
+
+.release-notes h1,
+.release-notes h2,
+.release-notes h3,
+.release-notes h4 {
+  color: rgb(var(--text-primary));
+  font-weight: 700;
+  font-size: 12.5px;
+  margin-top: 0.75rem;
+}
+
+.release-notes ul,
+.release-notes ol {
+  padding-left: 1.1rem;
+}
+
+.release-notes ul {
+  list-style: disc;
+}
+
+.release-notes ol {
+  list-style: decimal;
+}
+
+.release-notes li + li {
+  margin-top: 0.15rem;
+}
+
+.release-notes a {
+  color: rgb(var(--accent-primary));
+}
+
+.release-notes a:hover {
+  text-decoration: underline;
+}
+
+.release-notes code {
+  font-size: 11px;
+  padding: 0.05rem 0.3rem;
+  border-radius: 0.25rem;
+  background: rgb(var(--bg-tertiary));
+}
+
+.release-notes strong {
+  color: rgb(var(--text-primary));
+}

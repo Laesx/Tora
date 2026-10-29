@@ -1,4 +1,5 @@
-# Builds the Windows installers (NSIS setup.exe + MSI).
+# Builds the Windows installers (NSIS setup.exe + MSI), signed for the in-app updater.
+# Needs the TAURI_SIGNING_PRIVATE_KEY (+ _PASSWORD) repository secrets; the public key is in tauri.conf.json.
 # - Pushing a `v*` tag (e.g. v0.2.0) creates a draft GitHub release with both installers attached.
 # - Running it manually (Actions → Release → Run workflow) only builds and keeps the installers as workflow artifacts.
 name: Release
@@ -50,9 +51,13 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
+      # Signs the installers for the in-app updater and uploads `latest.json` + `.sig` files to the release.
+      # The updater reads releases/latest, so an update ships when the draft is published.
       - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
           releaseName: Tora v__VERSION__

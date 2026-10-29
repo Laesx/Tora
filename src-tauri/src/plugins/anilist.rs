@@ -21,7 +21,7 @@ pub struct AniListPlugin {
 impl AniListPlugin {
     pub fn new() -> Self {
         let client = Client::builder()
-            .user_agent("Tora/0.1.0 (Anime Library Manager)")
+            .user_agent(crate::USER_AGENT)
             .timeout(std::time::Duration::from_secs(20))
             .build()
             .unwrap_or_default();

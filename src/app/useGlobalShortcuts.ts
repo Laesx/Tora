@@ -9,6 +9,8 @@ interface ShortcutState {
   paletteOpen: boolean;
   signOutOpen: boolean;
   shortcutsOpen: boolean;
+  /** Update prompt or changelog */
+  updateModalOpen: boolean;
   quickMenuOpen: boolean;
   selectedAnimeIds: number[];
   /** The watchlist's current rows (Ctrl+A; the top search result for Enter) */
@@ -23,6 +25,7 @@ interface ShortcutState {
   togglePalette: () => void;
   closePalette: () => void;
   closeSignOut: () => void;
+  closeUpdateModal: () => void;
   openShortcuts: () => void;
   closeShortcuts: () => void;
   closeQuickMenu: () => void;
@@ -142,7 +145,8 @@ export function useGlobalShortcuts(state: ShortcutState) {
         const ch = e.key;
         backToSearch((q) => q + ch);
       } else if (e.key === "Escape") {
-        if (s.signOutOpen) s.closeSignOut();
+        if (s.updateModalOpen) s.closeUpdateModal();
+        else if (s.signOutOpen) s.closeSignOut();
         else if (s.shortcutsOpen) s.closeShortcuts();
         else if (s.paletteOpen) s.closePalette();
         else if (s.quickMenuOpen) s.closeQuickMenu();

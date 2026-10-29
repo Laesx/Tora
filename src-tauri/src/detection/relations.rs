@@ -1,6 +1,7 @@
 use crate::detection::anitomy::normalize_anime_title;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
 /// Embedded official upstream `erengy/anime-relations` database (`vendor/anime-relations/anime-relations.txt`).
 pub const UPSTREAM_ANIME_RELATIONS_DATA: &str =
@@ -38,16 +39,61 @@ pub struct EpisodeRedirection {
 }
 
 pub struct RelationsDatabase {
+    /// `- last_modified: YYYY-MM-DD` from the `::meta` section (empty when missing)
+    pub last_modified: String,
+    /// Number of rules read from the `::rules` section (`!` mirrors not counted)
+    pub rule_count: usize,
     pub by_anilist_id: HashMap<i64, Vec<RelationRule>>,
     pub by_mal_id: HashMap<i64, Vec<RelationRule>>,
     pub by_norm_title: HashMap<String, Vec<RelationRule>>,
 }
 
-static RELATIONS_DB: Lazy<RelationsDatabase> =
-    Lazy::new(|| RelationsDatabase::parse(UPSTREAM_ANIME_RELATIONS_DATA));
+/// The active database: the embedded copy until a newer download (or cached download) is installed.
+static RELATIONS_DB: Lazy<RwLock<Arc<RelationsDatabase>>> = Lazy::new(|| {
+    RwLock::new(Arc::new(RelationsDatabase::parse(
+        UPSTREAM_ANIME_RELATIONS_DATA,
+    )))
+});
 
-pub fn relations_db() -> &'static RelationsDatabase {
-    &RELATIONS_DB
+/// `last_modified` of the embedded copy (cheap: only scans the meta section).
+pub fn embedded_relations_last_modified() -> String {
+    meta_last_modified(UPSTREAM_ANIME_RELATIONS_DATA)
+}
+
+pub fn relations_db() -> Arc<RelationsDatabase> {
+    RELATIONS_DB
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// Swap the active database (a downloaded `anime-relations.txt`). Lookups already running keep the old one.
+pub fn install_relations(db: RelationsDatabase) {
+    *RELATIONS_DB.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(db);
+}
+
+/// `- last_modified: YYYY-MM-DD` from the `::meta` section; empty when missing.
+pub fn meta_last_modified(contents: &str) -> String {
+    let mut in_meta = false;
+    for raw_line in contents.lines() {
+        let line = raw_line.trim();
+        if let Some(section) = line.strip_prefix("::") {
+            if in_meta {
+                break;
+            }
+            in_meta = section.trim() == "meta";
+            continue;
+        }
+        if in_meta {
+            if let Some(value) = line
+                .strip_prefix('-')
+                .and_then(|rest| rest.trim().strip_prefix("last_modified:"))
+            {
+                return value.trim().to_string();
+            }
+        }
+    }
+    String::new()
 }
 
 fn parse_id_token(token: &str, fallback: Option<i64>) -> Option<i64> {
@@ -154,6 +200,7 @@ impl RelationsDatabase {
         let mut by_norm_title: HashMap<String, Vec<RelationRule>> = HashMap::new();
 
         let mut in_rules = false;
+        let mut rule_count = 0usize;
         let mut current_src_title = String::new();
         let mut current_dst_title = String::new();
         let mut current_dst_season: Option<u32> = None;
@@ -233,6 +280,7 @@ impl RelationsDatabase {
             let src_norm_title = normalize_anime_title(&current_src_title);
             let dst_norm_title = normalize_anime_title(&current_dst_title);
 
+            rule_count += 1;
             let primary_rule = RelationRule {
                 src_mal_id,
                 src_kitsu_id,
@@ -287,6 +335,8 @@ impl RelationsDatabase {
         }
 
         Self {
+            last_modified: meta_last_modified(contents),
+            rule_count,
             by_anilist_id,
             by_mal_id,
             by_norm_title,

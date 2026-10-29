@@ -1,4 +1,4 @@
-import { HardDrive, Keyboard, LayoutGrid, List, ListChecks, Palette, RefreshCw, Rows, Settings, Shuffle } from "lucide-react";
+import { Download, HardDrive, Keyboard, LayoutGrid, List, ListChecks, Palette, RefreshCw, Rows, ScrollText, Settings, Shuffle } from "lucide-react";
 import { THEME_PRESETS } from "@/lib/theme";
 import type { PaletteCommand } from "@/features/palette/CommandPalette";
 import type { ViewMode } from "@/features/watchlist/WatchlistView";
@@ -11,6 +11,8 @@ interface PaletteCommandDeps {
   syncFromAnilist: () => void;
   openRandomAnime: () => void;
   openShortcuts: () => void;
+  checkForUpdates: () => void;
+  openChangelog: () => void;
   customListNames: string[];
   openCustomList: (name: string) => void;
   setViewMode: (mode: ViewMode) => void;
@@ -32,6 +34,8 @@ export function buildPaletteCommands(d: PaletteCommandDeps): PaletteCommand[] {
     { id: "rescan-library", label: "Rescan All Library Folders", keywords: ["scan", "refresh", "files", "disk"], icon: HardDrive, shortcut: "F5", run: d.rescanLibrary },
     { id: "sync-anilist", label: "Sync from AniList", keywords: ["pull", "refresh", "tracker"], icon: RefreshCw, run: d.syncFromAnilist },
     { id: "shortcuts", label: "Keyboard Shortcuts", keywords: ["keys", "hotkeys", "help", "keyboard"], icon: Keyboard, shortcut: "?", run: d.openShortcuts },
+    { id: "check-updates", label: "Check for Updates", keywords: ["update", "upgrade", "version", "relations", "github"], icon: Download, run: d.checkForUpdates },
+    { id: "changelog", label: "What's New (Changelog)", keywords: ["release notes", "version", "updates", "changes"], icon: ScrollText, run: d.openChangelog },
     { id: "random-anime", label: "Open a Random Anime from the Current List", keywords: ["shuffle", "pick", "random"], icon: Shuffle, run: d.openRandomAnime },
     ...d.customListNames.map((name) => ({
       id: `custom-list-${name}`,

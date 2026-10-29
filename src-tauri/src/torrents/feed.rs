@@ -116,7 +116,7 @@ pub fn search_url(template: &str, query: &str) -> String {
 pub async fn fetch_feed(url: &str) -> Result<Vec<RawRelease>, String> {
     let host = url_host(url);
     let client = Client::builder()
-        .user_agent("Tora/0.1.0 (Anime Library Manager)")
+        .user_agent(crate::USER_AGENT)
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|e| e.to_string())?;

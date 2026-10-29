@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
   AppSettings,
+  RelationsUpdatedEvent,
   ScanSummary,
   SyncSummary,
   TorrentAutoDownloadedEvent,
@@ -24,6 +25,7 @@ export interface AppEventHandlers {
   authInvalid: () => void;
   accountSwitched: (event: TrackerAccountSwitchedEvent) => void;
   entrySynced: (event: TrackerEntrySyncedEvent) => void;
+  relationsUpdated: (event: RelationsUpdatedEvent) => void;
   /** Runs once, after every listener is registered */
   ready: () => void;
 }
@@ -39,6 +41,7 @@ const EVENTS: [string, Exclude<keyof AppEventHandlers, "ready">][] = [
   ["tracker-auth-invalid", "authInvalid"],
   ["tracker-account-switched", "accountSwitched"],
   ["tracker-entry-synced", "entrySynced"],
+  ["relations-updated", "relationsUpdated"],
 ];
 
 /**

@@ -14,6 +14,8 @@ import {
   LibraryFolder,
   ListStats,
   LocalEpisodeFile,
+  RelationsInfo,
+  ReleaseNote,
   ScanSummary,
   SeasonalAnime,
   SeasonResult,
@@ -179,6 +181,14 @@ export const toraApi = {
   getStats: () => invoke<ListStats>("get_stats"),
 
   getAppInfo: () => invoke<AppInfo>("get_app_info"),
+
+  /** Download anime-relations from GitHub; the new `last_modified` when it was newer (also emits `relations-updated`). */
+  checkRelationsUpdate: () => invoke<string | null>("check_relations_update"),
+
+  getRelationsInfo: () => invoke<RelationsInfo>("get_relations_info"),
+
+  /** Published Tora releases from GitHub, newest first. */
+  getChangelog: () => invoke<ReleaseNote[]>("get_changelog"),
 
   /** Stored metadata (tags, studios, rankings…); fetched from AniList only if none is stored yet. */
   getMediaMetadata: (anilistId: number) =>
