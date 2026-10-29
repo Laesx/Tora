@@ -3,6 +3,7 @@ import { History, Search, Undo2 } from "lucide-react";
 import { AnimeEntry, MANUAL_HISTORY_PLAYER, WatchHistoryEntry } from "../types";
 import { getOptimizedCoverUrl, toraApi } from "../api";
 import { useAnimeTitle } from "../titles";
+import { AiringDot } from "./AiringDot";
 
 interface HistoryViewProps {
   animeList: AnimeEntry[];
@@ -166,13 +167,16 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ animeList, refreshKey,
                     className="w-full flex items-center gap-3 p-2 rounded-xl hover:bg-bg-tertiary disabled:hover:bg-transparent text-left transition focus:outline-none"
                   >
                     {anime ? (
-                      <img
-                        src={getOptimizedCoverUrl(anime.cover_image, "medium")}
-                        alt={titleOf(anime)}
-                        loading="lazy"
-                        decoding="async"
-                        className="w-8 h-11 object-cover rounded-md shrink-0"
-                      />
+                      <span className="relative shrink-0">
+                        <img
+                          src={getOptimizedCoverUrl(anime.cover_image, "medium")}
+                          alt={titleOf(anime)}
+                          loading="lazy"
+                          decoding="async"
+                          className="w-8 h-11 object-cover rounded-md"
+                        />
+                        <AiringDot anime={anime} size="sm" onCover className="absolute -top-0.5 -left-0.5" />
+                      </span>
                     ) : (
                       <div className="w-8 h-11 rounded-md bg-bg-tertiary shrink-0" />
                     )}

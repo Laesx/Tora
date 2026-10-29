@@ -44,8 +44,13 @@ interface SeasonsViewProps {
   onGlobalSearch: (query: string) => void;
   onChangeStatus: (anime: AnimeEntry, status: string, label: string) => void;
   onRemoveAnime: (anime: AnimeEntry) => void;
+  /** Jump to this season (re-applied whenever the nonce changes) */
+  seasonRequest?: SeasonRequest | null;
+  onSeasonRequestHandled?: () => void;
   showToast: (msg: string, type?: "success" | "info" | "error") => void;
 }
+
+export type SeasonRequest = SeasonKey & { nonce: number };
 
 type SortKey = "popularity" | "start" | "score" | "title";
 type SortDir = "asc" | "desc";
@@ -180,13 +185,28 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
   onGlobalSearch,
   onChangeStatus,
   onRemoveAnime,
+  seasonRequest,
+  onSeasonRequestHandled,
   showToast,
 }) => {
   const titleOf = useAnimeTitle();
   const nowSeason = useMemo(() => currentSeason(), []);
   const [menu, setMenu] = useState<{ anime: SeasonalAnime; x: number; y: number } | null>(null);
   const closeMenu = useCallback(() => setMenu(null), []);
-  const [selected, setSelected] = useState<SeasonKey>(nowSeason);
+  // Start on a requested season so the current one isn't fetched first
+  const [selected, setSelected] = useState<SeasonKey>(() =>
+    seasonRequest ? { season: seasonRequest.season, year: seasonRequest.year } : nowSeason
+  );
+
+  useEffect(() => {
+    if (!seasonRequest) return;
+    setSelected((prev) =>
+      sameSeason(prev, seasonRequest)
+        ? prev
+        : { season: seasonRequest.season, year: seasonRequest.year }
+    );
+    onSeasonRequestHandled?.();
+  }, [seasonRequest?.nonce]);
   const [result, setResult] = useState<SeasonResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);

@@ -20,6 +20,7 @@ import {
 } from "../types";
 import { formatBytes, getOptimizedCoverUrl, toraApi } from "../api";
 import { useAnimeTitle } from "../titles";
+import { AiringDot } from "./AiringDot";
 
 interface StatsViewProps {
   animeList: AnimeEntry[];
@@ -328,13 +329,16 @@ export const StatsView: React.FC<StatsViewProps> = ({
                   onClick={() => onOpenAnime(anime)}
                   className="w-full flex items-center gap-3 p-2 rounded-xl hover:bg-bg-tertiary text-left transition focus:outline-none"
                 >
-                  <img
-                    src={getOptimizedCoverUrl(anime.cover_image, "medium")}
-                    alt={titleOf(anime)}
-                    loading="lazy"
-                    decoding="async"
-                    className="w-8 h-11 object-cover rounded-md shrink-0"
-                  />
+                  <span className="relative shrink-0">
+                    <img
+                      src={getOptimizedCoverUrl(anime.cover_image, "medium")}
+                      alt={titleOf(anime)}
+                      loading="lazy"
+                      decoding="async"
+                      className="w-8 h-11 object-cover rounded-md"
+                    />
+                    <AiringDot anime={anime} size="sm" onCover className="absolute -top-0.5 -left-0.5" />
+                  </span>
                   <div className="min-w-0 flex-1">
                     <div className="text-xs font-semibold text-text-primary truncate">{titleOf(anime)}</div>
                     <div className="text-[11px] text-text-muted">

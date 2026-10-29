@@ -12,6 +12,7 @@ import {
 import { AnimeQuickMenu } from "./AnimeQuickMenu";
 import { FloatingQuickMenu } from "./FloatingQuickMenu";
 import { LIST_STATUS_META } from "./AnimePosterCard";
+import { AiringDot } from "./AiringDot";
 import { useAnimeTitle } from "../titles";
 import type { TorrentSearchRequest } from "../torrents";
 
@@ -203,6 +204,7 @@ export const NowPlayingDashboard: React.FC<NowPlayingDashboardProps> = ({
                     <span className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition flex items-center justify-center">
                       <Play className="w-5 h-5 text-white fill-current" />
                     </span>
+                    <AiringDot anime={a} size="sm" onCover className="absolute top-1 left-1" />
                   </div>
                   <div className="min-w-0 flex-1">
                     <div className="text-xs font-bold text-text-primary truncate">{titleOf(a)}</div>
@@ -313,13 +315,16 @@ const RecentList: React.FC<{
               onClick={() => onOpenAnime(a)}
               className="w-full flex items-center gap-3 p-2 rounded-xl hover:bg-bg-tertiary text-left transition focus:outline-none"
             >
-              <img
-                src={getOptimizedCoverUrl(a.cover_image, "medium")}
-                alt={titleOf(a)}
-                loading="lazy"
-                decoding="async"
-                className="w-8 h-11 object-cover rounded-md shrink-0"
-              />
+              <span className="relative shrink-0">
+                <img
+                  src={getOptimizedCoverUrl(a.cover_image, "medium")}
+                  alt={titleOf(a)}
+                  loading="lazy"
+                  decoding="async"
+                  className="w-8 h-11 object-cover rounded-md"
+                />
+                <AiringDot anime={a} size="sm" onCover className="absolute -top-0.5 -left-0.5" />
+              </span>
               <div className="min-w-0 flex-1">
                 <div className="text-xs font-semibold text-text-primary truncate">{titleOf(a)}</div>
                 <div className="text-[10px] text-text-muted">{formatFuzzyDate(dateOf(a))}</div>

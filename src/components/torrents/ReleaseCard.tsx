@@ -4,6 +4,7 @@ import { AnimeEntry, AnimeReleaseCard, BoardRelease } from "../../types";
 import { getOptimizedCoverUrl } from "../../api";
 import { useAnimeTitle } from "../../titles";
 import { STATUS_OPTIONS } from "../AnimeQuickMenu";
+import { AiringDot } from "../AiringDot";
 import { ageLabel, episodeLabel, tierLabel } from "../../torrents";
 
 interface ReleaseCardProps {
@@ -163,12 +164,17 @@ export const ReleaseCard: React.FC<ReleaseCardProps> = ({
     <div className="bg-bg-secondary border border-border-subtle rounded-2xl overflow-hidden">
       <div className="flex items-center gap-3 px-3 py-2.5 border-b border-border-subtle">
         {cover ? (
-          <img
-            src={getOptimizedCoverUrl(cover, "medium")}
-            alt=""
-            loading="lazy"
-            className="w-9 h-12 rounded-md object-cover shrink-0 bg-bg-tertiary"
-          />
+          <span className="relative shrink-0">
+            <img
+              src={getOptimizedCoverUrl(cover, "medium")}
+              alt=""
+              loading="lazy"
+              className="w-9 h-12 rounded-md object-cover bg-bg-tertiary"
+            />
+            {entry && (
+              <AiringDot anime={entry} size="sm" onCover className="absolute -top-0.5 -left-0.5" />
+            )}
+          </span>
         ) : (
           <div className="w-9 h-12 rounded-md bg-bg-tertiary shrink-0" />
         )}

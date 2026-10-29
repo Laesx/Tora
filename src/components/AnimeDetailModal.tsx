@@ -7,8 +7,6 @@ import {
   Plus,
   Minus,
   Star,
-  Calendar,
-  Tv,
   HardDrive,
   ExternalLink,
   Trash2,
@@ -17,16 +15,27 @@ import {
   Tag,
   ListChecks,
 } from "lucide-react";
-import { AnimeEntry, LocalEpisodeFile } from "../types";
+import { AnimeEntry, LocalEpisodeFile, StudioRef } from "../types";
 import { formatBytes, formatCountdown, getOptimizedCoverUrl, toraApi } from "../api";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useCustomLists } from "../customLists";
 import { CustomListsPanel } from "./CustomListsPanel";
 import { altTitles, useAnimeTitle, useTitleLanguage } from "../titles";
 import { TorrentSearchRequest, torrentSearchFor } from "../torrents";
+import {
+  anilistAnimeUrl,
+  anilistStudioUrl,
+  formatEnum,
+  formatMinutes,
+  openExternal,
+} from "../nowPlaying";
+import { seasonName } from "../seasons";
+import { AiringDot } from "./AiringDot";
 
 interface AnimeDetailModalProps {
   anime: AnimeEntry;
+  /** Show this season in the Seasons tab */
+  onOpenSeason: (season: string, year: number) => void;
   /** false for anime opened from Seasons/Search that aren't in the user's list: tracking controls are hidden */
   inList: boolean;
   onAddToList: (status: "CURRENT" | "PLANNING") => Promise<void>;
@@ -41,6 +50,7 @@ interface AnimeDetailModalProps {
 
 export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
   anime,
+  onOpenSeason,
   inList,
   onAddToList,
   onClose,
@@ -63,6 +73,8 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
   const [customFolder, setCustomFolder] = useState(anime.custom_folder || "");
   const [synonymsInput, setSynonymsInput] = useState(anime.custom_synonyms.join(", "));
   const [localFiles, setLocalFiles] = useState<LocalEpisodeFile[]>([]);
+  // Animation studios with AniList ids (stored metadata; fetched once for media without any)
+  const [studioRefs, setStudioRefs] = useState<StudioRef[] | null>(null);
   const [saving, setSaving] = useState(false);
   const [adding, setAdding] = useState(false);
   const stepSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -121,6 +133,21 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
       setLocalFiles([]);
     }
   }, [anime.id, anime.local_episode_count, inList]);
+
+  const mediaId = anime.anilist_id ?? anime.id;
+  useEffect(() => {
+    setStudioRefs(null);
+    let cancelled = false;
+    toraApi
+      .getMediaMetadata(mediaId)
+      .then((m) => {
+        if (!cancelled) setStudioRefs(m?.metadata.studios.filter((s) => s.is_animation_studio) ?? []);
+      })
+      .catch((e) => console.error("Failed to load media metadata:", e));
+    return () => {
+      cancelled = true;
+    };
+  }, [mediaId]);
 
   const handleAddToList = async (nextStatus: "CURRENT" | "PLANNING") => {
     setAdding(true);
@@ -257,13 +284,7 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
     }
   };
 
-  const handleOpenAniList = async () => {
-    try {
-      await toraApi.openExternalUrl(anime.site_url || `https://anilist.co/anime/${anime.id}`);
-    } catch (e: any) {
-      showToast(String(e), "error");
-    }
-  };
+  const handleOpenAniList = () => openExternal(anilistAnimeUrl(anime), showToast);
 
   const handleBrowseFolder = async () => {
     try {
@@ -318,6 +339,52 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
   );
   const countdown = formatCountdown(anime.next_airing_at);
 
+  // Hero meta line: season (→ Seasons tab) · episodes · length · studios (→ AniList)
+  const metaItems: React.ReactNode[] = [];
+  if (anime.season && anime.season_year) {
+    const season = anime.season;
+    const year = anime.season_year;
+    metaItems.push(
+      <button
+        type="button"
+        onClick={() => onOpenSeason(season, year)}
+        title="Show this season in Seasons"
+        className="font-semibold text-accent hover:underline"
+      >
+        {seasonName(season)} {year}
+      </button>
+    );
+  }
+  if (anime.episodes && anime.format !== "MOVIE") {
+    metaItems.push(<span>{anime.episodes} eps</span>);
+  }
+  if (anime.duration) {
+    metaItems.push(
+      <span>
+        {anime.format === "MOVIE" ? formatMinutes(anime.duration) : `${anime.duration} min/ep`}
+      </span>
+    );
+  }
+  if (studioRefs && studioRefs.length > 0) {
+    metaItems.push(
+      <span className="flex flex-wrap gap-x-2">
+        {studioRefs.map((s) => (
+          <button
+            key={s.id}
+            type="button"
+            onClick={() => openExternal(anilistStudioUrl(s.id), showToast)}
+            title="Open studio on AniList"
+            className="font-semibold text-accent hover:underline"
+          >
+            {s.name}
+          </button>
+        ))}
+      </span>
+    );
+  } else if (anime.studios.length > 0) {
+    metaItems.push(<span>{anime.studios.join(", ")}</span>);
+  }
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-end bg-black/70 backdrop-blur-sm"
@@ -353,21 +420,33 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
             <X className="w-5 h-5" />
           </button>
 
-          {/* Cover & Title Header */}
-          <div className="absolute bottom-3 left-6 right-16 flex items-end gap-5 pointer-events-none">
-            <img
-              src={getOptimizedCoverUrl(anime.cover_image, "medium")}
-              alt={titleOf(anime)}
-              decoding="async"
-              className="w-24 h-36 object-cover rounded-xl shadow-xl border-2 border-border-subtle shrink-0 bg-bg-tertiary"
-            />
+          {/* Cover & Title Header (cover and title open AniList) */}
+          <div className="absolute bottom-3 left-6 right-16 flex items-end gap-5">
+            <button
+              type="button"
+              onClick={handleOpenAniList}
+              title="Open on AniList"
+              className="group relative w-24 h-36 shrink-0 rounded-xl overflow-hidden shadow-xl border-2 border-border-subtle bg-bg-tertiary"
+            >
+              <img
+                src={getOptimizedCoverUrl(anime.cover_image, "medium")}
+                alt={titleOf(anime)}
+                decoding="async"
+                className="w-full h-full object-cover"
+              />
+              <span className="absolute inset-0 bg-black/55 opacity-0 group-hover:opacity-100 transition flex items-center justify-center gap-1 text-white text-[11px] font-semibold">
+                <ExternalLink className="w-3.5 h-3.5" />
+                AniList
+              </span>
+              <AiringDot anime={anime} onCover className="absolute top-1.5 left-1.5" />
+            </button>
             <div className="flex-1 min-w-0 pb-1">
               <div className="flex flex-wrap items-center gap-2 mb-1">
                 <span className="px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wider rounded bg-accent text-white">
-                  {anime.format}
+                  {formatEnum(anime.format)}
                 </span>
                 <span className="px-2 py-0.5 text-[11px] font-medium rounded bg-bg-elevated text-text-secondary border border-border-subtle">
-                  {anime.airing_status.replace(/_/g, " ")}
+                  {formatEnum(anime.airing_status)}
                 </span>
                 {anime.average_score && (
                   <span className="flex items-center gap-1 px-2 py-0.5 text-[11px] font-semibold rounded bg-amber-500/20 text-amber-400">
@@ -382,12 +461,29 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
                 )}
               </div>
               <h2 className="text-xl font-bold text-text-primary truncate">
-                {titleOf(anime)}
+                <button
+                  type="button"
+                  onClick={handleOpenAniList}
+                  title="Open on AniList"
+                  className="max-w-full truncate text-left hover:text-accent hover:underline transition"
+                >
+                  {titleOf(anime)}
+                </button>
               </h2>
               {altTitles(anime, titleLanguage).length > 0 && (
                 <p className="text-xs text-text-secondary truncate">
                   {altTitles(anime, titleLanguage).join(" • ")}
                 </p>
+              )}
+              {metaItems.length > 0 && (
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 mt-1.5 text-xs text-text-secondary">
+                  {metaItems.map((item, i) => (
+                    <React.Fragment key={i}>
+                      {i > 0 && <span className="text-text-muted">·</span>}
+                      {item}
+                    </React.Fragment>
+                  ))}
+                </div>
               )}
             </div>
           </div>
@@ -396,42 +492,25 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
         {/* Scrollable Content */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
           {/* Quick Action Bar */}
-          <div className="flex flex-wrap items-center gap-2.5 bg-bg-tertiary/70 p-3 rounded-xl border border-border-subtle">
-            {inList ? (
-              <>
-                <button
-                  onClick={handlePlayNextUnwatched}
-                  className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-accent hover:bg-accent-hover text-white text-xs font-semibold transition shadow-sm"
-                >
-                  <Play className="w-3.5 h-3.5 fill-current" />
-                  Play Next (Ep {progress + 1})
-                </button>
-
-                <button
-                  onClick={() => onSearchTorrents(torrentSearchFor(anime))}
-                  className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-bg-elevated hover:bg-bg-primary text-text-primary text-xs font-medium border border-border-subtle transition"
-                >
-                  <Search className="w-3.5 h-3.5 text-accent" />
-                  Find Torrents
-                </button>
-              </>
-            ) : (
-              <span className="text-xs text-text-muted">
-                {anime.episodes ? `${anime.episodes} episodes` : "Episode count unknown"}
-                {anime.studios.length > 0 ? ` • ${anime.studios.join(", ")}` : ""}
-              </span>
-            )}
-
-            {anime.site_url && (
-              <a
-                onClick={handleOpenAniList}
-                className="ml-auto flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs text-text-secondary hover:text-accent transition"
+          {inList && (
+            <div className="flex flex-wrap items-center gap-2.5 bg-bg-tertiary/70 p-3 rounded-xl border border-border-subtle">
+              <button
+                onClick={handlePlayNextUnwatched}
+                className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-accent hover:bg-accent-hover text-white text-xs font-semibold transition shadow-sm"
               >
-                AniList
-                <ExternalLink className="w-3.5 h-3.5" />
-              </a>
-            )}
-          </div>
+                <Play className="w-3.5 h-3.5 fill-current" />
+                Play Next (Ep {progress + 1})
+              </button>
+
+              <button
+                onClick={() => onSearchTorrents(torrentSearchFor(anime))}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-bg-elevated hover:bg-bg-primary text-text-primary text-xs font-medium border border-border-subtle transition"
+              >
+                <Search className="w-3.5 h-3.5 text-accent" />
+                Find Torrents
+              </button>
+            </div>
+          )}
 
           {!inList && (
             <div className="flex flex-wrap items-center justify-between gap-3 bg-bg-tertiary/40 p-4 rounded-xl border border-border-subtle">
@@ -749,36 +828,18 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
               {anime.synopsis || "No synopsis available."}
             </p>
 
-            <div className="flex flex-wrap gap-2">
-              {anime.studios.map((st) => (
-                <span
-                  key={st}
-                  className="px-2.5 py-1 rounded-full text-[11px] font-semibold bg-accent/15 text-accent border border-accent/30"
-                >
-                  Studio: {st}
-                </span>
-              ))}
-              {anime.genres.map((g) => (
-                <span
-                  key={g}
-                  className="px-2.5 py-1 rounded-full text-[11px] bg-bg-tertiary text-text-secondary border border-border-subtle"
-                >
-                  {g}
-                </span>
-              ))}
-              {anime.season && anime.season_year && (
-                <span className="px-2.5 py-1 rounded-full text-[11px] bg-bg-tertiary text-text-secondary border border-border-subtle flex items-center gap-1">
-                  <Calendar className="w-3 h-3" />
-                  {anime.season} {anime.season_year}
-                </span>
-              )}
-              {anime.duration && (
-                <span className="px-2.5 py-1 rounded-full text-[11px] bg-bg-tertiary text-text-secondary border border-border-subtle flex items-center gap-1">
-                  <Tv className="w-3 h-3" />
-                  {anime.duration} mins/ep
-                </span>
-              )}
-            </div>
+            {anime.genres.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {anime.genres.map((g) => (
+                  <span
+                    key={g}
+                    className="px-2.5 py-1 rounded-full text-[11px] bg-bg-tertiary text-text-secondary border border-border-subtle"
+                  >
+                    {g}
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
 
           {/* Notes, Custom Folder & the user's own recognition aliases (AniList synonyms are not shown) */}

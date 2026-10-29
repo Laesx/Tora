@@ -3,6 +3,7 @@ import { Clock, Plus, Star } from "lucide-react";
 import { AnimeEntry } from "../types";
 import { formatCountdown, getOptimizedCoverUrl } from "../api";
 import { useAnimeTitle } from "../titles";
+import { AiringDot } from "./AiringDot";
 
 export const LIST_STATUS_META: Record<string, { label: string; badge: string }> = {
   CURRENT: { label: "Watching", badge: "bg-accent text-white" },
@@ -65,7 +66,8 @@ export const AnimePosterCard: React.FC<AnimePosterCardProps> = ({
           decoding="async"
           className="w-full h-full object-cover group-hover:scale-[1.02] transition-transform"
         />
-        <span className="absolute top-2 left-2 px-2 py-0.5 rounded-md bg-black/75 text-white text-[10px] font-semibold">
+        <span className="absolute top-2 left-2 px-2 py-0.5 rounded-md bg-black/75 text-white text-[10px] font-semibold flex items-center gap-1.5">
+          <AiringDot anime={anime} size="sm" />
           {anime.format.replace(/_/g, " ")} • {anime.episodes ?? "?"} eps
         </span>
         {anime.average_score ? (

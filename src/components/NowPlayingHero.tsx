@@ -37,6 +37,9 @@ import {
 import { LIST_STATUS_META } from "./AnimePosterCard";
 import { altTitles, useAnimeTitle, useTitleLanguage } from "../titles";
 import { TorrentSearchRequest, stripSeasonSuffix, torrentSearchFor } from "../torrents";
+import { episodeBar, episodeTotalLabel } from "../episodes";
+import { EpisodeProgressBar, ReadyBadge } from "./EpisodeProgressBar";
+import { AiringDot } from "./AiringDot";
 
 interface NowPlayingHeroProps {
   session: DetectedMediaSession;
@@ -46,6 +49,8 @@ interface NowPlayingHeroProps {
   settings: AppSettings;
   onLinkDetectedEpisode: (animeId: number, aliasTitle: string) => Promise<void>;
   onOpenAnime: (anime: AnimeEntry) => void;
+  /** Show this season in the Seasons tab */
+  onOpenSeason: (season: string, year: number) => void;
   onSearchTorrents: (req: TorrentSearchRequest) => void;
   showToast: (msg: string, type?: "success" | "info" | "error") => void;
 }
@@ -62,6 +67,7 @@ export const NowPlayingHero: React.FC<NowPlayingHeroProps> = ({
   settings,
   onLinkDetectedEpisode,
   onOpenAnime,
+  onOpenSeason,
   onSearchTorrents,
   showToast,
 }) => {
@@ -178,7 +184,16 @@ export const NowPlayingHero: React.FC<NowPlayingHeroProps> = ({
         { label: "Status", value: formatEnum(entry.airing_status) },
         {
           label: "Season",
-          value: entry.season && entry.season_year ? `${seasonName(entry.season)} ${entry.season_year}` : null,
+          value:
+            entry.season && entry.season_year ? (
+              <button
+                onClick={() => onOpenSeason(entry.season!, entry.season_year!)}
+                title="Open this season"
+                className="text-accent hover:underline"
+              >
+                {seasonName(entry.season)} {entry.season_year}
+              </button>
+            ) : null,
         },
         {
           label: "Aired",
@@ -231,6 +246,8 @@ export const NowPlayingHero: React.FC<NowPlayingHeroProps> = ({
     : [];
 
   const maxEpisode = Math.max(total ?? 0, ...(entry?.available_episodes ?? [0]));
+  const bar = entry ? episodeBar(entry) : null;
+  const totalLabel = entry ? episodeTotalLabel(entry) : total ? String(total) : null;
 
   return (
     <div className="space-y-5">
@@ -262,6 +279,7 @@ export const NowPlayingHero: React.FC<NowPlayingHeroProps> = ({
                 decoding="async"
                 className="w-40 aspect-[2/3] object-cover"
               />
+              {entry && <AiringDot anime={entry} onCover className="absolute top-2 left-2" />}
               {entry && (
                 <span className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition flex items-center justify-center text-white text-xs font-semibold gap-1.5">
                   <ExternalLink className="w-4 h-4" />
@@ -311,7 +329,9 @@ export const NowPlayingHero: React.FC<NowPlayingHeroProps> = ({
             <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
               <span className="text-lg font-bold text-accent">
                 Episode {ep ?? "?"}
-                {total ? <span className="text-text-muted font-semibold"> / {total}</span> : null}
+                {totalLabel && totalLabel !== "?" ? (
+                  <span className="text-text-muted font-semibold"> / {totalLabel}</span>
+                ) : null}
               </span>
               {session.matched_anime_id && (
                 <span className="text-xs text-text-muted">Your progress: {progress}</span>
@@ -329,7 +349,12 @@ export const NowPlayingHero: React.FC<NowPlayingHeroProps> = ({
                 </span>
               )}
             </div>
-            {total ? (
+            {entry && bar ? (
+              <div className="flex items-center gap-2 max-w-md">
+                <EpisodeProgressBar bar={bar} className="flex-1 h-2.5 rounded-full" />
+                <ReadyBadge bar={bar} progress={entry.user_progress} />
+              </div>
+            ) : total ? (
               <div className="h-1.5 rounded-full bg-bg-tertiary overflow-hidden max-w-md">
                 <div
                   className="h-full bg-accent rounded-full transition-all"

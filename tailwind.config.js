@@ -24,6 +24,9 @@ export default {
           hover: "rgb(var(--accent-hover) / <alpha-value>)",
           soft: "rgb(var(--accent-primary) / 0.14)",
         },
+        progress: {
+          disk: "rgb(var(--progress-strip) / <alpha-value>)",
+        },
       },
       fontFamily: {
         sans: [

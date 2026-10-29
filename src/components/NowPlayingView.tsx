@@ -13,6 +13,7 @@ interface NowPlayingViewProps {
   onLinkDetectedEpisode: (animeId: number, aliasTitle: string) => Promise<void>;
   onDismissSession: () => void;
   onOpenAnime: (anime: AnimeEntry) => void;
+  onOpenSeason: (season: string, year: number) => void;
   onStepEpisode: (anime: AnimeEntry, delta: number) => void;
   onBatchUpdate: (patch: BatchAnimeUpdatePatch, summaryToast: string) => Promise<void>;
   onBatchDelete: (animeList: AnimeEntry[]) => Promise<void>;
@@ -30,6 +31,7 @@ export const NowPlayingView: React.FC<NowPlayingViewProps> = ({
   onLinkDetectedEpisode,
   onDismissSession,
   onOpenAnime,
+  onOpenSeason,
   onStepEpisode,
   onBatchUpdate,
   onBatchDelete,
@@ -84,6 +86,7 @@ export const NowPlayingView: React.FC<NowPlayingViewProps> = ({
           settings={settings}
           onLinkDetectedEpisode={onLinkDetectedEpisode}
           onOpenAnime={onOpenAnime}
+          onOpenSeason={onOpenSeason}
           onSearchTorrents={onSearchTorrents}
           showToast={showToast}
         />

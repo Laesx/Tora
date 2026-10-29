@@ -8,7 +8,6 @@ import React, {
 } from "react";
 import { createPortal } from "react-dom";
 import {
-  HardDrive,
   Clock,
   Plus,
   Minus,
@@ -20,6 +19,9 @@ import { AnimeQuickMenu, STATUS_OPTIONS } from "./AnimeQuickMenu";
 import { displayTitle, useAnimeTitle } from "../titles";
 import { playLocalEpisode } from "../nowPlaying";
 import type { TorrentSearchRequest } from "../torrents";
+import { episodeBar, episodeTotalLabel, formatEpisodeRanges } from "../episodes";
+import { EpisodeProgressBar, ReadyBadge } from "./EpisodeProgressBar";
+import { AiringDot } from "./AiringDot";
 
 /** A titled section of the list (search results grouped by status) */
 export interface WatchlistGroup {
@@ -332,7 +334,7 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
       const gap = 16;
       const cardWidth = Math.max(140, (containerWidth - (cols - 1) * gap) / cols);
       const imageHeight = Math.round(cardWidth * (4 / 3));
-      const cardHeight = imageHeight + 64; // 4px progress bar + 60px footer
+      const cardHeight = imageHeight + 70; // 10px progress bar + 60px footer
       const rowHeight = cardHeight + gap;
       return { cols, gap, cardHeight, rowHeight };
     }
@@ -487,9 +489,7 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
   }
 
   const renderGridCard = (anime: AnimeEntry) => {
-    const pct = anime.episodes
-      ? Math.min(100, Math.round((anime.user_progress / anime.episodes) * 100))
-      : 50;
+    const bar = episodeBar(anime);
     const cd = formatCountdown(anime.next_airing_at);
     const isSelected = selectedSet.has(anime.id);
 
@@ -521,16 +521,9 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
             <PendingSyncDot className="absolute top-2.5 right-2.5 ring-2 ring-black/60" />
           )}
 
-          {/* Top Left Badges: Disk Episodes & Airing Countdown */}
-          <div className="absolute top-2.5 left-2.5 flex flex-col gap-1 max-w-[calc(100%-20px)]">
-            {anime.local_episode_count > 0 && (
-              <span className="px-2 py-0.5 rounded-md bg-emerald-500/90 text-black text-[10px] font-bold flex items-center gap-1 shadow truncate">
-                <HardDrive className="w-3 h-3 shrink-0" />
-                <span className="truncate">
-                  {formatEpisodeRanges(anime.available_episodes)} on disk
-                </span>
-              </span>
-            )}
+          {/* Top Left: Airing Marker & Countdown */}
+          <div className="absolute top-2.5 left-2.5 flex items-center gap-1.5 max-w-[calc(100%-28px)]">
+            <AiringDot anime={anime} onCover />
             {cd && anime.next_airing_episode && (
               <span className="px-2 py-0.5 rounded-md bg-black/85 text-emerald-400 text-[10px] font-mono font-semibold flex items-center gap-1 truncate">
                 <Clock className="w-2.5 h-2.5 shrink-0" />
@@ -541,10 +534,13 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
             )}
           </div>
 
-          {/* Bottom Overlay: Progress & Stepper (-1 / +1) */}
-          <div className="absolute bottom-2.5 left-3 right-3 flex items-center justify-between text-white">
-            <span className="text-xs font-mono font-bold">
-              Ep {anime.user_progress} / {anime.episodes ?? "?"}
+          {/* Bottom Overlay: Progress, On-Disk Count & Stepper (-1 / +1) */}
+          <div className="absolute bottom-2.5 left-3 right-3 flex items-center justify-between gap-1.5 text-white">
+            <span className="flex items-center gap-1.5 min-w-0">
+              <span className="text-xs font-mono font-bold truncate">
+                Ep {anime.user_progress} / {episodeTotalLabel(anime)}
+              </span>
+              <ReadyBadge bar={bar} progress={anime.user_progress} tone="overlay" />
             </span>
             <div
               className="flex items-center gap-1"
@@ -570,10 +566,8 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
           </div>
         </div>
 
-        {/* Progress Bar */}
-        <div className="w-full h-1 bg-bg-tertiary overflow-hidden shrink-0">
-          <div className="h-full bg-accent" style={{ width: `${pct}%` }} />
-        </div>
+        {/* Progress Bar (watched + episodes on disk) */}
+        <EpisodeProgressBar bar={bar} className="w-full h-2.5 shrink-0" />
 
         {/* Card Footer (fixed 60px height) */}
         <div className="p-3 h-[60px] shrink-0 flex flex-col justify-between">
@@ -602,6 +596,7 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
 
   const renderCompactCard = (anime: AnimeEntry) => {
     const isSelected = selectedSet.has(anime.id);
+    const bar = episodeBar(anime);
     return (
       <div
         key={anime.id}
@@ -624,6 +619,7 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
             decoding="async"
             className="w-20 h-28 object-cover rounded-xl"
           />
+          <AiringDot anime={anime} onCover className="absolute top-1.5 left-1.5" />
           {anime.sync_pending && (
             <PendingSyncDot className="absolute top-1.5 right-1.5 ring-2 ring-black/60" />
           )}
@@ -647,35 +643,34 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
             </p>
           </div>
 
-          <div className="flex items-center justify-between gap-2 pt-2 border-t border-border-subtle text-xs">
-            <div className="flex items-center gap-2">
-              <span className="font-mono font-bold text-accent">
-                Ep {anime.user_progress} / {anime.episodes ?? "?"}
-              </span>
-              {anime.local_episode_count > 0 && (
-                <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 text-[10px] font-mono">
-                  {formatEpisodeRanges(anime.available_episodes)} on disk
+          <div>
+            <EpisodeProgressBar bar={bar} className="w-full h-2.5 rounded-full" />
+            <div className="flex items-center justify-between gap-2 pt-2 text-xs">
+              <div className="flex items-center gap-2">
+                <span className="font-mono font-bold text-accent">
+                  Ep {anime.user_progress} / {episodeTotalLabel(anime)}
                 </span>
-              )}
-            </div>
+                <ReadyBadge bar={bar} progress={anime.user_progress} />
+              </div>
 
-            <div
-              className="flex items-center gap-1"
-              onClick={(e) => e.stopPropagation()}
-              onDoubleClick={(e) => e.stopPropagation()}
-            >
-              <button
-                onClick={() => onStepEpisode(anime, -1)}
-                className="p-1.5 rounded-lg bg-bg-primary hover:bg-bg-tertiary border border-border-subtle text-text-secondary"
+              <div
+                className="flex items-center gap-1"
+                onClick={(e) => e.stopPropagation()}
+                onDoubleClick={(e) => e.stopPropagation()}
               >
-                <Minus className="w-3 h-3" />
-              </button>
-              <button
-                onClick={() => onStepEpisode(anime, 1)}
-                className="px-2.5 py-1 rounded-lg bg-accent hover:bg-accent-hover text-white font-semibold text-xs flex items-center gap-1"
-              >
-                <Plus className="w-3 h-3" />1
-              </button>
+                <button
+                  onClick={() => onStepEpisode(anime, -1)}
+                  className="p-1.5 rounded-lg bg-bg-primary hover:bg-bg-tertiary border border-border-subtle text-text-secondary"
+                >
+                  <Minus className="w-3 h-3" />
+                </button>
+                <button
+                  onClick={() => onStepEpisode(anime, 1)}
+                  className="px-2.5 py-1 rounded-lg bg-accent hover:bg-accent-hover text-white font-semibold text-xs flex items-center gap-1"
+                >
+                  <Plus className="w-3 h-3" />1
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -684,9 +679,7 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
   };
 
   const renderTableRow = (anime: AnimeEntry) => {
-    const pct = anime.episodes
-      ? Math.min(100, Math.round((anime.user_progress / anime.episodes) * 100))
-      : 50;
+    const bar = episodeBar(anime);
     const isSelected = selectedSet.has(anime.id);
 
     return (
@@ -704,13 +697,16 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
           }`}
       >
         <td className="py-2 pl-4 pr-3 flex items-center gap-3">
-          <img
-            src={getOptimizedCoverUrl(anime.cover_image, "medium")}
-            alt={titleOf(anime)}
-            loading="lazy"
-            decoding="async"
-            className="w-7 h-10 object-cover rounded shrink-0"
-          />
+          <span className="relative shrink-0">
+            <img
+              src={getOptimizedCoverUrl(anime.cover_image, "medium")}
+              alt={titleOf(anime)}
+              loading="lazy"
+              decoding="async"
+              className="w-7 h-10 object-cover rounded"
+            />
+            <AiringDot anime={anime} size="sm" onCover className="absolute -top-0.5 -left-0.5" />
+          </span>
           <div className="min-w-0">
             <div
               className={`font-semibold truncate max-w-md ${isSelected ? "text-accent" : "text-text-primary"
@@ -731,19 +727,17 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
           {anime.format}
         </td>
         <td className="py-2 px-3 w-44">
-          <div className="flex items-center justify-between text-[11px] font-mono mb-1">
+          <div className="flex items-center justify-between gap-2 text-[11px] font-mono mb-1">
             <span>
-              {anime.user_progress} / {anime.episodes ?? "?"}
+              {anime.user_progress} / {episodeTotalLabel(anime)}
             </span>
-            <span className="text-text-muted">{pct}%</span>
+            <ReadyBadge bar={bar} progress={anime.user_progress} className="py-0" />
           </div>
-          <div className="w-full h-1.5 rounded-full bg-bg-tertiary overflow-hidden">
-            <div className="h-full bg-accent rounded-full" style={{ width: `${pct}%` }} />
-          </div>
+          <EpisodeProgressBar bar={bar} className="w-full h-2.5 rounded-full" />
         </td>
         <td className="py-2 px-3 font-mono text-[11px]">
           {anime.local_episode_count > 0 ? (
-            <span className="text-emerald-400 font-semibold">
+            <span className="text-text-secondary font-semibold">
               {formatEpisodeRanges(anime.available_episodes)} on disk
             </span>
           ) : (
@@ -888,31 +882,5 @@ function PendingSyncDot({ className = "" }: { className?: string }) {
       className={`w-2 h-2 rounded-full bg-amber-400 shrink-0 ${className}`}
     />
   );
-}
-
-/**
- * Formats an array of episode numbers into compact ranges (e.g., [1, 2, 3, 5, 8] -> "Ep 1–3, 5, 8").
- */
-function formatEpisodeRanges(episodes: number[]): string {
-  if (!episodes || episodes.length === 0) return "";
-  const sorted = Array.from(
-    new Set(episodes.filter((n) => typeof n === "number" && n > 0))
-  ).sort((a, b) => a - b);
-  if (sorted.length === 0) return "";
-  const ranges: string[] = [];
-  let start = sorted[0];
-  let prev = sorted[0];
-  for (let i = 1; i < sorted.length; i++) {
-    const curr = sorted[i];
-    if (curr === prev + 1) {
-      prev = curr;
-    } else {
-      ranges.push(start === prev ? `${start}` : `${start}–${prev}`);
-      start = curr;
-      prev = curr;
-    }
-  }
-  ranges.push(start === prev ? `${start}` : `${start}–${prev}`);
-  return `Ep ${ranges.join(", ")}`;
 }
 

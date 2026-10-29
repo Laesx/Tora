@@ -69,7 +69,8 @@ import { NowPlayingView } from "./components/NowPlayingView";
 import { HistoryView } from "./components/HistoryView";
 import { StatsView } from "./components/StatsView";
 import { animeTitle, setCurrentTitleLanguage, TitleLanguageContext } from "./titles";
-import { SeasonsView } from "./components/SeasonsView";
+import { SeasonsView, SeasonRequest } from "./components/SeasonsView";
+import { SEASONS, SeasonName } from "./seasons";
 import { ScheduleView } from "./components/ScheduleView";
 import { SearchView } from "./components/SearchView";
 import { SettingsSection, SettingsView } from "./components/SettingsView";
@@ -156,6 +157,8 @@ export const App: React.FC = () => {
     id: number;
     nonce: number;
   } | null>(null);
+  // Season the Seasons tab should open on (cleared once applied)
+  const [seasonRequest, setSeasonRequest] = useState<SeasonRequest | null>(null);
   const [sortBy, setSortBy] = useState<
     "updated" | "title" | "score" | "progress"
   >("updated");
@@ -930,6 +933,14 @@ export const App: React.FC = () => {
     setGlobalSearchQuery(q);
     setGlobalSearchRequest((n) => n + 1);
     setActiveTab("search");
+  };
+
+  // Show one season in the Seasons tab (from the drawer / Now Playing); closes the drawer
+  const openSeason = (season: string, year: number) => {
+    if (!(SEASONS as readonly string[]).includes(season)) return;
+    setSelectedAnime(null);
+    setSeasonRequest({ season: season as SeasonName, year, nonce: Date.now() });
+    setActiveTab("seasons");
   };
 
   const rescanInFlightRef = useRef(false);
@@ -1757,6 +1768,8 @@ export const App: React.FC = () => {
                 )
               }
               onRemoveAnime={handleDeleteAnime}
+              seasonRequest={seasonRequest}
+              onSeasonRequestHandled={() => setSeasonRequest(null)}
               showToast={showToast}
             />
           )}
@@ -1802,6 +1815,7 @@ export const App: React.FC = () => {
               onLinkDetectedEpisode={handleLinkDetectedEpisode}
               onDismissSession={handleDismissSession}
               onOpenAnime={openAnime}
+              onOpenSeason={openSeason}
               onStepEpisode={handleStepEpisode}
               onBatchUpdate={handleBatchUpdate}
               onBatchDelete={handleBatchDelete}
@@ -1847,6 +1861,7 @@ export const App: React.FC = () => {
       {selectedAnime && (
         <AnimeDetailModal
           anime={selectedAnime}
+          onOpenSeason={openSeason}
           inList={animeList.some((a) => a.id === selectedAnime.id)}
           onAddToList={(status) => handleAddRemoteAnime(selectedAnime, status)}
           onClose={() => setSelectedAnime(null)}

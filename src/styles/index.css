@@ -10,6 +10,8 @@
   --stat-paused: #c98500;
   --stat-dropped: #d55181;
   --stat-planning: #9085e9;
+  /* On-disk strip in progress bars; recomputed from the accent and theme by applyThemeToDocument */
+  --progress-strip: 243 244 246;
 }
 
 :root,

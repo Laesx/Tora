@@ -30,6 +30,7 @@ import { getOptimizedCoverUrl } from "../api";
 import { openAnimeFolder, playLocalEpisode } from "../nowPlaying";
 import { useCustomLists } from "../customLists";
 import { CustomListsPanel } from "./CustomListsPanel";
+import { AiringDot } from "./AiringDot";
 import { useAnimeTitle } from "../titles";
 import { TorrentSearchRequest, torrentSearchFor } from "../torrents";
 
@@ -730,10 +731,11 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
       {/* Compact Header */}
       <div className="px-3 py-1.5 border-b border-border-subtle">
         <div
-          className="font-bold text-text-primary truncate"
+          className="font-bold text-text-primary flex items-center gap-1.5 min-w-0"
           title={titleOf(anime)}
         >
-          {titleOf(anime)}
+          <AiringDot anime={anime} size="sm" />
+          <span className="truncate">{titleOf(anime)}</span>
         </div>
         <div className="flex items-center justify-between text-[10px] text-text-muted font-mono mt-0.5">
           <span>

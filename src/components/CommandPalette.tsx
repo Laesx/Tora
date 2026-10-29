@@ -24,6 +24,7 @@ import {
 } from "../fuzzy";
 import { STATUS_OPTIONS } from "./AnimeQuickMenu";
 import { AnimeAction } from "../animeActions";
+import { AiringDot } from "./AiringDot";
 import { altTitles, useAnimeTitle, useTitleLanguage } from "../titles";
 
 export interface PaletteCommand {
@@ -764,6 +765,7 @@ function PaletteRow({
           decoding="async"
           className="w-7 h-10 object-cover rounded"
         />
+        <AiringDot anime={a} size="sm" onCover className="absolute -top-0.5 -left-0.5" />
         {item.recent && (
           <History className="absolute -bottom-1 -right-1 w-3 h-3 p-px rounded-full bg-bg-secondary text-text-muted" />
         )}
