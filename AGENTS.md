@@ -54,51 +54,88 @@ cargo check --manifest-path src-tauri/Cargo.toml
 
 ```text
 Tora/
-├── src/                                  # React 19 + TypeScript Frontend
-│   ├── App.tsx                           # Main shell, sidebar navigation, live playback scrobble polling & optimistic stepping
-│   ├── api.ts                            # Typed Tauri invoke wrappers (`toraApi`), theme presets & image downscaling helpers
-│   ├── types.ts                          # Shared TypeScript interfaces mirroring Rust database and detection models
-│   ├── seasons.ts                        # Season helpers (current season, shift, labels; broadcast quarters)
-│   ├── schedule.ts                       # Airing schedule helpers (Mon–Sun local weeks, bounds, day/time labels, country labels, `detectBreaks`)
-│   ├── nowPlaying.ts                     # Now Playing helpers: AniList links, play/open-folder, date & enum formatting
-│   ├── fuzzy.ts                          # Shared fuzzy search (normalized index, char-mask prefilter, subsequence scoring, match ranges)
-│   ├── torrents.ts                       # Anime-level torrent search (`torrentSearchFor`, season-suffix stripping), query field metadata, row → query text
-│   ├── animeActions.ts                   # Keyboard action list for one anime (palette → Right arrow), built on nowPlaying helpers
-│   ├── customLists.ts                    # AniList custom lists context (`useCustomLists`), optimistic membership edit, coverage helper
-│   ├── titles.ts                         # Display title language (`useAnimeTitle`, `altTitles`, `displayTitle` for plain helpers)
+├── src/                                  # React 19 + TypeScript Frontend (import with the `@/` alias = `src/`; same-folder files with `./`)
 │   ├── main.tsx                          # React 19 entrypoint & root provider
-│   ├── styles/
-│   │   └── index.css                     # Tailwind CSS v4 stylesheets, custom theme variables & scrollbars
-│   └── components/
-│       ├── AnitomyParserPanel.tsx        # Interactive Anitomy filename / window title parser (Settings → Diagnostics)
-│       ├── AnimeDetailModal.tsx          # Slide-over drawer for editing progress, score, notes, custom folder & synonyms
-│       ├── AnimeQuickMenu.tsx            # Context menu for anime cards (+1 episode, mark status, open folder, copy title)
-│       ├── CommandPalette.tsx            # Ctrl+K keyboard palette: Anime / Commands tabs, recents, AniList row, Right-arrow anime actions
-│       ├── CustomListsChip.tsx           # Single "Lists ▾" chip at the end of the status ribbon (filterable popover of custom lists)
-│       ├── CustomListsPanel.tsx          # Custom-list membership toggles + "hide from status lists" (quick menu rows / drawer chips)
-│       ├── AnimePosterCard.tsx           # Poster card for remote anime (Seasons / Search): opens drawer, quick-add
-│       ├── SeasonsView.tsx               # Cached seasonal browser (chips, ‹ ›, picker, sort/group/format filters, virtualized grid)
-│       ├── ScheduleView.tsx              # Weekly airing timetable (columns / agenda layouts, countdowns, my list / all anime, format/country/status filters, inferred breaks, "next episode ready" play, right-click add)
-│       ├── SearchView.tsx                # Global AniList search (Enter in the Seasons filter lands here)
-│       ├── LibraryManagerView.tsx        # Multi-drive folder manager, disk usage & virtualized episode table (Settings → Library)
-│       ├── NowPlayingView.tsx            # Now Playing tab: hero while playing, dashboard when idle
-│       ├── NowPlayingHero.tsx            # Playing anime hero (cover → AniList, metadata, studios/genres/tags links, episodes, link prompt)
-│       ├── NowPlayingDashboard.tsx       # Idle: watch stats, continue watching (next ep on disk), recently started/finished airing
-│       ├── FloatingQuickMenu.tsx         # Viewport-clamped portal for right-click quick menus (dashboard, schedule)
-│       ├── HistoryView.tsx               # History tab: scrobbles + manual progress changes (decreases as correction rows), grouped by day
-│       ├── StatsView.tsx                 # Stats tab: overview tiles, status bar, activity heatmap/streaks/monthly bars, backlog & ready-to-watch
-│       ├── SettingsView.tsx              # Sectioned settings: Appearance, Tracker, Library, Playback & Detection (Anisthesia players), Torrents, Diagnostics, About
-│       ├── TorrentsView.tsx              # Torrents tab: Releases (feed chips, search, anime cards, Download selected) | Feeds | Filters & priority; gear → Settings → Torrents
-│       ├── SettingsBackups.tsx           # Settings → About: settings snapshots list, Back up now, Restore
-│       ├── torrents/
-│       │   ├── ReleaseCard.tsx           # One anime's releases (checkbox rows, traits badges, "Other releases" for outside-tier ones)
-│       │   ├── ReleaseMenu.tsx           # Release right-click menu (download, copy, fansub pin, top priority, hide group, filter from release)
-│       │   ├── FeedsPanel.tsx            # General feeds (any RSS URL) and search feeds (`%title%` templates): drag-to-reorder, browser-style URLs, "Build Nyaa URL" helper
-│       │   ├── FiltersPanel.tsx          # Release priority tiers, fansubs per anime, Hide / Select filters
-│       │   ├── FilterEditor.tsx          # One query as condition rows or text (same string)
-│       │   ├── AnimePicker.tsx           # Fuzzy list-entry picker (fansub overrides, filter scope)
-│       │   └── TorrentSettings.tsx       # Settings → Torrents: app (detected / chosen), category, download folder, refresh, auto-download
-│       └── VirtualWatchlist.tsx          # Viewport-windowed virtual grid/list for Grid, Compact & Table modes (row model with optional status group headers, scroll-to-anime)
+│   ├── App.tsx                           # Wiring only: app state hooks, context providers, tab switch, drawer / palette / modals
+│   ├── app/                              # App shell and app-wide state
+│   │   ├── nav.ts                        # `NavTab`, `NAV_ITEMS` (sidebar rows + palette "Go to" commands)
+│   │   ├── Sidebar.tsx                   # Brand, Ctrl+K button, tab navigation, AniList account card
+│   │   ├── NowPlayingBanner.tsx          # Live playback strip above every tab except Now Playing
+│   │   ├── SignOutModal.tsx              # Sign-out confirmation
+│   │   ├── Toast.tsx                     # `useToastState` (stable `showToast`) + toast view
+│   │   ├── useAnimeList.ts               # The list + drawer / selection / quick-menu state; `setList`, `replaceEntries`, `applyDelta`, `refreshEntries`, list mutations
+│   │   ├── useEpisodeStepper.ts          # Optimistic debounced +1 / -1 (`stepEpisode`, position-locking `snapshots`)
+│   │   ├── useTrackerSync.ts             # AniList pull state (spinner, last synced, manual sync) + sync event handlers
+│   │   ├── useMediaPoll.ts               # 2.5 s player recognition poll (`inFlight` guard), new-session / scrobbled callbacks
+│   │   ├── useAppEvents.ts               # Registers every Tauri listener before the initial load
+│   │   ├── useCustomListsState.ts        # AniList custom lists state, membership maps, counts, `CustomListsContext` value
+│   │   ├── useGlobalShortcuts.ts         # F5, Ctrl+K, Ctrl+A, Enter, Escape
+│   │   └── paletteCommands.ts            # Ctrl+K Commands tab entries
+│   ├── contexts/                         # React contexts (provided by App)
+│   │   ├── toast.ts                      # `useToast()`; never pass `showToast` as a prop
+│   │   ├── animeActions.ts               # `useAnimeActions()`: open drawer, step, batch update / delete, change status, add, search torrents; never drill these as props
+│   │   ├── customLists.ts                # AniList custom lists context (`useCustomLists`), optimistic membership edit, coverage helper
+│   │   └── titles.ts                     # Display title language (`useAnimeTitle`, `altTitles`, `displayTitle` for plain helpers)
+│   ├── hooks/                            # Generic hooks
+│   │   ├── virtual.ts                    # `useScrollViewport` (list width / top / scroll / viewport height) + `visibleRange` (binary search)
+│   │   └── usePrefs.ts                   # Per-device view prefs in localStorage (guarded, laid over defaults)
+│   ├── lib/                              # Plain helpers, no React state
+│   │   ├── api.ts                        # Typed Tauri invoke wrappers (`toraApi`)
+│   │   ├── types.ts                      # Shared TypeScript interfaces mirroring Rust database and detection models
+│   │   ├── theme.ts                      # Theme presets, accent swatches, `applyThemeToDocument`, progress-strip color
+│   │   ├── format.ts                     # Bytes, countdowns, "last synced", `plural`
+│   │   ├── covers.ts                     # `getOptimizedCoverUrl` (AniList CDN downscaling)
+│   │   ├── status.ts                     # List status labels / icons / colors (`LIST_STATUSES`, `STATUS_INFO`, `statusLabel`, watchlist tabs, search group order)
+│   │   ├── anime.ts                      # AniList links, play / open-folder, date & enum formatting
+│   │   ├── episodes.ts                   # Episode ranges, aired / estimated totals, progress bar model
+│   │   ├── seasons.ts                    # Season helpers (current season, shift, labels; broadcast quarters)
+│   │   ├── fuzzy.ts                      # Shared fuzzy search (normalized index, char-mask prefilter, subsequence scoring, match ranges)
+│   │   └── torrents.ts                   # Anime-level torrent search (`torrentSearchFor`, season-suffix stripping), query field metadata, row → query text
+│   ├── components/                       # Shared UI used by several features
+│   │   ├── AnimeQuickMenu.tsx            # Context menu for anime cards (+1 episode, mark status, open folder, copy title)
+│   │   ├── SeasonAnimeMenu.tsx           # Right-click menu for remote anime posters (Seasons, Schedule)
+│   │   ├── FloatingQuickMenu.tsx         # Viewport-clamped portal for right-click quick menus (dashboard, schedule)
+│   │   ├── AnimePosterCard.tsx           # Poster card for remote anime (Seasons / Search): opens drawer, quick-add
+│   │   ├── CustomListsPanel.tsx          # Custom-list membership toggles + "hide from status lists" (quick menu rows / drawer chips)
+│   │   ├── EpisodeProgressBar.tsx        # Taiga-style progress bar with on-disk strip, "ready" badge
+│   │   └── AiringDot.tsx                 # Airing status dot with next-episode countdown
+│   ├── features/                         # One folder per tab / surface
+│   │   ├── watchlist/
+│   │   │   ├── WatchlistView.tsx         # Status tabs, custom-list chip, search, sort, sync, view mode + the list
+│   │   │   ├── useWatchlist.ts           # Filter state, `searchIndex`, status counts, search groups, `filteredAnime`, `focusAnime`
+│   │   │   ├── VirtualWatchlist.tsx      # Viewport-windowed virtual grid/list for Grid, Compact & Table modes (row model with optional status group headers, scroll-to-anime)
+│   │   │   └── CustomListsChip.tsx       # Single "Lists ▾" chip at the end of the status ribbon (filterable popover of custom lists)
+│   │   ├── detail/AnimeDetailModal.tsx   # Slide-over drawer for editing progress, score, notes, custom folder & synonyms
+│   │   ├── palette/
+│   │   │   ├── CommandPalette.tsx        # Ctrl+K keyboard palette: Anime / Commands tabs, recents, AniList row, Right-arrow anime actions
+│   │   │   └── animeActions.ts           # Keyboard action list for one anime (palette → Right arrow)
+│   │   ├── nowplaying/
+│   │   │   ├── NowPlayingView.tsx        # Now Playing tab: hero while playing, dashboard when idle
+│   │   │   ├── NowPlayingHero.tsx        # Playing anime hero (cover → AniList, metadata, studios/genres/tags links, episodes, link prompt)
+│   │   │   └── NowPlayingDashboard.tsx   # Idle: watch stats, continue watching (next ep on disk), recently started/finished airing
+│   │   ├── seasons/SeasonsView.tsx       # Cached seasonal browser (chips, ‹ ›, picker, sort/group/format filters, virtualized grid)
+│   │   ├── schedule/
+│   │   │   ├── ScheduleView.tsx          # Weekly airing timetable (columns / agenda layouts, countdowns, my list / all anime, format/country/status filters, inferred breaks, "next episode ready" play, right-click add)
+│   │   │   └── schedule.ts               # Airing schedule helpers (Mon–Sun local weeks, bounds, day/time labels, country labels, `detectBreaks`)
+│   │   ├── search/SearchView.tsx         # Global AniList search (Enter in the Seasons filter lands here)
+│   │   ├── history/HistoryView.tsx       # History tab: scrobbles + manual progress changes (decreases as correction rows), grouped by day
+│   │   ├── stats/StatsView.tsx           # Stats tab: overview tiles, status bar, activity heatmap/streaks/monthly bars, backlog & ready-to-watch
+│   │   ├── settings/
+│   │   │   ├── SettingsView.tsx          # Sectioned settings: Appearance, Tracker, Library, Playback & Detection (Anisthesia players), Torrents, Diagnostics, About
+│   │   │   ├── LibraryManagerView.tsx    # Multi-drive folder manager, disk usage & virtualized episode table (Settings → Library)
+│   │   │   ├── AnitomyParserPanel.tsx    # Interactive Anitomy filename / window title parser (Settings → Diagnostics)
+│   │   │   └── SettingsBackups.tsx       # Settings → About: settings snapshots list, Back up now, Restore
+│   │   └── torrents/
+│   │       ├── TorrentsView.tsx          # Torrents tab: Releases (feed chips, search, anime cards, Download selected) | Feeds | Filters & priority; gear → Settings → Torrents
+│   │       ├── ReleaseCard.tsx           # One anime's releases (checkbox rows, traits badges, "Other releases" for outside-tier ones)
+│   │       ├── ReleaseMenu.tsx           # Release right-click menu (download, copy, fansub pin, top priority, hide group, filter from release)
+│   │       ├── FeedsPanel.tsx            # General feeds (any RSS URL) and search feeds (`%title%` templates): drag-to-reorder, browser-style URLs, "Build Nyaa URL" helper
+│   │       ├── FiltersPanel.tsx          # Release priority tiers, fansubs per anime, Hide / Select filters
+│   │       ├── FilterEditor.tsx          # One query as condition rows or text (same string)
+│   │       ├── AnimePicker.tsx           # Fuzzy list-entry picker (fansub overrides, filter scope)
+│   │       └── TorrentSettings.tsx       # Settings → Torrents: app (detected / chosen), category, download folder, refresh, auto-download
+│   └── styles/
+│       └── index.css                     # Tailwind CSS v4 stylesheets, custom theme variables & scrollbars
 └── src-tauri/                            # Tauri v2 Rust Backend & Native C++ Bindings
     ├── Cargo.toml                        # Rust dependencies (rusqlite bundled, tokio, rayon, reqwest, tauri v2)
     ├── build.rs                          # Compiles vendored C++ `anitomy` (/std:c++latest) & `anisthesia` (/std:c++20)
@@ -143,7 +180,7 @@ Tora/
 ### 1. Never Block the Tauri Main (UI) Thread
 - **All** `@tauri::command` functions in `src-tauri/src/lib.rs` that touch SQLite, filesystem I/O, network requests, or Win32 window enumeration **must** be `async fn` and offload synchronous work via `tokio::task::spawn_blocking`.
 - On Windows, Tauri runs the Win32 message pump on the main thread; synchronous SQLite locks or Win32 `EnumWindows` / UI Automation calls on the main thread will freeze the UI.
-- In React (`src/App.tsx`), background polling (`pollMediaRecognition`) must use an `inFlight` guard so asynchronous poll calls never stack up concurrently.
+- In React (`src/app/useMediaPoll.ts`), background polling (`pollMediaRecognition`) must use an `inFlight` guard so asynchronous poll calls never stack up concurrently.
 
 ### 1b. Settings Must Never Silently Reset
 - `Database::get_settings` (`db/settings.rs`) lays the stored JSON over `AppSettings::default()` field by field: a missing or invalid field keeps only its own default. Unreadable JSON leaves the row untouched and returns defaults with `settings_recovered: true` (the frontend offers a restore). Still give every new `AppSettings` field a `#[serde(default…)]`.
@@ -196,8 +233,8 @@ When a filename or media player window title is parsed (`parse_filename` in `src
     - The watch history entry is recorded (`scrobbled_to_tracker = false`) and the change goes through `TrackerSyncService::apply_local_update_with_history`, which pushes to AniList and marks the history row scrobbled only after the push succeeds.
     - The `active_session` lock is only held to decide; it is released before any DB write or `.await`.
 - **Optimistic Episode Stepping (+1 Button) with Debounce**:
-  - In React (`handleStepEpisode` in `src/App.tsx`), clicking `+1` on an anime card applies an instant 0ms optimistic UI update to the badge count.
-  - Card sorting position in the watchlist is locked using `pendingStepSnapshots` during rapid successive clicks to prevent jarring layout jumps.
+  - In React (`stepEpisode` in `src/app/useEpisodeStepper.ts`, reached through `useAnimeActions()`), clicking `+1` on an anime card applies an instant 0ms optimistic UI update to the badge count.
+  - Card sorting position in the watchlist is locked using the stepper's `snapshots` during rapid successive clicks to prevent jarring layout jumps.
   - A debounce timer coalesces repeated clicks, persisting the final state to SQLite and AniList once clicking stops.
   - Active recognition session state (`active_session.matched_current_progress`) is kept in immediate sync when an entry is updated.
 
@@ -211,14 +248,19 @@ When a filename or media player window title is parsed (`parse_filename` in `src
 - **SQLite Page Cache & WAL**:
   - Keep `PRAGMA journal_mode = WAL`, `PRAGMA synchronous = NORMAL`, and `PRAGMA cache_size = -4000` (4 MB) in `Database::open` to minimize native memory consumption while providing high concurrent read performance.
 
+### 6b. Frontend List Updates Are Deltas
+- The full list (`get_anime_list`) crosses IPC only at startup and after rare manual actions (link a detected episode, Settings → Library actions, Torrents downloads that bind folders); pulls already arrive as `SyncSummary` deltas. Everything else applies a delta through `useAnimeList`: `replaceEntries` (known ids only), `applyDelta(changed, removedIds)`, or `refreshEntries(ids)` (`get_anime_entries`).
+- `add_or_upsert_anime` returns the one stored entry; `delete_anime_entry` / `batch_delete_anime_entries` return nothing. `ScanSummary.changed_anime_ids` lists the entries whose files or folder a scan / watcher batch / background matching changed, and the frontend refetches only those. Keep it complete when touching the scanner (owners before and after a change).
+- UI-only computation over data already in memory (fuzzy search, filtering, sorting, local-day stats bucketing) stays in TypeScript: it is cheap, synchronous where it must be (palette Enter), and needs the local timezone.
+
 ### 7. Memory Footprint & DOM Virtualization
 - **Title language**: `AppSettings.title_language` (`romaji` | `english` | `native`, serde default `romaji`; missing titles fall back to Romaji). Show titles with `useAnimeTitle()` (or `displayTitle` in plain helpers), never `title_romaji` directly. Torrent search queries always use `title_romaji`.
 - **DOM Virtualization**:
   - Large lists (`VirtualWatchlist.tsx` for the Anime Watchlist across `"grid"`, `"compact"`, and `"table"` modes, and the Indexed Local Episodes table in `LibraryManagerView.tsx`) must remain virtualized so WebView2 only mounts visible rows (+ overscan) and releases decoded cover image bitmaps for off-screen rows.
-  - `VirtualWatchlist` virtualizes a row model (optional group header rows + rows of `cols` cards with prefix-sum offsets, binary search for the first visible row); search results grouped by status go through the same path.
-- **Search (`src/fuzzy.ts`)**:
-  - The watchlist search and the command palette both use `searchAnime` over the one `searchIndex` built in `App.tsx` (`buildAnimeSearchIndex`, rebuilt only when `animeList` changes). Don't add another filter path: an anime picked in the palette must always appear in the watchlist results for the same text.
-  - A non-empty watchlist search shows matches from every list grouped by status (`SEARCH_GROUPS`), best match first; it is computed from `useDeferredValue(searchQuery)`. The palette searches synchronously so Enter always acts on what was typed.
+  - `VirtualWatchlist` virtualizes a row model (optional group header rows + rows of `cols` cards with prefix-sum offsets, `visibleRange` binary search for the first visible row); search results grouped by status go through the same path. Lists scrolling inside `<main>` measure with `useScrollViewport` (`src/hooks/virtual.ts`).
+- **Search (`src/lib/fuzzy.ts`)**:
+  - The watchlist search and the command palette both use `searchAnime` over the one `searchIndex` built in `useWatchlist` (`buildAnimeSearchIndex`, rebuilt only when `animeList` changes). Don't add another filter path: an anime picked in the palette must always appear in the watchlist results for the same text.
+  - A non-empty watchlist search shows matches from every list grouped by status (`SEARCH_GROUP_ORDER` in `src/lib/status.ts`), best match first; it is computed from `useDeferredValue(searchQuery)`. The palette searches synchronously so Enter always acts on what was typed.
   - Never scan full titles per keystroke without the index: normalization happens once at index time and the character bitmask rejects most entries before scoring.
 - **Cover Image Resolution (`getOptimizedCoverUrl`)**:
   - **Never** use AniList `/cover/extraLarge/` URLs (up to 6 MB RGBA per decoded bitmap) in lists, cards, or grids.
@@ -238,7 +280,7 @@ When a filename or media player window title is parsed (`parse_filename` in `src
 - **Airing schedule** (`TrackerSyncService::fetch_airing_schedule`): public data, no token. All pages of `Page.airingSchedules(airingAt_greater, airingAt_lesser)` for one `[from, to)` range (a local Mon–Sun week computed by the frontend, ≤ 8 days) go through the shared rate limiter; media carry only the light `MEDIA_LIST_FRAGMENT` fields (adult media dropped) plus the item's `country` (`countryOfOrigin`). Opening or adding a non-list anime from the schedule first swaps the light media for `media_metadata` (`getMediaMetadata`). "No episode this week" breaks are inferred in the frontend (`detectBreaks`, from list entries' `next_airing_at`) and never stored. Each range is cached as one row in `airing_schedule_cache`; ranges that already ended are never stale, others are flagged `stale` after 6h and refreshed in the background by the frontend. Browsing **never** writes `anime_entries` or `media_metadata`; list state comes from the local list by id.
 - **Media metadata** (`TrackerSyncService::media_metadata`, used by the Now Playing hero): served from `media_metadata`. Only a media with no row is fetched (once, `fetch_media_metadata`, through the rate limiter); playback **never** refreshes it — season fetches are the only refresh path.
 - **Airing dates**: `start_date` / `end_date` (fuzzy `YYYY[-MM[-DD]]`) are part of the light `MEDIA_LIST_FRAGMENT` and compared in `merge_remote_list`, so pulls keep them current without extra requests.
-- **Custom lists** (AniList `customLists` / `hiddenFromStatusLists`): a side channel that never touches `AnimeEntry`, the search index or the matcher. Names live in `tracker_custom_lists` (user order); membership in `anime_custom_lists` (one row per entry, `ON DELETE CASCADE`, wiped by `reset_for_account_switch`). The pull reads both from the existing `MediaListCollection` query and `Database::merge_remote_custom_lists` merges them diff-only (never writes `anime_entries`, never rematches; skipped when the remote list is empty). Edits go through `TrackerSyncService::set_custom_lists` → `apply_custom_list_change`: the row is marked `dirty` and the entry `sync_pending`, so the normal push queue sends it; `SaveMediaListEntry` gets `customLists` / `hiddenFromStatusLists` **only** while the row is dirty, and `finish_push` clears `dirty` (and `sync_pending` only once no membership edit is still unsent). Dirty rows keep local membership through pulls. Creating, renaming and deleting lists stays on AniList. Frontend: `get_custom_lists` state in `App.tsx`, provided through `CustomListsContext`; a selected list replaces the status filter (`customListFilter`), hidden entries leave the status tabs and counts (still in All Anime and search), and the watchlist search is unchanged.
+- **Custom lists** (AniList `customLists` / `hiddenFromStatusLists`): a side channel that never touches `AnimeEntry`, the search index or the matcher. Names live in `tracker_custom_lists` (user order); membership in `anime_custom_lists` (one row per entry, `ON DELETE CASCADE`, wiped by `reset_for_account_switch`). The pull reads both from the existing `MediaListCollection` query and `Database::merge_remote_custom_lists` merges them diff-only (never writes `anime_entries`, never rematches; skipped when the remote list is empty). Edits go through `TrackerSyncService::set_custom_lists` → `apply_custom_list_change`: the row is marked `dirty` and the entry `sync_pending`, so the normal push queue sends it; `SaveMediaListEntry` gets `customLists` / `hiddenFromStatusLists` **only** while the row is dirty, and `finish_push` clears `dirty` (and `sync_pending` only once no membership edit is still unsent). Dirty rows keep local membership through pulls. Creating, renaming and deleting lists stays on AniList. Frontend: `get_custom_lists` state in `useCustomListsState`, provided through `CustomListsContext`; a selected list replaces the status filter (`customListFilter`), hidden entries leave the status tabs and counts (still in All Anime and search), and the watchlist search is unchanged.
 - **Watch history**: scrobbles log their own row. `Manual`, `Step` and `Batch` changes that raise progress log one row per newly watched episode (`player_name = "Manual"`, no file) via `Database::record_manual_progress`; a decrease logs one correction row (`progress_from` = old progress, `episode_number` = new). `Add` never logs. Anything counting watched episodes (`watch_history_totals`, `list_stats`) filters `progress_from IS NULL`. The drawer flushes a pending ± step save when it closes instead of dropping it.
 - **Stats** (`get_stats` → `Database::list_stats`, reader only): list totals, backlog, ready-to-watch and the last 366 days of watched-episode events; the frontend buckets events by local day. Drive usage comes from `get_drive_summaries`. No AniList requests.
 
@@ -247,11 +289,11 @@ When a filename or media player window title is parsed (`parse_filename` in `src
 - **General feeds** (`TorrentFeed { id, name, enabled, url }`, key `torrent_feeds`) and **search feeds** (`SearchFeed { id, name, url }` with `%title%`, key `torrent_search_feeds`, never empty: defaults to Nyaa English-translated and all categories). Feeds saved as Nyaa query / category / filter fields load once as their Nyaa URL (`load_feeds`), and the next save drops the old fields. All torrent config lives in its own `app_settings` keys (`torrent_feeds`, `torrent_search_feeds`, `torrent_filters`, `torrent_priority`, `torrent_fansubs`, `torrent_board_options`), never inside `AppSettings` (a stale Settings save would overwrite them), and is kept on account switch. There are no torrent tables; the old `torrent_rules` is converted once and dropped.
 - **RAM cache** (`TorrentCache` in `AppState`): raw items + Anitomy output per feed URL and the last search, keyed by its full filled-in URL. `get_torrent_board` **never fetches general feeds** unless `force` (the Refresh button); never-fetched selected feeds come back in `TorrentBoard.unfetched` and the tab waits for Refresh. Searches fetch on a cache miss. The background loop refreshes enabled feeds older than `torrent_refresh_minutes` (0 = never), only ones already fetched this session unless `torrent_auto_download` is on, and emits `torrent-feeds-refreshed`. Matching, filters and selection are recomputed from the cache on every board read — never refetch to re-select. The frontend keeps the last board in module memory so re-entering the tab shows it at once.
 - **Board matching**: `board::match_titles` matches each distinct normalized title once (rayon), then each release does `title_match_for` + `resolve_episode` (= `match_episode`). Never call `match_episode` per release in `build_board`. Each build logs `[torrents] board: … in N ms`.
-- **Feed URLs** are stored percent-encoded (`feed::normalize_url` on save encodes spaces, the `DISPLAY_DECODED` characters such as `|`, `[`, `]`, control characters and non-ASCII; `%` is untouched so `%title%` survives) and shown decoded like a browser (`displayUrl` in `src/torrents.ts`, the same set). Feed order is the saved array order (chips, search dropdown; the first search feed is the default).
+- **Feed URLs** are stored percent-encoded (`feed::normalize_url` on save encodes spaces, the `DISPLAY_DECODED` characters such as `|`, `[`, `]`, control characters and non-ASCII; `%` is untouched so `%title%` survives) and shown decoded like a browser (`displayUrl` in `src/lib/torrents.ts`, the same set). Feed order is the saved array order (chips, search dropdown; the first search feed is the default).
 - **Searches** use `BoardOptions.search_feed_id` (the dropdown next to the search box; a deleted / unset choice = the first search feed, `config::resolve_search_feed`), filled by `feed::search_url` (`%title%`, any case → the URL-encoded query). The frontend saves the choice before reloading; it never sends a template.
 - **Anime-level search everywhere**: callers pass `torrentSearchFor(anime)` (Romaji title without season/part suffix, plus the anime id whose card is pinned first). Never search per episode.
 - **Hidden list statuses** (`BoardOptions.hidden_statuses`, key `torrent_board_options`, default Planning + Dropped): releases matched to an entry with one of these statuses are dropped before everything else (no card, never selected or auto-downloaded), except the anime a search was started from.
 - **Selection pipeline** (`board.rs`): Discard filters → candidates (built-in: list status Watching/Rewatching, episode > progress, not on disk, not a batch, not sent this session; or a Select filter) → the anime's fansub override (strict: listed groups only, in order) or the global priority tiers (first tier with a matching release wins; `fallback_to_best` when none) → one release per (anime, episode range), ties by resolution closest to 1080p, then seeders, then newest. "Already downloaded" is the library (`available_episodes`) plus the session-only sent set; there is no download history table.
-- **Query language** (`query.rs`, shared by filters and tiers): space = AND, `OR`/`|` = ANY (mixing is an error so the form editor stays equivalent), `-` negates, bare word / quoted phrase = title contains, `/regex/` on the raw title, `field:value` and `> >= < <=` for numeric fields. `QUERY_FIELDS` in `src/torrents.ts` must list the same fields.
+- **Query language** (`query.rs`, shared by filters and tiers): space = AND, `OR`/`|` = ANY (mixing is an error so the form editor stays equivalent), `-` negates, bare word / quoted phrase = title contains, `/regex/` on the raw title, `field:value` and `> >= < <=` for numeric fields. `QUERY_FIELDS` in `src/lib/torrents.ts` must list the same fields.
 - **Downloads** (`download_releases`): save folder = existing `custom_folder` → the single folder of the anime's local episodes → `<torrent_download_folder>\<sanitized title_romaji>` (created; written to `custom_folder` only if empty, via `set_custom_folder_if_empty` — local-only, no AniList push) → the client default. The `.torrent` is downloaded to `app_data\torrents` (magnet fallback) and the app is launched with per-client flags by exe name (qBittorrent `--save-path= --category= --skip-dialog=true`, one process per folder with all its files; if qBittorrent wasn't running, wait for it before the next launch). No app found → the system default handler. No WebUI.
 - Saving a new `torrent_download_folder` adds it as a library folder unless an enabled one already contains it, so downloaded files are watched and matched. The Settings field commits on blur / Browse, never per keystroke.

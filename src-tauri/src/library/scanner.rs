@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 use walkdir::{DirEntry, WalkDir};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ScanSummary {
     pub folders_scanned: usize,
     pub total_files_indexed: usize,
@@ -19,6 +19,9 @@ pub struct ScanSummary {
     pub removed_files: usize,
     pub matched_files: usize,
     pub elapsed_ms: u128,
+    /// Entries whose local files or folder changed; the frontend refetches only these rows
+    #[serde(default)]
+    pub changed_anime_ids: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -439,6 +442,11 @@ fn match_directory_to_anime(dir_path: &Path, matcher: &AnimeMatcherIndex) -> Opt
     Some((anime_id, full_dir))
 }
 
+/// `LIKE` pattern for every file under a removed directory path
+fn dir_prefix_pattern(path: &str) -> String {
+    format!("{}\\%", path.trim_end_matches(['\\', '/']))
+}
+
 fn upsert_episode_rows(
     tx: &rusqlite::Transaction<'_>,
     rows: &[ParsedEpisodeRow],
@@ -666,14 +674,7 @@ impl Database {
             .collect();
 
         if folders.is_empty() {
-            return Ok(ScanSummary {
-                folders_scanned: 0,
-                total_files_indexed: 0,
-                newly_parsed: 0,
-                removed_files: 0,
-                matched_files: 0,
-                elapsed_ms: 0,
-            });
+            return Ok(ScanSummary::default());
         }
 
         // Load existing indexed episodes cache: file_path -> (id, folder_id, mtime, size, matched_anime_id)
@@ -808,10 +809,9 @@ impl Database {
             return Ok(ScanSummary {
                 folders_scanned: folders.len(),
                 total_files_indexed,
-                newly_parsed: 0,
-                removed_files: 0,
                 matched_files: unchanged_matched,
                 elapsed_ms: start.elapsed().as_millis(),
+                ..Default::default()
             });
         }
 
@@ -838,6 +838,16 @@ impl Database {
             .count();
         let now = chrono::Utc::now().timestamp();
 
+        // Entries whose files change: owners of removed rows, previous and new owners of re-parsed rows
+        let stale_set: HashSet<i64> = stale_ids.iter().copied().collect();
+        let mut changed_ids: HashSet<i64> = existing_cache
+            .values()
+            .filter(|(row_id, ..)| stale_set.contains(row_id))
+            .filter_map(|&(.., aid)| aid)
+            .collect();
+        changed_ids.extend(to_parse.iter().filter_map(|t| t.6));
+        changed_ids.extend(parsed_rows.iter().filter_map(|r| r.matched_anime_id));
+
         {
             let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
             let tx = conn.transaction().map_err(|e| e.to_string())?;
@@ -862,7 +872,9 @@ impl Database {
                     )
                     .map_err(|e| e.to_string())?;
                 for (aid, dir_path) in &discovered_dirs {
-                    let _ = folder_stmt.execute(params![dir_path, aid]);
+                    if folder_stmt.execute(params![dir_path, aid]).unwrap_or(0) > 0 {
+                        changed_ids.insert(*aid);
+                    }
                 }
             }
 
@@ -891,6 +903,7 @@ impl Database {
             removed_files: stale_ids.len(),
             matched_files: unchanged_matched + newly_matched,
             elapsed_ms: start.elapsed().as_millis(),
+            changed_anime_ids: changed_ids.into_iter().collect(),
         })
     }
 
@@ -984,23 +997,49 @@ impl Database {
 
         let mut removed_count = 0usize;
         let now = chrono::Utc::now().timestamp();
+        // Entries whose files or folder change: owners before (removed / replaced rows) and after
+        let mut changed_ids: HashSet<i64> =
+            added_rows.iter().filter_map(|r| r.matched_anime_id).collect();
 
         {
             let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
             let tx = conn.transaction().map_err(|e| e.to_string())?;
 
+            {
+                let mut owners = tx
+                    .prepare(
+                        "SELECT DISTINCT matched_anime_id FROM local_episodes
+                         WHERE (file_path = ?1 OR file_path LIKE ?2) AND matched_anime_id IS NOT NULL",
+                    )
+                    .map_err(|e| e.to_string())?;
+                let removed = removed_paths
+                    .iter()
+                    .map(|p| (p.as_str(), dir_prefix_pattern(p)));
+                let replaced = added_rows.iter().map(|r| (r.file_path.as_str(), String::new()));
+                for (path, prefix) in removed.chain(replaced) {
+                    let ids = owners
+                        .query_map(params![path, prefix], |r| r.get::<_, i64>(0))
+                        .map_err(|e| e.to_string())?;
+                    changed_ids.extend(ids.flatten());
+                }
+            }
+
             for old_path in &removed_paths {
-                let prefix = format!("{}\\%", old_path.trim_end_matches(['\\', '/']));
                 let n = tx
                     .execute(
                         "DELETE FROM local_episodes WHERE file_path = ?1 OR file_path LIKE ?2",
-                        params![old_path, prefix],
+                        params![old_path, dir_prefix_pattern(old_path)],
                     )
                     .map_err(|e| e.to_string())?;
                 removed_count += n;
             }
 
             for (old_folder, new_folder) in &folder_renames {
+                if let Ok(mut stmt) = tx.prepare("SELECT id FROM anime_entries WHERE custom_folder = ?1") {
+                    if let Ok(ids) = stmt.query_map(params![old_folder], |r| r.get::<_, i64>(0)) {
+                        changed_ids.extend(ids.flatten());
+                    }
+                }
                 let _ = tx.execute(
                     "UPDATE anime_entries SET custom_folder = ?1 WHERE custom_folder = ?2",
                     params![new_folder, old_folder],
@@ -1010,11 +1049,14 @@ impl Database {
             upsert_episode_rows(&tx, &added_rows)?;
 
             for (aid, dir_path) in &auto_folders {
-                let _ = tx.execute(
+                let bound = tx.execute(
                     "UPDATE anime_entries SET custom_folder = ?1
                      WHERE id = ?2 AND (custom_folder IS NULL OR custom_folder = '')",
                     params![dir_path, aid],
                 );
+                if bound.unwrap_or(0) > 0 {
+                    changed_ids.insert(*aid);
+                }
             }
 
             for fid in &touched_folder_ids {
@@ -1047,6 +1089,7 @@ impl Database {
             removed_files: removed_count,
             matched_files,
             elapsed_ms: start.elapsed().as_millis(),
+            changed_anime_ids: changed_ids.into_iter().collect(),
         }))
     }
 
@@ -1712,6 +1755,19 @@ mod tests {
         assert_eq!(s1.newly_parsed, 2);
         assert_eq!(s1.removed_files, 0);
         assert_eq!(s1.matched_files, 2);
+        let owner_of = |path: &Path| {
+            db.list_local_episodes(None)
+                .unwrap()
+                .into_iter()
+                .find(|e| e.file_path == path.to_string_lossy())
+                .and_then(|e| e.matched_anime_id)
+                .expect("matched file")
+        };
+        let mut changed = s1.changed_anime_ids.clone();
+        changed.sort_unstable();
+        let mut owners = vec![owner_of(&ep1), owner_of(&ep2)];
+        owners.sort_unstable();
+        assert_eq!(changed, owners);
 
         let frieren_entry = db.get_anime_entry_by_id(154587).expect("frieren entry");
         assert_eq!(
@@ -1725,6 +1781,7 @@ mod tests {
         assert_eq!(s2.newly_parsed, 0);
         assert_eq!(s2.removed_files, 0);
         assert_eq!(s2.matched_files, 2);
+        assert!(s2.changed_anime_ids.is_empty());
 
         // 3. Single-file notification indexes only the new episode without rescanning
         let ep3 = media_dir.join("[SubsPlease] Dandadan - 05 (1080p).mkv");
@@ -1742,6 +1799,7 @@ mod tests {
             .expect("should report change");
         assert_eq!(s3.newly_parsed, 1);
         assert_eq!(s3.matched_files, 1);
+        assert_eq!(s3.changed_anime_ids, vec![owner_of(&ep3)]);
 
         // 4. Single-file removal notification removes only that file
         std::fs::remove_file(&ep1).expect("remove ep1");
@@ -1756,6 +1814,7 @@ mod tests {
             .expect("handle remove event")
             .expect("should report removal");
         assert_eq!(s4.removed_files, 1);
+        assert_eq!(s4.changed_anime_ids, vec![154587]);
         assert_eq!(db.list_local_episodes(None).unwrap().len(), 2);
 
         let _ = std::fs::remove_dir_all(&tmp_dir);

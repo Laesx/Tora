@@ -12,11 +12,13 @@ import {
   Trash2,
   Tv,
 } from "lucide-react";
-import { AnimeEntry } from "../types";
-import { toraApi } from "../api";
-import { STATUS_OPTIONS } from "./AnimeQuickMenu";
-import { LIST_STATUS_META } from "./AnimePosterCard";
-import { useAnimeTitle } from "../titles";
+import { AnimeEntry } from "@/lib/types";
+import { toraApi } from "@/lib/api";
+import { LIST_STATUSES } from "@/lib/status";
+import { STATUS_INFO } from "@/lib/status";
+import { useAnimeTitle } from "@/contexts/titles";
+import { useToast } from "@/contexts/toast";
+import { useAnimeActions } from "@/contexts/animeActions";
 
 interface SeasonAnimeMenuProps {
   /** The remote (season) anime that was right-clicked */
@@ -28,9 +30,6 @@ interface SeasonAnimeMenuProps {
   onClose: () => void;
   onOpen: (anime: AnimeEntry) => void;
   onAdd: (anime: AnimeEntry, status: "CURRENT" | "PLANNING") => void;
-  onChangeStatus: (anime: AnimeEntry, status: string, label: string) => void;
-  onRemove: (anime: AnimeEntry) => void;
-  showToast: (msg: string, type?: "success" | "info" | "error") => void;
 }
 
 const itemClass =
@@ -44,10 +43,9 @@ export const SeasonAnimeMenu: React.FC<SeasonAnimeMenuProps> = ({
   onClose,
   onOpen,
   onAdd,
-  onChangeStatus,
-  onRemove,
-  showToast,
 }) => {
+  const { changeStatus, deleteAnime } = useAnimeActions();
+  const showToast = useToast();
   const titleOf = useAnimeTitle();
   const ref = useRef<HTMLDivElement | null>(null);
   const [position, setPosition] = useState({ top: anchor.y, left: anchor.x });
@@ -123,7 +121,7 @@ export const SeasonAnimeMenu: React.FC<SeasonAnimeMenuProps> = ({
     }
   };
 
-  const status = listEntry ? LIST_STATUS_META[listEntry.user_status] : null;
+  const status = listEntry ? STATUS_INFO[listEntry.user_status] : null;
 
   return createPortal(
     <div
@@ -147,7 +145,7 @@ export const SeasonAnimeMenu: React.FC<SeasonAnimeMenuProps> = ({
           </span>
           {status && listEntry ? (
             <span className={`px-1.5 py-px rounded font-sans font-bold ${status.badge}`}>
-              {status.label}
+              {status.shortLabel}
               {listEntry.user_status !== "PLANNING" &&
                 ` ${listEntry.user_progress}/${listEntry.episodes ?? "?"}`}
             </span>
@@ -175,14 +173,14 @@ export const SeasonAnimeMenu: React.FC<SeasonAnimeMenuProps> = ({
 
             {statusOpen && (
               <div className="mx-2 my-1 p-1.5 rounded-lg bg-bg-primary border border-border-subtle grid grid-cols-2 gap-1">
-                {STATUS_OPTIONS.map((st) => {
+                {LIST_STATUSES.map((st) => {
                   const Icon = st.icon;
                   const isCurrent = listEntry.user_status === st.id;
                   return (
                     <button
                       key={st.id}
                       disabled={isCurrent}
-                      onClick={run(() => onChangeStatus(listEntry, st.id, st.label))}
+                      onClick={run(() => changeStatus(listEntry, st.id, st.label))}
                       className={`flex items-center gap-1.5 px-2 py-1 rounded text-[11px] text-left transition cursor-pointer ${isCurrent
                         ? "bg-accent/20 text-accent font-bold cursor-default"
                         : "text-text-secondary hover:bg-bg-secondary hover:text-text-primary"
@@ -241,7 +239,7 @@ export const SeasonAnimeMenu: React.FC<SeasonAnimeMenuProps> = ({
 
         {listEntry && (
           <button
-            onClick={run(() => onRemove(listEntry))}
+            onClick={run(() => deleteAnime(listEntry))}
             className="w-full flex items-center gap-2 px-3 py-1.5 text-left text-xs text-red-400 hover:bg-red-500/15 transition cursor-pointer"
           >
             <Trash2 className="w-3.5 h-3.5" />

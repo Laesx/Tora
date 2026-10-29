@@ -1,20 +1,20 @@
 import React from "react";
 import { Check, EyeOff, Minus } from "lucide-react";
-import { listCoverage, useCustomLists } from "../customLists";
+import { listCoverage, useCustomLists } from "@/contexts/customLists";
+import { useToast } from "@/contexts/toast";
 
 interface CustomListsPanelProps {
   animeIds: number[];
   // "menu": checkbox rows inside a quick menu; "chips": toggle chips in the details drawer
   variant: "menu" | "chips";
-  showToast: (msg: string, type?: "success" | "info" | "error") => void;
 }
 
 /** Membership toggles for the user's AniList custom lists (one entry or a selection). */
 export const CustomListsPanel: React.FC<CustomListsPanelProps> = ({
   animeIds,
   variant,
-  showToast,
 }) => {
+  const showToast = useToast();
   const customLists = useCustomLists();
   const { names } = customLists;
   if (names.length === 0 || animeIds.length === 0) return null;

@@ -1,18 +1,11 @@
 import React from "react";
 import { Clock, Plus, Star } from "lucide-react";
-import { AnimeEntry } from "../types";
-import { formatCountdown, getOptimizedCoverUrl } from "../api";
-import { useAnimeTitle } from "../titles";
+import { AnimeEntry } from "@/lib/types";
+import { formatCountdown } from "@/lib/format";
+import { getOptimizedCoverUrl } from "@/lib/covers";
+import { useAnimeTitle } from "@/contexts/titles";
 import { AiringDot } from "./AiringDot";
-
-export const LIST_STATUS_META: Record<string, { label: string; badge: string }> = {
-  CURRENT: { label: "Watching", badge: "bg-accent text-white" },
-  REPEATING: { label: "Rewatching", badge: "bg-violet-500 text-white" },
-  PLANNING: { label: "Planning", badge: "bg-sky-500 text-white" },
-  COMPLETED: { label: "Completed", badge: "bg-emerald-500 text-white" },
-  PAUSED: { label: "Paused", badge: "bg-amber-500 text-black" },
-  DROPPED: { label: "Dropped", badge: "bg-rose-500 text-white" },
-};
+import { STATUS_INFO } from "@/lib/status";
 
 /** Fixed footer height so virtualized grids can compute exact row heights. */
 export const POSTER_CARD_FOOTER_HEIGHT = 92;
@@ -38,7 +31,7 @@ export const AnimePosterCard: React.FC<AnimePosterCardProps> = ({
   onContextMenu,
 }) => {
   const titleOf = useAnimeTitle();
-  const status = listEntry ? LIST_STATUS_META[listEntry.user_status] : null;
+  const status = listEntry ? STATUS_INFO[listEntry.user_status] : null;
   const countdown = formatCountdown(anime.next_airing_at);
 
   return (
@@ -81,7 +74,7 @@ export const AnimePosterCard: React.FC<AnimePosterCardProps> = ({
             <span
               className={`px-2 py-0.5 rounded-md text-[10px] font-bold shadow ${status.badge}`}
             >
-              {status.label}
+              {status.shortLabel}
               {listEntry.user_status !== "PLANNING" &&
                 ` • ${listEntry.user_progress}/${listEntry.episodes ?? "?"}`}
             </span>

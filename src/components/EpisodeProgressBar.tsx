@@ -1,6 +1,6 @@
 import React from "react";
 import { Play } from "lucide-react";
-import { EpisodeBarModel } from "../episodes";
+import { EpisodeBarModel } from "@/lib/episodes";
 
 /**
  * Taiga-style progress bar: a thick accent watched fill, and a 3px strip along the bottom edge

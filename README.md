@@ -1,49 +1,77 @@
-# Tora (虎) — Fast, Modern Anime Library Manager & Tracker
+# Tora (虎)
 
-**Tora** is a fast, lightweight desktop anime manager inspired by **Taiga**, built with **Tauri v2 (Rust)** and **React + TypeScript + Tailwind CSS**.
+A fast desktop anime manager inspired by [Taiga](https://github.com/erengy/taiga).
+It is heavier, but it comes with some QoL upgrades.
 
----
+> [!WARNING]
+> Tora is under heavy development. Expect bugs and breaking changes.
+> Only AniList is supported for now, and only on Windows.
 
-## Core Features
+<!-- ![Tora](docs/screenshots/overview.png) -->
 
-1. **Episode Detection (Anisthesia + Anitomy)**
-   - **Anisthesia Win32 Media Player Detection** (`src-tauri/src/detection/anisthesia.rs`): Monitors 15+ Windows media players (`mpv`, `mpv.net`, `MPC-HC`, `MPC-BE`, `VLC`, `PotPlayer`, `KMPlayer`, `SMPlayer`, `GOM`, `Kodi`, `Windows Media Player`, `Haruna`, etc.) via native Win32 APIs (`EnumWindows`, `GetWindowTextW`, `QueryFullProcessImageNameW`).
-   - **Anitomy Filename Parser** (`src-tauri/src/detection/anitomy.rs`): Tokenizes anime filenames and window titles into Anime Title, Normalized Title, Episode Number, Episode Version (`v2`), Season, Release Group, Video Resolution (`1080p`, `2160p`), Video/Audio Terms (`HEVC`, `10-bit`, `AV1`, `FLAC`, `Dual Audio`), Source (`BluRay`, `WEB-DL`), and CRC32 Checksum.
-   - **Automatic Progress Scrobbling**: Configurable recognition delay timer (like Taiga's *"Wait before updating list"*) that automatically increments your progress and logs to your Watch History.
+## Features
 
-2. **Multi-Drive Anime Episode Library Management** (`src-tauri/src/library/scanner.rs`)
-   - **Multiple Root Folders Across Any Hard Drive**: Index video files across `C:\`, `D:\`, `E:\`, or network shares.
-   - **High-Speed Parallel Indexing**: Uses `walkdir` + `rayon` with incremental `mtime` & file-size caching in SQLite (`WAL` mode) to scan tens of thousands of files in milliseconds.
-   - **Per-Drive Disk Space Analytics**: Uses native Win32 `GetDiskFreeSpaceExW` to display drive capacity, free space, and anime storage footprint.
-   - **Automatic & Manual Title Alias Binding**: Automatically links episodes to your watchlist via normalized titles, synonyms, or parent folder names, with 1-click manual binding for custom folder names.
+### Episode detection
 
-3. **Internal Tracker Plugin System (AniList Primary)** (`src-tauri/src/plugins/`)
-   - Built around the extensible `TrackerPlugin` trait and `PluginManager` (`src-tauri/src/plugins/mod.rs`).
-   - **AniList GraphQL v2 Plugin** (`src-tauri/src/plugins/anilist.rs`):
-     - Public username sync (import any AniList user's anime list immediately without needing a token).
-     - OAuth Bearer token support for automatic 2-way progress, status, score, repeat, and notes synchronization.
-     - Seasonal anime browser (`Winter`, `Spring`, `Summer`, `Fall`) & live Airing Countdown schedule.
+- **Automatic media player detection.** We use [Anisthesia](https://github.com/erengy/anisthesia), the same detection engine Taiga uses.
+- **Battle-tested filename parsing.** We also use [Anitomy](https://github.com/erengy/anitomy), Taiga's filename parser, with some extra fuzzy matching on top.
+- **Sequel episode numbering.** Continuous episode numbers (e.g. `Kusuriya no Hitorigoto - 51`) are redirected to the right season using [anime-relations](https://github.com/erengy/anime-relations).
 
-4. **Torrent Search, Smart RSS Rules & qBittorrent Integration** (`src-tauri/src/torrents/mod.rs`)
-   - Search **Nyaa.si** and **AnimeTosho** RSS feeds with automatic Anitomy tag extraction on every result.
-   - **Taiga-style Smart Filter Rules**: Highlight, auto-download, or discard torrents by anime title, release group (`SubsPlease`, `Erai-raws`), resolution (`1080p`, `2160p`), excluded keywords, and unwatched episode numbers.
-   - **Download Integration**: Send directly to **qBittorrent WebUI API** (with custom category & per-anime save folder) or launch Magnet links in your system's default torrent client.
+<!-- ![Now Playing](docs/screenshots/now-playing.png) -->
 
-5. **Rich Anime Detail Menus, Popovers & Theme Engine**
-   - **Quick Info Popover Menu (`•••`)** on every anime card plus a full **Anime Detail Drawer** with an interactive Episode Availability Grid (`1..N`), direct local episode playback, Explorer file reveal, and custom folder/alias configuration.
-   - **6 Curated Themes + Custom Accent Colors**: *Tora Midnight (Dark)*, *Taiga Classic (Light)*, *Catppuccin Mocha*, *Tokyo Night*, *Cyber Sakura (OLED)*, and *Nordic Frost*, plus 3 list view modes (*Poster Grid*, *Detailed Cards*, and *Taiga Classic Dense Table*) and a `Ctrl+K` Command Palette.
+### Library
 
----
+- **Fast indexing.** A 7 TB library (12,000 episodes) is read and processed in only 0.6 seconds.
+- **Live folder watching.** New, renamed and deleted files show up instantly, with no polling.
+- **Folder and alias linking.** Episodes are matched by title, synonyms or folder name. Anything it can't match can be linked by hand once, and the rest of the episodes follow.
 
-## Development & Running
+<!-- ![Library](docs/screenshots/library.png) -->
+
+### AniList
+
+- Two-way sync of progress, status, score, dates, rewatches, notes and custom lists.
+- Changes made offline are queued and sent on the next sign-in.
+
+<!-- ![Anime list](docs/screenshots/anime-list.png) -->
+<!-- ![Anime details](docs/screenshots/anime-details.png) -->
+
+### Seasons and schedule
+
+- Seasonal browser with sorting, grouping and format filters.
+- Weekly airing schedule with countdowns, filtered to your list or all anime.
+
+<!-- ![Seasons](docs/screenshots/seasons.png) -->
+<!-- ![Schedule](docs/screenshots/schedule.png) -->
+
+### Torrents
+
+- Check several RSS feeds at once: [Nyaa](https://nyaa.si) or any other RSS feed, plus title searches.
+- One card per anime, with the best release picked automatically from your priority tiers, preferred fansubs and filters.
+- Downloads are sent to your torrent client like Taiga does (qBittorrent gets a per-anime save folder and category).
+
+<!-- ![Torrents](docs/screenshots/torrents.png) -->
+
+### Everything else
+
+- History and stats (activity heatmap, streaks, backlog).
+- Grid, compact and table list views.
+- `Ctrl+K` command palette.
+- 6 themes plus custom accent colors.
+
+<!-- ![History](docs/screenshots/history.png) -->
+<!-- ![Stats](docs/screenshots/stats.png) -->
+
+## Building
+
+Requires Windows 10/11, [Rust](https://rustup.rs), Node.js with [pnpm](https://pnpm.io), and Visual Studio 2022 Build Tools (C++).
 
 ```bash
-# Install frontend dependencies
 pnpm install
-
-# Run in Tauri v2 development mode
-pnpm tauri dev
-
-# Build production desktop bundle
-pnpm tauri build
+pnpm tauri dev     # development
+pnpm tauri build   # installer
 ```
+
+## Credits
+
+- [Taiga](https://github.com/erengy/taiga), [Anisthesia](https://github.com/erengy/anisthesia), [Anitomy](https://github.com/erengy/anitomy) and [anime-relations](https://github.com/erengy/anime-relations) by erengy.
+- Built with [Tauri](https://tauri.app) and React.

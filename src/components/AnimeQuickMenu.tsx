@@ -19,43 +19,27 @@ import {
   X,
   Check,
   Tv,
-  Clock,
-  PauseCircle,
-  XCircle,
-  RotateCcw,
   ListChecks,
 } from "lucide-react";
-import { AnimeEntry, BatchAnimeUpdatePatch } from "../types";
-import { getOptimizedCoverUrl } from "../api";
-import { openAnimeFolder, playLocalEpisode } from "../nowPlaying";
-import { useCustomLists } from "../customLists";
+import { AnimeEntry } from "@/lib/types";
+import { getOptimizedCoverUrl } from "@/lib/covers";
+import { openAnimeFolder, playLocalEpisode } from "@/lib/anime";
+import { useCustomLists } from "@/contexts/customLists";
 import { CustomListsPanel } from "./CustomListsPanel";
 import { AiringDot } from "./AiringDot";
-import { useAnimeTitle } from "../titles";
-import { TorrentSearchRequest, torrentSearchFor } from "../torrents";
+import { useAnimeTitle } from "@/contexts/titles";
+import { torrentSearchFor } from "@/lib/torrents";
+import { useToast } from "@/contexts/toast";
+import { LIST_STATUSES } from "@/lib/status";
+import { useAnimeActions } from "@/contexts/animeActions";
 
 interface AnimeQuickMenuProps {
   anime: AnimeEntry;
   selectedAnime?: AnimeEntry[];
   onClose: () => void;
   onOpenFullModal: (anime: AnimeEntry) => void;
-  onStepEpisode: (anime: AnimeEntry, delta: number) => void;
-  onBatchUpdate: (patch: BatchAnimeUpdatePatch, summaryToast: string) => Promise<void>;
-  onBatchDelete: (animeList: AnimeEntry[]) => Promise<void>;
   onClearSelection?: () => void;
-  onSearchTorrents: (req: TorrentSearchRequest) => void;
-  onDeleteAnime: (anime: AnimeEntry) => void;
-  showToast: (msg: string, type?: "success" | "info" | "error") => void;
 }
-
-export const STATUS_OPTIONS = [
-  { id: "CURRENT", label: "Watching", icon: Tv, color: "text-accent" },
-  { id: "PLANNING", label: "Plan to Watch", icon: Clock, color: "text-sky-400" },
-  { id: "COMPLETED", label: "Completed", icon: CheckCircle2, color: "text-emerald-400" },
-  { id: "PAUSED", label: "Paused", icon: PauseCircle, color: "text-amber-400" },
-  { id: "DROPPED", label: "Dropped", icon: XCircle, color: "text-rose-400" },
-  { id: "REPEATING", label: "Rewatching", icon: RotateCcw, color: "text-violet-400" },
-];
 
 type ActiveInlinePanel =
   | null
@@ -72,14 +56,10 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
   selectedAnime = [],
   onClose,
   onOpenFullModal,
-  onStepEpisode,
-  onBatchUpdate,
-  onBatchDelete,
   onClearSelection,
-  onSearchTorrents,
-  onDeleteAnime,
-  showToast,
 }) => {
+  const { batchDelete, batchUpdate, deleteAnime, searchTorrents, stepEpisode } = useAnimeActions();
+  const showToast = useToast();
   const titleOf = useAnimeTitle();
   const isMultiSelect = selectedAnime.length > 1;
   const targets = isMultiSelect ? selectedAnime : [anime];
@@ -124,7 +104,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
 
     const handleMoveStatus = async (statusId: string, label: string, markMaxProgress = false) => {
       onClose();
-      await onBatchUpdate(
+      await batchUpdate(
         {
           anime_ids: targetIds,
           user_status: statusId,
@@ -137,7 +117,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
 
     const handleBulkStepProgress = async (delta: number) => {
       onClose();
-      await onBatchUpdate(
+      await batchUpdate(
         {
           anime_ids: targetIds,
           progress_delta: delta,
@@ -150,7 +130,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
 
     const handleApplyBulkNotes = async () => {
       onClose();
-      await onBatchUpdate(
+      await batchUpdate(
         {
           anime_ids: targetIds,
           user_notes: notesValue,
@@ -162,7 +142,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
 
     const handleApplyDateStarted = async (dateStr: string) => {
       onClose();
-      await onBatchUpdate(
+      await batchUpdate(
         {
           anime_ids: targetIds,
           user_started_at: dateStr,
@@ -175,7 +155,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
 
     const handleApplyDateCompleted = async (dateStr: string) => {
       onClose();
-      await onBatchUpdate(
+      await batchUpdate(
         {
           anime_ids: targetIds,
           user_completed_at: dateStr,
@@ -188,7 +168,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
 
     const handleApplyScore = async (sc: number) => {
       onClose();
-      await onBatchUpdate(
+      await batchUpdate(
         {
           anime_ids: targetIds,
           user_score: sc,
@@ -201,7 +181,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
 
     const handleApplyExactProgress = async (prog: number) => {
       onClose();
-      await onBatchUpdate(
+      await batchUpdate(
         {
           anime_ids: targetIds,
           user_progress: Math.max(0, prog),
@@ -275,7 +255,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
             Move Selected To
           </div>
           <div className="grid grid-cols-2 gap-1 px-2 py-0.5">
-            {STATUS_OPTIONS.map((st) => {
+            {LIST_STATUSES.map((st) => {
               const Icon = st.icon;
               return (
                 <button
@@ -312,7 +292,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
                 )}
               </button>
               {activePanel === "custom_lists" && (
-                <CustomListsPanel animeIds={targetIds} variant="menu" showToast={showToast} />
+                <CustomListsPanel animeIds={targetIds} variant="menu" />
               )}
             </>
           )}
@@ -581,7 +561,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
                   type="button"
                   onClick={async () => {
                     onClose();
-                    await onBatchUpdate(
+                    await batchUpdate(
                       {
                         anime_ids: targetIds,
                         user_notes: "",
@@ -631,7 +611,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
           <button
             onClick={async () => {
               onClose();
-              await onBatchDelete(targets);
+              await batchDelete(targets);
             }}
             className="w-full flex items-center justify-between gap-2 px-3 py-1.5 text-left text-xs text-red-400 hover:bg-red-500/15 transition cursor-pointer"
           >
@@ -685,7 +665,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
 
   const handleSingleStatusChange = async (statusId: string, label: string) => {
     onClose();
-    await onBatchUpdate(
+    await batchUpdate(
       {
         anime_ids: [anime.id],
         user_status: statusId,
@@ -696,7 +676,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
 
   const handleSingleSaveDateStarted = async (dateStr: string) => {
     onClose();
-    await onBatchUpdate(
+    await batchUpdate(
       {
         anime_ids: [anime.id],
         user_started_at: dateStr,
@@ -709,7 +689,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
 
   const handleSingleSaveNotes = async () => {
     onClose();
-    await onBatchUpdate(
+    await batchUpdate(
       {
         anime_ids: [anime.id],
         user_notes: notesValue,
@@ -809,7 +789,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
       <div className="py-1">
         <button
           onClick={() => {
-            onStepEpisode(anime, 1);
+            stepEpisode(anime, 1);
             onClose();
           }}
           disabled={!canStepForward}
@@ -823,7 +803,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
 
         <button
           onClick={() => {
-            onStepEpisode(anime, -1);
+            stepEpisode(anime, -1);
             onClose();
           }}
           disabled={!canStepBackward}
@@ -837,7 +817,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
 
         <button
           onClick={() => {
-            onSearchTorrents(torrentSearchFor(anime));
+            searchTorrents(torrentSearchFor(anime));
             onClose();
           }}
           className={itemClass}
@@ -867,7 +847,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
 
         {activePanel === "status" && (
           <div className="mx-2 my-1 p-1.5 rounded-lg bg-bg-primary border border-border-subtle grid grid-cols-2 gap-1">
-            {STATUS_OPTIONS.map((st) => {
+            {LIST_STATUSES.map((st) => {
               const Icon = st.icon;
               const isCurrent = anime.user_status === st.id;
               return (
@@ -900,7 +880,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
               </span>
             </button>
             {activePanel === "custom_lists" && (
-              <CustomListsPanel animeIds={[anime.id]} variant="menu" showToast={showToast} />
+              <CustomListsPanel animeIds={[anime.id]} variant="menu" />
             )}
           </>
         )}
@@ -1008,7 +988,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
 
         <button
           onClick={() => {
-            onDeleteAnime(anime);
+            deleteAnime(anime);
             onClose();
           }}
           className="w-full flex items-center gap-2 px-3 py-1.5 text-left text-xs text-red-400 hover:bg-red-500/15 transition cursor-pointer"

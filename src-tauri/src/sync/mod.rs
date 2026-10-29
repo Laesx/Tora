@@ -760,13 +760,13 @@ impl TrackerSyncService {
 
     /// Add an anime (e.g. from Discover). Requires an AniList id. If it is already in the list, its user
     /// state is kept and only metadata is refreshed (no push). Otherwise it is inserted with normalized
-    /// status/dates and pushed. Returns the full list.
-    pub async fn add_entry(self: &Arc<Self>, entry: AnimeEntry) -> Result<Vec<AnimeEntry>, String> {
+    /// status/dates and pushed. Returns the stored entry.
+    pub async fn add_entry(self: &Arc<Self>, entry: AnimeEntry) -> Result<AnimeEntry, String> {
         let media_id = entry
             .anilist_id
             .ok_or_else(|| "Cannot add an anime without an AniList id".to_string())?;
         let today = today_string();
-        let (list, push_id) = self
+        let (stored, push_id) = self
             .blocking(move |db| {
                 let signed_in = has_token(&db.get_settings()?);
                 let mut entry = entry;
@@ -815,7 +815,7 @@ impl TrackerSyncService {
                 };
                 let id = entry.id;
                 let _ = db.match_unmatched_episodes_for_anime(id);
-                Ok((db.list_anime_entries()?, push_id))
+                Ok((db.get_anime_entry_by_id(id)?, push_id))
             })
             .await?;
 
@@ -825,18 +825,18 @@ impl TrackerSyncService {
                 this.push_entry(id).await;
             });
         }
-        Ok(list)
+        Ok(stored)
     }
 
     /// Delete entries locally right away. A tombstone per entry queues the AniList delete (flushed in the
-    /// background now when signed in, otherwise on the next pull). Returns the full list.
-    pub async fn delete_entries(self: &Arc<Self>, ids: Vec<i64>) -> Result<Vec<AnimeEntry>, String> {
+    /// background now when signed in, otherwise on the next pull).
+    pub async fn delete_entries(self: &Arc<Self>, ids: Vec<i64>) -> Result<(), String> {
         let deleted_ids = ids.clone();
-        let (list, queued) = self
+        let queued = self
             .blocking(move |db| {
                 let signed_in = has_token(&db.get_settings()?);
                 let queued = !db.delete_entries_with_tombstones(&ids)?.is_empty();
-                Ok((db.list_anime_entries()?, queued && signed_in))
+                Ok(queued && signed_in)
             })
             .await?;
 
@@ -848,7 +848,7 @@ impl TrackerSyncService {
                 let _ = this.flush_deletions().await;
             });
         }
-        Ok(list)
+        Ok(())
     }
 
     // ----------------------------------------------------------------- tracker I/O
@@ -1440,8 +1440,9 @@ impl TrackerSyncService {
         tokio::spawn(async move {
             let started = Instant::now();
             let count = ids.len();
+            let targets = ids.clone();
             let result =
-                tokio::task::spawn_blocking(move || db.match_unmatched_episodes_for_ids(&ids)).await;
+                tokio::task::spawn_blocking(move || db.match_unmatched_episodes_for_ids(&targets)).await;
             match result {
                 Ok(Ok(matched)) => {
                     eprintln!(
@@ -1452,12 +1453,10 @@ impl TrackerSyncService {
                     );
                     if matched > 0 {
                         let summary = ScanSummary {
-                            folders_scanned: 0,
-                            total_files_indexed: 0,
-                            newly_parsed: 0,
-                            removed_files: 0,
                             matched_files: matched,
                             elapsed_ms: started.elapsed().as_millis(),
+                            changed_anime_ids: ids,
+                            ..Default::default()
                         };
                         emit(
                             EVENT_LIBRARY_CHANGED,

@@ -1,7 +1,7 @@
 import React from "react";
-import { AnimeEntry } from "../types";
-import { formatCountdown } from "../api";
-import { formatFuzzyDate } from "../nowPlaying";
+import { AnimeEntry } from "@/lib/types";
+import { formatCountdown } from "@/lib/format";
+import { formatFuzzyDate } from "@/lib/anime";
 
 type AiringFields = Pick<
   AnimeEntry,

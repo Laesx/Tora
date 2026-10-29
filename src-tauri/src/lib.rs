@@ -64,6 +64,15 @@ async fn get_anime_list(state: State<'_, AppState>) -> Result<Vec<AnimeEntry>, S
         .map_err(|e| e.to_string())?
 }
 
+/// Only these entries (ids that no longer exist are skipped); used to apply scan / scrobble deltas.
+#[tauri::command]
+async fn get_anime_entries(state: State<'_, AppState>, ids: Vec<i64>) -> Result<Vec<AnimeEntry>, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || db.get_anime_entries_by_ids(&ids))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 async fn update_anime_entry(
     state: State<'_, AppState>,
@@ -125,7 +134,7 @@ async fn set_anime_custom_lists(
 async fn batch_delete_anime_entries(
     state: State<'_, AppState>,
     anime_ids: Vec<i64>,
-) -> Result<Vec<AnimeEntry>, String> {
+) -> Result<(), String> {
     state.sync.delete_entries(anime_ids).await
 }
 
@@ -133,7 +142,7 @@ async fn batch_delete_anime_entries(
 async fn add_or_upsert_anime(
     state: State<'_, AppState>,
     entry: AnimeEntry,
-) -> Result<Vec<AnimeEntry>, String> {
+) -> Result<AnimeEntry, String> {
     state.sync.add_entry(entry).await
 }
 
@@ -141,7 +150,7 @@ async fn add_or_upsert_anime(
 async fn delete_anime_entry(
     state: State<'_, AppState>,
     anime_id: i64,
-) -> Result<Vec<AnimeEntry>, String> {
+) -> Result<(), String> {
     state.sync.delete_entries(vec![anime_id]).await
 }
 
@@ -1519,6 +1528,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_anime_list,
+            get_anime_entries,
             update_anime_entry,
             batch_update_anime_entries,
             get_custom_lists,
