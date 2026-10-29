@@ -10,7 +10,7 @@ Core capabilities:
 - **O(1) In-Memory Title Matcher Index (`AnimeMatcherIndex`)**: High-speed matching engine leveraging SQLite WAL persistence, season-isolated core title fuzzy matching, user-linked aliases (`title_aliases`), and custom folder overrides.
 - **Internal Tracker Plugin Architecture**: Modular `TrackerPlugin` trait (`src-tauri/src/plugins/mod.rs`) with full **AniList GraphQL v2** integration (`src-tauri/src/plugins/anilist.rs`), typed `TrackerError`s, and extensible stubs for MyAnimeList and Kitsu.
 - **Unified Tracker Sync Service (`TrackerSyncService`)**: Single pipeline (`src-tauri/src/sync/mod.rs`) for every list mutation and every AniList sync — validation, status/date derivation, SQLite writes, retry queue (`sync_pending` + deletion tombstones), rate limiting, newest-wins pull merge, and error events.
-- **Torrent Search, RSS Rule Engine & qBittorrent WebUI Client**: Live Nyaa.si / AnimeTosho RSS search, Taiga-style episode filter rules (`highlight` / `auto_download` / `discard`), magnet launching, and qBittorrent WebUI API integration.
+- **Torrents (Nyaa feeds, priority & filters, Taiga-style client launch)**: User-defined RSS feeds from any site (Nyaa, SubsPlease, …) plus `%title%` search feeds, cached in RAM (manual Refresh + background interval), one card per anime with auto-selected releases (global release-priority tiers, strict per-anime fansub overrides, Hide/Select filters in a text query language with a form editor), and downloads handed to the user's torrent app on the command line (qBittorrent `--save-path` / `--skip-dialog`, like Taiga) into per-anime folders.
 - **High-Performance Virtualized UI**: Viewport-windowed virtual lists/grids (`VirtualWatchlist.tsx` for Grid, Compact, and Table modes; virtualized indexed episode explorer in `LibraryManagerView.tsx`), AniList CDN image downscaling (`getOptimizedCoverUrl`), and optimistic debounced episode stepping (+1 button) with sort position preservation.
 
 ---
@@ -62,6 +62,7 @@ Tora/
 │   ├── schedule.ts                       # Airing schedule helpers (Mon–Sun local weeks, bounds, day/time labels, country labels, `detectBreaks`)
 │   ├── nowPlaying.ts                     # Now Playing helpers: AniList links, play/open-folder, date & enum formatting
 │   ├── fuzzy.ts                          # Shared fuzzy search (normalized index, char-mask prefilter, subsequence scoring, match ranges)
+│   ├── torrents.ts                       # Anime-level torrent search (`torrentSearchFor`, season-suffix stripping), query field metadata, row → query text
 │   ├── animeActions.ts                   # Keyboard action list for one anime (palette → Right arrow), built on nowPlaying helpers
 │   ├── customLists.ts                    # AniList custom lists context (`useCustomLists`), optimistic membership edit, coverage helper
 │   ├── titles.ts                         # Display title language (`useAnimeTitle`, `altTitles`, `displayTitle` for plain helpers)
@@ -87,7 +88,16 @@ Tora/
 │       ├── HistoryView.tsx               # History tab: scrobbles + manual progress changes (decreases as correction rows), grouped by day
 │       ├── StatsView.tsx                 # Stats tab: overview tiles, status bar, activity heatmap/streaks/monthly bars, backlog & ready-to-watch
 │       ├── SettingsView.tsx              # Sectioned settings: Appearance, Tracker, Library, Playback & Detection (Anisthesia players), Torrents, Diagnostics, About
-│       ├── TorrentsView.tsx              # Nyaa/AnimeTosho RSS search, feed preview & automated torrent rule editor
+│       ├── TorrentsView.tsx              # Torrents tab: Releases (feed chips, search, anime cards, Download selected) | Feeds | Filters & priority; gear → Settings → Torrents
+│       ├── SettingsBackups.tsx           # Settings → About: settings snapshots list, Back up now, Restore
+│       ├── torrents/
+│       │   ├── ReleaseCard.tsx           # One anime's releases (checkbox rows, traits badges, "Other releases" for outside-tier ones)
+│       │   ├── ReleaseMenu.tsx           # Release right-click menu (download, copy, fansub pin, top priority, hide group, filter from release)
+│       │   ├── FeedsPanel.tsx            # General feeds (any RSS URL) and search feeds (`%title%` templates): drag-to-reorder, browser-style URLs, "Build Nyaa URL" helper
+│       │   ├── FiltersPanel.tsx          # Release priority tiers, fansubs per anime, Hide / Select filters
+│       │   ├── FilterEditor.tsx          # One query as condition rows or text (same string)
+│       │   ├── AnimePicker.tsx           # Fuzzy list-entry picker (fansub overrides, filter scope)
+│       │   └── TorrentSettings.tsx       # Settings → Torrents: app (detected / chosen), category, download folder, refresh, auto-download
 │       └── VirtualWatchlist.tsx          # Viewport-windowed virtual grid/list for Grid, Compact & Table modes (row model with optional status group headers, scroll-to-anime)
 └── src-tauri/                            # Tauri v2 Rust Backend & Native C++ Bindings
     ├── Cargo.toml                        # Rust dependencies (rusqlite bundled, tokio, rayon, reqwest, tauri v2)
@@ -103,6 +113,7 @@ Tora/
         ├── lib.rs                        # Tauri state (`AppState`), async commands, background monitor & media poll loop
         ├── main.rs                       # Tauri binary entrypoint
         ├── db/mod.rs                     # SQLite schema, `AnimeMatcherIndex`, season-isolated fuzzy matching & aliases
+        ├── db/settings.rs                # Lenient `get_settings`, JSON config keys, rolling settings backups & restore
         ├── detection/
         │   ├── mod.rs                    # `DetectedMediaSession` and `FilenameTestResult` types
         │   ├── anitomy.rs                # Safe Rust wrapper over `tora_anitomy_parse` + Taiga title normalization
@@ -115,7 +126,14 @@ Tora/
         │   ├── mod.rs                    # `TrackerPlugin` trait & `PluginManager`
         │   └── anilist.rs                # AniList GraphQL v2 search, user list fetch, save & delete mutations
         ├── sync/mod.rs                   # `TrackerSyncService`: unified push/pull/delete pipeline, `normalize_change`, rate limiter
-        └── torrents/mod.rs               # Nyaa/AnimeTosho RSS parser, rule evaluator & qBittorrent WebUI client
+        └── torrents/
+            ├── mod.rs                    # `TorrentCache` (RAM feeds + session sent set), `get_board`, `download_releases`, refresh loop
+            ├── config.rs                 # Feeds / filters / priority tiers / fansub overrides (app_settings JSON keys), legacy rule conversion
+            ├── feed.rs                   # Generic RSS 2.0 fetch & parse (`RawRelease`, Anitomy once per item), hash normalization, `%title%` search URLs
+            ├── traits.rs                 # Codec / bit depth / audio / source / resolution / batch range from Anitomy + title
+            ├── query.rs                  # Torrent query language: tokenizer, parser, canonical text, evaluation (`ReleaseFacts`)
+            ├── board.rs                  # Matching + selection pipeline → `TorrentBoard` of `AnimeReleaseCard`s
+            └── client.rs                 # Torrent app detection, per-client args (Taiga table), .torrent download, save-folder resolution, launch
 ```
 
 ---
@@ -126,6 +144,11 @@ Tora/
 - **All** `@tauri::command` functions in `src-tauri/src/lib.rs` that touch SQLite, filesystem I/O, network requests, or Win32 window enumeration **must** be `async fn` and offload synchronous work via `tokio::task::spawn_blocking`.
 - On Windows, Tauri runs the Win32 message pump on the main thread; synchronous SQLite locks or Win32 `EnumWindows` / UI Automation calls on the main thread will freeze the UI.
 - In React (`src/App.tsx`), background polling (`pollMediaRecognition`) must use an `inFlight` guard so asynchronous poll calls never stack up concurrently.
+
+### 1b. Settings Must Never Silently Reset
+- `Database::get_settings` (`db/settings.rs`) lays the stored JSON over `AppSettings::default()` field by field: a missing or invalid field keeps only its own default. Unreadable JSON leaves the row untouched and returns defaults with `settings_recovered: true` (the frontend offers a restore). Still give every new `AppSettings` field a `#[serde(default…)]`.
+- Renamed fields go in `RENAMED_FIELDS` (old key → new key) so the old value carries over.
+- Rolling snapshots of `main` + the torrent config keys live in `app_data\backups\settings-*.json` (startup, then at most hourly on change, newest 20). A restore snapshots first and keeps the current AniList account fields. Add any new user-config `app_settings` key to `BACKED_UP_KEYS`.
 
 ### 2. Native C++ FFI (`anitomy` & `anisthesia`)
 - Do **not** rewrite Anitomy or Anisthesia in Rust. Both libraries are compiled directly from `src-tauri/vendor/anitomy` and `src-tauri/vendor/anisthesia` via `src-tauri/build.rs` and exposed through `src-tauri/cpp/tora_ffi.h` / `tora_ffi.cpp`.
@@ -180,6 +203,7 @@ When a filename or media player window title is parsed (`parse_filename` in `src
 
 ### 6. Database Performance & In-Memory Matching (`src-tauri/src/db/mod.rs`)
 - Use the cached `AnimeMatcherIndex` (`db.matcher_index()`) for any matching (library scans, torrent RSS evaluation, playback recognition). It is built from the stored `normalized_titles_json` (keep that column correct on every title/synonym write) and cached until `matcher_generation` changes; an SQLite `update_hook` bumps the generation on any write to `anime_entries` or `title_aliases`, so writers never invalidate manually. Do not call the uncached `build_matcher_index()` in hot paths. The recognition poll only re-matches an unmatched session when the generation changed.
+- **Fuzzy matching cost**: `NormTitle.core` is a `PreparedTitle` (sorted `u16` bigrams, word ranges + bigrams, a 64-bit bigram mask) and titles are bucketed by season (`norms_by_season`), so `core_title_similarity` never allocates: mask counts rule steps out with exact bounds, dice is a sorted merge. Scores must stay bit-identical to the reference in `merge_dice_equals_reference`; time changes with `cargo test --release fuzzy_bench -- --ignored --nocapture` (its checksum must not change).
 - UI read paths (`list_anime_entries`, `get_anime_entry_by_id`, `get_anime_entries_by_ids`, `list_local_episodes`, `get_settings`) use the query-only `Database::reader()` connection so they don't queue behind writes; never call a write method while holding it.
 - **Aliases**: `synonyms_json` is the matchable union (AniList synonyms + the user's own); `custom_synonyms_json` holds only the user's own aliases (`AnimeEntry.custom_synonyms`), the only ones shown and edited in the drawer. `UserStateChange.synonyms` / `ResolvedState.synonyms` replace the *custom* list (`replace_custom_synonyms` rebuilds the union). NULL `custom_synonyms_json` marks a legacy row: the next pull splits it once (`backfill_custom_synonyms`: stored − remote).
 - Single-entry mutations (`update_anime_user_state`) must query only the target `anime_id` (`get_anime_entry_by_id`) and only trigger `rematch_all_local_episodes()` if `custom_folder` or `synonyms` actually changed.
@@ -217,3 +241,17 @@ When a filename or media player window title is parsed (`parse_filename` in `src
 - **Custom lists** (AniList `customLists` / `hiddenFromStatusLists`): a side channel that never touches `AnimeEntry`, the search index or the matcher. Names live in `tracker_custom_lists` (user order); membership in `anime_custom_lists` (one row per entry, `ON DELETE CASCADE`, wiped by `reset_for_account_switch`). The pull reads both from the existing `MediaListCollection` query and `Database::merge_remote_custom_lists` merges them diff-only (never writes `anime_entries`, never rematches; skipped when the remote list is empty). Edits go through `TrackerSyncService::set_custom_lists` → `apply_custom_list_change`: the row is marked `dirty` and the entry `sync_pending`, so the normal push queue sends it; `SaveMediaListEntry` gets `customLists` / `hiddenFromStatusLists` **only** while the row is dirty, and `finish_push` clears `dirty` (and `sync_pending` only once no membership edit is still unsent). Dirty rows keep local membership through pulls. Creating, renaming and deleting lists stays on AniList. Frontend: `get_custom_lists` state in `App.tsx`, provided through `CustomListsContext`; a selected list replaces the status filter (`customListFilter`), hidden entries leave the status tabs and counts (still in All Anime and search), and the watchlist search is unchanged.
 - **Watch history**: scrobbles log their own row. `Manual`, `Step` and `Batch` changes that raise progress log one row per newly watched episode (`player_name = "Manual"`, no file) via `Database::record_manual_progress`; a decrease logs one correction row (`progress_from` = old progress, `episode_number` = new). `Add` never logs. Anything counting watched episodes (`watch_history_totals`, `list_stats`) filters `progress_from IS NULL`. The drawer flushes a pending ± step save when it closes instead of dropping it.
 - **Stats** (`get_stats` → `Database::list_stats`, reader only): list totals, backlog, ready-to-watch and the last 366 days of watched-episode events; the frontend buckets events by local day. Drive usage comes from `get_drive_summaries`. No AniList requests.
+
+### 9. Torrents (`src-tauri/src/torrents/`)
+- **Any RSS 2.0 feed.** `feed::parse_rss` is generic: tags are matched by local name (`nyaa:size`, `subsplease:size`, `torrent:contentLength`, `seeders`/`seeds`, `infoHash`, `magnetURI`, `<enclosure url length type>`). Info hashes are normalized to lowercase hex (`infoHash`, else the magnet's `btih`, base32 included, else a hash-shaped `guid`), so dedupe works across feeds. The release page is a URL `guid` / `comments` / a Nyaa view link derived from the .torrent link. `peers_known` is false when a feed has no seeder tags (the UI shows "—"; selection and filters treat peers as 0).
+- **General feeds** (`TorrentFeed { id, name, enabled, url }`, key `torrent_feeds`) and **search feeds** (`SearchFeed { id, name, url }` with `%title%`, key `torrent_search_feeds`, never empty: defaults to Nyaa English-translated and all categories). Feeds saved as Nyaa query / category / filter fields load once as their Nyaa URL (`load_feeds`), and the next save drops the old fields. All torrent config lives in its own `app_settings` keys (`torrent_feeds`, `torrent_search_feeds`, `torrent_filters`, `torrent_priority`, `torrent_fansubs`, `torrent_board_options`), never inside `AppSettings` (a stale Settings save would overwrite them), and is kept on account switch. There are no torrent tables; the old `torrent_rules` is converted once and dropped.
+- **RAM cache** (`TorrentCache` in `AppState`): raw items + Anitomy output per feed URL and the last search, keyed by its full filled-in URL. `get_torrent_board` **never fetches general feeds** unless `force` (the Refresh button); never-fetched selected feeds come back in `TorrentBoard.unfetched` and the tab waits for Refresh. Searches fetch on a cache miss. The background loop refreshes enabled feeds older than `torrent_refresh_minutes` (0 = never), only ones already fetched this session unless `torrent_auto_download` is on, and emits `torrent-feeds-refreshed`. Matching, filters and selection are recomputed from the cache on every board read — never refetch to re-select. The frontend keeps the last board in module memory so re-entering the tab shows it at once.
+- **Board matching**: `board::match_titles` matches each distinct normalized title once (rayon), then each release does `title_match_for` + `resolve_episode` (= `match_episode`). Never call `match_episode` per release in `build_board`. Each build logs `[torrents] board: … in N ms`.
+- **Feed URLs** are stored percent-encoded (`feed::normalize_url` on save encodes spaces, the `DISPLAY_DECODED` characters such as `|`, `[`, `]`, control characters and non-ASCII; `%` is untouched so `%title%` survives) and shown decoded like a browser (`displayUrl` in `src/torrents.ts`, the same set). Feed order is the saved array order (chips, search dropdown; the first search feed is the default).
+- **Searches** use `BoardOptions.search_feed_id` (the dropdown next to the search box; a deleted / unset choice = the first search feed, `config::resolve_search_feed`), filled by `feed::search_url` (`%title%`, any case → the URL-encoded query). The frontend saves the choice before reloading; it never sends a template.
+- **Anime-level search everywhere**: callers pass `torrentSearchFor(anime)` (Romaji title without season/part suffix, plus the anime id whose card is pinned first). Never search per episode.
+- **Hidden list statuses** (`BoardOptions.hidden_statuses`, key `torrent_board_options`, default Planning + Dropped): releases matched to an entry with one of these statuses are dropped before everything else (no card, never selected or auto-downloaded), except the anime a search was started from.
+- **Selection pipeline** (`board.rs`): Discard filters → candidates (built-in: list status Watching/Rewatching, episode > progress, not on disk, not a batch, not sent this session; or a Select filter) → the anime's fansub override (strict: listed groups only, in order) or the global priority tiers (first tier with a matching release wins; `fallback_to_best` when none) → one release per (anime, episode range), ties by resolution closest to 1080p, then seeders, then newest. "Already downloaded" is the library (`available_episodes`) plus the session-only sent set; there is no download history table.
+- **Query language** (`query.rs`, shared by filters and tiers): space = AND, `OR`/`|` = ANY (mixing is an error so the form editor stays equivalent), `-` negates, bare word / quoted phrase = title contains, `/regex/` on the raw title, `field:value` and `> >= < <=` for numeric fields. `QUERY_FIELDS` in `src/torrents.ts` must list the same fields.
+- **Downloads** (`download_releases`): save folder = existing `custom_folder` → the single folder of the anime's local episodes → `<torrent_download_folder>\<sanitized title_romaji>` (created; written to `custom_folder` only if empty, via `set_custom_folder_if_empty` — local-only, no AniList push) → the client default. The `.torrent` is downloaded to `app_data\torrents` (magnet fallback) and the app is launched with per-client flags by exe name (qBittorrent `--save-path= --category= --skip-dialog=true`, one process per folder with all its files; if qBittorrent wasn't running, wait for it before the next launch). No app found → the system default handler. No WebUI.
+- Saving a new `torrent_download_folder` adds it as a library folder unless an enabled one already contains it, so downloaded files are watched and matched. The Settings field commits on blur / Browse, never per keystroke.

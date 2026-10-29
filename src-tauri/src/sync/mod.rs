@@ -2868,19 +2868,7 @@ mod tests {
         db.record_watch_history(Some(1), "Alpha", 1, "mpv", "alpha-01.mkv", true)
             .unwrap();
         insert_local_file(&db, "C:/lib/alpha-01.mkv", "Alpha", 1, Some(1));
-        db.save_torrent_rule(&crate::db::TorrentRule {
-            id: 0,
-            name: "Alpha rule".into(),
-            enabled: true,
-            anime_title_filter: String::new(),
-            anime_id: Some(1),
-            release_group: String::new(),
-            resolution: "1080p".into(),
-            exclude_keywords: String::new(),
-            action: "highlight".into(),
-            only_unwatched: true,
-        })
-        .unwrap();
+        crate::torrents::config::set_anime_fansubs(&db, 1, vec!["Judas".into()]).unwrap();
         let generation = db.matcher_generation();
 
         let outcome = svc.sign_in("token-b", &profile(7, "bob")).await.unwrap();
@@ -2897,11 +2885,9 @@ mod tests {
         assert!(db.list_watch_history(10, 0).unwrap().is_empty());
         assert_ne!(db.matcher_generation(), generation);
         assert!(db.matcher_index().unwrap().user_aliases.is_empty());
-        // …machine data stays: the indexed file (unmatched) and the torrent rule (unlinked)
+        // …machine data stays: the indexed file (unmatched) and the torrent config
         assert_eq!(matched_of(&db, "C:/lib/alpha-01.mkv"), None);
-        let rules = db.list_torrent_rules().unwrap();
-        assert_eq!(rules.len(), 1);
-        assert_eq!(rules[0].anime_id, None);
+        assert_eq!(crate::torrents::config::load_fansubs(&db).unwrap().len(), 1);
         let switched = events
             .lock()
             .unwrap()

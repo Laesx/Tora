@@ -21,8 +21,19 @@ import {
   SyncStatus,
   SyncSummary,
   ThemePreset,
-  TorrentItem,
-  TorrentRule,
+  BoardOptions,
+  BoardSource,
+  DetectedTorrentApp,
+  DownloadRequest,
+  DownloadSummary,
+  FansubOverride,
+  ParsedQuery,
+  PriorityConfig,
+  SearchFeed,
+  SettingsBackupInfo,
+  TorrentBoard,
+  TorrentFeed,
+  TorrentFilter,
   TrackerPluginDescriptor,
   TrackerUserProfile,
   WatchHistoryEntry,
@@ -306,30 +317,56 @@ export const toraApi = {
   getMediaMetadata: (anilistId: number) =>
     invoke<SeasonalAnime | null>("get_media_metadata", { anilistId }),
 
-  searchTorrents: (query: string, provider?: string) =>
-    invoke<TorrentItem[]>("search_torrents_cmd", { query, provider }),
+  /** Torrents board from the RAM cache; feeds are fetched only when uncached or with `force`. */
+  getTorrentBoard: (source: BoardSource, force = false) =>
+    invoke<TorrentBoard>("get_torrent_board", { source, force }),
 
-  getTorrentRules: () => invoke<TorrentRule[]>("get_torrent_rules"),
+  downloadReleases: (releases: DownloadRequest[]) =>
+    invoke<DownloadSummary>("download_releases", { releases }),
 
-  saveTorrentRule: (rule: TorrentRule) =>
-    invoke<TorrentRule[]>("save_torrent_rule", { rule }),
+  getTorrentFeeds: () => invoke<TorrentFeed[]>("get_torrent_feeds"),
 
-  deleteTorrentRule: (ruleId: number) =>
-    invoke<TorrentRule[]>("delete_torrent_rule", { ruleId }),
+  saveTorrentFeeds: (feeds: TorrentFeed[]) =>
+    invoke<TorrentFeed[]>("save_torrent_feeds", { feeds }),
 
-  downloadTorrent: (
-    magnetUrl: string,
-    torrentUrl: string,
-    animeId?: number | null
-  ) =>
-    invoke<string>("download_torrent_cmd", {
-      magnetUrl,
-      torrentUrl,
-      animeId: animeId ?? null,
-    }),
+  getTorrentSearchFeeds: () => invoke<SearchFeed[]>("get_torrent_search_feeds"),
 
-  testQbittorrent: (qbUrl: string, username: string, password: string) =>
-    invoke<string>("test_qbittorrent_cmd", { qbUrl, username, password }),
+  saveTorrentSearchFeeds: (feeds: SearchFeed[]) =>
+    invoke<SearchFeed[]>("save_torrent_search_feeds", { feeds }),
+
+  getTorrentFilters: () => invoke<TorrentFilter[]>("get_torrent_filters"),
+
+  saveTorrentFilters: (filters: TorrentFilter[]) =>
+    invoke<TorrentFilter[]>("save_torrent_filters", { filters }),
+
+  getTorrentPriority: () => invoke<PriorityConfig>("get_torrent_priority"),
+
+  saveTorrentPriority: (priority: PriorityConfig) =>
+    invoke<PriorityConfig>("save_torrent_priority", { priority }),
+
+  getTorrentFansubs: () => invoke<FansubOverride[]>("get_torrent_fansubs"),
+
+  /** Replaces one anime's fansub list; an empty list removes the override. */
+  setAnimeFansubs: (animeId: number, groups: string[]) =>
+    invoke<FansubOverride[]>("set_anime_fansubs", { animeId, groups }),
+
+  getTorrentBoardOptions: () => invoke<BoardOptions>("get_torrent_board_options"),
+
+  saveTorrentBoardOptions: (options: BoardOptions) =>
+    invoke<BoardOptions>("save_torrent_board_options", { options }),
+
+  parseTorrentQuery: (query: string) =>
+    invoke<ParsedQuery>("parse_torrent_query", { query }),
+
+  detectTorrentApp: (customPath?: string) =>
+    invoke<DetectedTorrentApp>("detect_torrent_app", { customPath: customPath ?? null }),
+
+  listSettingsBackups: () => invoke<SettingsBackupInfo[]>("list_settings_backups"),
+
+  backupSettingsNow: () => invoke<SettingsBackupInfo[]>("backup_settings_now"),
+
+  restoreSettingsBackup: (fileName: string) =>
+    invoke<AppSettings>("restore_settings_backup", { fileName }),
 
   getAppSettings: () => invoke<AppSettings>("get_app_settings"),
 

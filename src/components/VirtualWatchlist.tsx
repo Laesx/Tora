@@ -19,6 +19,7 @@ import { formatCountdown, getOptimizedCoverUrl } from "../api";
 import { AnimeQuickMenu, STATUS_OPTIONS } from "./AnimeQuickMenu";
 import { displayTitle, useAnimeTitle } from "../titles";
 import { playLocalEpisode } from "../nowPlaying";
+import type { TorrentSearchRequest } from "../torrents";
 
 /** A titled section of the list (search results grouped by status) */
 export interface WatchlistGroup {
@@ -64,7 +65,7 @@ interface VirtualWatchlistProps {
     summaryToast: string
   ) => Promise<void>;
   onBatchDelete: (animeList: AnimeEntry[]) => Promise<void>;
-  onSearchTorrents: (query: string) => void;
+  onSearchTorrents: (req: TorrentSearchRequest) => void;
   onDeleteAnime: (anime: AnimeEntry) => void;
   showToast: (msg: string, type?: "success" | "info" | "error") => void;
 }

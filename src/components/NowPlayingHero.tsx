@@ -36,6 +36,7 @@ import {
 } from "../nowPlaying";
 import { LIST_STATUS_META } from "./AnimePosterCard";
 import { altTitles, useAnimeTitle, useTitleLanguage } from "../titles";
+import { TorrentSearchRequest, stripSeasonSuffix, torrentSearchFor } from "../torrents";
 
 interface NowPlayingHeroProps {
   session: DetectedMediaSession;
@@ -45,7 +46,7 @@ interface NowPlayingHeroProps {
   settings: AppSettings;
   onLinkDetectedEpisode: (animeId: number, aliasTitle: string) => Promise<void>;
   onOpenAnime: (anime: AnimeEntry) => void;
-  onSearchTorrents: (query: string) => void;
+  onSearchTorrents: (req: TorrentSearchRequest) => void;
   showToast: (msg: string, type?: "success" | "info" | "error") => void;
 }
 
@@ -367,7 +368,13 @@ export const NowPlayingHero: React.FC<NowPlayingHeroProps> = ({
                 </button>
               )}
               <button
-                onClick={() => onSearchTorrents(title)}
+                onClick={() =>
+                  onSearchTorrents(
+                    entry
+                      ? torrentSearchFor(entry)
+                      : { query: stripSeasonSuffix(session.parsed.anime_title || title), animeId: null }
+                  )
+                }
                 className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-bg-tertiary hover:bg-bg-elevated text-text-secondary hover:text-text-primary text-xs font-semibold transition"
               >
                 <Magnet className="w-3.5 h-3.5" />

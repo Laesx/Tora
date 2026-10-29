@@ -253,36 +253,187 @@ export interface FilenameTestResult {
   matched_cover_image: string | null;
 }
 
-export interface TorrentItem {
-  title: string;
-  torrent_url: string;
-  magnet_url: string;
-  info_hash: string | null;
-  size: string;
-  seeders: number;
-  leechers: number;
-  downloads: number;
-  pub_date: string;
-  is_trusted: boolean;
-  provider: string;
-  parsed: AnitomyElements;
-  matched_anime_id: number | null;
-  matched_anime_title: string | null;
-  matched_rule_name: string | null;
-  matched_rule_action: "highlight" | "auto_download" | "discard" | string | null;
-}
-
-export interface TorrentRule {
+/** A general feed: any RSS 2.0 torrent feed (Nyaa, SubsPlease, …). */
+export interface TorrentFeed {
   id: number;
   name: string;
   enabled: boolean;
-  anime_title_filter: string;
+  url: string;
+}
+
+/** A search feed: a URL template where `%title%` becomes the searched anime's title. */
+export interface SearchFeed {
+  id: number;
+  name: string;
+  url: string;
+}
+
+export type TorrentFilterAction = "discard" | "select";
+
+export interface TorrentFilter {
+  id: number;
+  name: string;
+  enabled: boolean;
+  action: TorrentFilterAction;
+  /** Text query (see QUERY_FIELDS); the form editor edits the same string */
+  query: string;
+  /** Empty = every release */
+  anime_ids: number[];
+}
+
+export interface PriorityTier {
+  id: number;
+  query: string;
+  enabled: boolean;
+}
+
+export interface PriorityConfig {
+  tiers: PriorityTier[];
+  /** When no tier matches: pick the best other release (true) or nothing */
+  fallback_to_best: boolean;
+}
+
+export interface BoardOptions {
+  /** List statuses (`PLANNING`, `DROPPED`, …) whose anime get no card; a searched-for anime is still shown */
+  hidden_statuses: string[];
+  /** Search feed chosen in the dropdown next to the search box; null / deleted = the first one */
+  search_feed_id: number | null;
+}
+
+/** Ordered release groups for one anime; replaces the global tiers, no fallback */
+export interface FansubOverride {
+  anime_id: number;
+  groups: string[];
+}
+
+export type QueryOp = "is" | "gt" | "ge" | "lt" | "le";
+
+export interface QueryRow {
+  /** Field name, or `text` / `regex` for bare terms */
+  field: string;
+  op: QueryOp;
+  value: string;
+  negate: boolean;
+}
+
+export interface ParsedQuery {
+  text: string;
+  any: boolean;
+  rows: QueryRow[];
+}
+
+export interface ReleaseTraits {
+  codec: "hevc" | "avc" | "av1" | null;
+  bit_depth: number | null;
+  audio: string[];
+  dual_audio: boolean;
+  source: "web" | "bd" | "dvd" | "tv" | null;
+  resolution: number | null;
+  batch: boolean;
+  episode: number | null;
+  episode_end: number | null;
+}
+
+export interface BoardRelease {
+  key: string;
+  title: string;
+  torrent_url: string;
+  view_url: string;
+  magnet_url: string;
+  size_label: string;
+  size_bytes: number | null;
+  seeders: number;
+  leechers: number;
+  /** The feed reports seeders / leechers (SubsPlease and most non-Nyaa feeds don't) */
+  peers_known: boolean;
+  downloads: number;
+  pub_unix: number | null;
+  trusted: boolean;
+  remake: boolean;
+  group: string | null;
+  parsed_title: string;
+  episode: number | null;
+  episode_end: number | null;
+  traits: ReleaseTraits;
+  feeds: string[];
+  on_disk: boolean;
+  watched: boolean;
+  /** Already sent to the torrent app this session */
+  sent: boolean;
+  discarded_by: string | null;
+  selected_by: string | null;
+  selected: boolean;
+  tier: number | null;
+  /** A better tier (or the fansub override) covers this episode */
+  outside_tier: boolean;
+}
+
+export interface AnimeReleaseCard {
+  key: string;
   anime_id: number | null;
-  release_group: string;
-  resolution: string;
-  exclude_keywords: string;
-  action: "highlight" | "auto_download" | "discard" | string;
-  only_unwatched: boolean;
+  title: string;
+  cover: string;
+  status: string | null;
+  progress: number;
+  episodes: number | null;
+  on_disk_count: number;
+  fansub_override: string[] | null;
+  releases: BoardRelease[];
+}
+
+export interface TorrentBoard {
+  cards: AnimeReleaseCard[];
+  tier_labels: string[];
+  fetched_at: number | null;
+  errors: string[];
+  groups: string[];
+  /** Selected feeds never fetched yet (the board waits for Refresh) */
+  unfetched: string[];
+}
+
+export interface BoardSource {
+  feed_ids?: number[] | null;
+  search?: string | null;
+  anime_id?: number | null;
+}
+
+export interface DownloadRequest {
+  key: string;
+  title: string;
+  torrent_url: string;
+  magnet_url: string;
+  anime_id: number | null;
+  parsed_title: string;
+}
+
+export type TorrentClientKind =
+  | "qbittorrent"
+  | "utorrent"
+  | "deluge_console"
+  | "picotorrent"
+  | "aria2"
+  | "transmission_remote"
+  | "generic";
+
+export interface DetectedTorrentApp {
+  /** Empty: no app found, the system default handler is used */
+  path: string;
+  kind: TorrentClientKind;
+  label: string;
+  source: "custom" | "association" | "registry" | "program_files" | "none";
+}
+
+export interface DownloadSummary {
+  results: { key: string; ok: boolean; message: string; folder: string | null }[];
+  app: DetectedTorrentApp;
+  bound_anime_ids: number[];
+}
+
+export interface SettingsBackupInfo {
+  file_name: string;
+  created_at: number;
+  size_bytes: number;
+  summary: string;
 }
 
 /** `player_name` of history rows logged from manual progress changes */
@@ -372,16 +523,22 @@ export interface AppSettings {
   recognition_enabled: boolean;
   recognition_delay_seconds: number;
   custom_media_player_path: string;
-  torrent_provider: string;
-  qbittorrent_enabled: boolean;
-  qbittorrent_url: string;
-  qbittorrent_username: string;
-  qbittorrent_password: string;
-  qbittorrent_category: string;
-  qbittorrent_save_path: string;
+  /** Torrent app exe; empty = auto-detect */
+  torrent_app_path: string;
+  /** qBittorrent --category */
+  torrent_category: string;
+  /** Default download location (per-anime subfolders are created inside) */
+  torrent_download_folder: string;
+  torrent_create_subfolder: boolean;
+  /** Background feed refresh in minutes (0 = manual only) */
+  torrent_refresh_minutes: number;
+  /** Send auto-selected releases after a background refresh */
+  torrent_auto_download: boolean;
   players: PlayerDefinition[];
   /** Which title the UI shows; missing English / Native titles fall back to Romaji */
   title_language: TitleLanguage;
+  /** Stored settings were unreadable; defaults are in use until a backup is restored */
+  settings_recovered?: boolean;
 }
 
 export type TitleLanguage = "romaji" | "english" | "native";

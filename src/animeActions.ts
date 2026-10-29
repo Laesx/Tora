@@ -25,6 +25,7 @@ import {
 } from "./nowPlaying";
 import { STATUS_OPTIONS } from "./components/AnimeQuickMenu";
 import { displayTitle } from "./titles";
+import { TorrentSearchRequest, torrentSearchFor } from "./torrents";
 
 type ShowToast = (msg: string, type?: "success" | "info" | "error") => void;
 
@@ -51,7 +52,7 @@ export interface AnimeActionHandlers {
   onStepEpisode: (anime: AnimeEntry, delta: number) => void;
   onBatchUpdate: (patch: BatchAnimeUpdatePatch, summaryToast: string) => Promise<void>;
   onOpenDetails: (anime: AnimeEntry) => void;
-  onSearchTorrents: (query: string) => void;
+  onSearchTorrents: (req: TorrentSearchRequest) => void;
   onDeleteAnime: (anime: AnimeEntry) => void;
   showToast: ShowToast;
   /** AniList custom lists; the submenu is left out when the user has none */
@@ -109,10 +110,6 @@ export async function copyAnimeTitle(anime: AnimeEntry, showToast: ShowToast) {
     showToast("Failed to copy title", "error");
   }
 }
-
-/** Torrent search query for the next episode, e.g. "Sousou no Frieren 05" (always Romaji, like release names). */
-export const nextEpisodeTorrentQuery = (anime: AnimeEntry) =>
-  `${anime.title_romaji} ${String(anime.user_progress + 1).padStart(2, "0")}`;
 
 /** Single-anime actions, mirroring the right-click quick menu (inline editors go to the details drawer). */
 export function buildAnimeActions(
@@ -184,8 +181,7 @@ export function buildAnimeActions(
       label: "Search Torrents",
       icon: Search,
       iconClass: "text-accent",
-      hint: `#${String(nextEp).padStart(2, "0")}`,
-      run: () => h.onSearchTorrents(nextEpisodeTorrentQuery(anime)),
+      run: () => h.onSearchTorrents(torrentSearchFor(anime)),
     },
     {
       id: "move-to-list",

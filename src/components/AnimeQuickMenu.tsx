@@ -31,6 +31,7 @@ import { openAnimeFolder, playLocalEpisode } from "../nowPlaying";
 import { useCustomLists } from "../customLists";
 import { CustomListsPanel } from "./CustomListsPanel";
 import { useAnimeTitle } from "../titles";
+import { TorrentSearchRequest, torrentSearchFor } from "../torrents";
 
 interface AnimeQuickMenuProps {
   anime: AnimeEntry;
@@ -41,7 +42,7 @@ interface AnimeQuickMenuProps {
   onBatchUpdate: (patch: BatchAnimeUpdatePatch, summaryToast: string) => Promise<void>;
   onBatchDelete: (animeList: AnimeEntry[]) => Promise<void>;
   onClearSelection?: () => void;
-  onSearchTorrents: (query: string) => void;
+  onSearchTorrents: (req: TorrentSearchRequest) => void;
   onDeleteAnime: (anime: AnimeEntry) => void;
   showToast: (msg: string, type?: "success" | "info" | "error") => void;
 }
@@ -834,9 +835,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
 
         <button
           onClick={() => {
-            onSearchTorrents(
-              `${anime.title_romaji} ${String(nextEp).padStart(2, "0")}`
-            );
+            onSearchTorrents(torrentSearchFor(anime));
             onClose();
           }}
           className={itemClass}
@@ -844,9 +843,6 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
           <span className="flex items-center gap-2">
             <Search className="w-3.5 h-3.5 text-accent" />
             <span>Search Torrents</span>
-          </span>
-          <span className="font-mono text-[10px] text-text-muted">
-            #{String(nextEp).padStart(2, "0")}
           </span>
         </button>
       </div>

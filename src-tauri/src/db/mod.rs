@@ -6,10 +6,16 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use once_cell::sync::Lazy;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::Duration;
+
+mod settings;
+pub use settings::{
+    SettingsBackupInfo, TORRENT_BOARD_OPTIONS_KEY, TORRENT_FANSUBS_KEY, TORRENT_FEEDS_KEY,
+    TORRENT_FILTERS_KEY, TORRENT_PRIORITY_KEY, TORRENT_SEARCH_FEEDS_KEY,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnimeEntry {
@@ -213,20 +219,6 @@ pub struct LocalEpisodeFile {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TorrentRule {
-    pub id: i64,
-    pub name: String,
-    pub enabled: bool,
-    pub anime_title_filter: String,
-    pub anime_id: Option<i64>,
-    pub release_group: String,
-    pub resolution: String,
-    pub exclude_keywords: String,
-    pub action: String, // "highlight" | "auto_download" | "discard"
-    pub only_unwatched: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WatchHistoryEntry {
     pub id: i64,
     pub anime_id: Option<i64>,
@@ -294,22 +286,47 @@ pub struct AppSettings {
     pub recognition_enabled: bool,
     pub recognition_delay_seconds: u64,
     pub custom_media_player_path: String,
-    pub torrent_provider: String, // "nyaa" | "animetosho"
-    pub qbittorrent_enabled: bool,
-    pub qbittorrent_url: String,
-    pub qbittorrent_username: String,
-    pub qbittorrent_password: String,
-    pub qbittorrent_category: String,
-    pub qbittorrent_save_path: String,
+    /// Torrent application exe; empty = auto-detect (registry `.torrent` handler, then qBittorrent).
+    #[serde(default)]
+    pub torrent_app_path: String,
+    /// qBittorrent `--category` (carried over from the old `qbittorrent_category`).
+    #[serde(default = "default_torrent_category")]
+    pub torrent_category: String,
+    /// Default download location; per-anime subfolders are created inside it.
+    #[serde(default)]
+    pub torrent_download_folder: String,
+    #[serde(default = "default_true")]
+    pub torrent_create_subfolder: bool,
+    /// Background feed refresh interval in minutes (0 = manual only).
+    #[serde(default = "default_torrent_refresh_minutes")]
+    pub torrent_refresh_minutes: u32,
+    /// Download auto-selected releases after a background refresh.
+    #[serde(default)]
+    pub torrent_auto_download: bool,
     pub players: Vec<PlayerDefinition>,
     /// Which title the UI shows: "romaji" | "english" | "native" (missing titles fall back to Romaji).
     /// Has a serde default so settings saved before it existed still deserialize.
     #[serde(default = "default_title_language")]
     pub title_language: String,
+    /// Set when the stored settings were unreadable and defaults are in use (never read back from JSON).
+    #[serde(default, skip_deserializing)]
+    pub settings_recovered: bool,
 }
 
 fn default_title_language() -> String {
     "romaji".into()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_torrent_category() -> String {
+    "anime".into()
+}
+
+fn default_torrent_refresh_minutes() -> u32 {
+    30
 }
 
 impl Default for AppSettings {
@@ -326,15 +343,15 @@ impl Default for AppSettings {
             recognition_enabled: true,
             recognition_delay_seconds: 10,
             custom_media_player_path: String::new(),
-            torrent_provider: "nyaa".into(),
-            qbittorrent_enabled: false,
-            qbittorrent_url: "http://127.0.0.1:8080".into(),
-            qbittorrent_username: "admin".into(),
-            qbittorrent_password: String::new(),
-            qbittorrent_category: "anime".into(),
-            qbittorrent_save_path: String::new(),
+            torrent_app_path: String::new(),
+            torrent_category: default_torrent_category(),
+            torrent_download_folder: String::new(),
+            torrent_create_subfolder: true,
+            torrent_refresh_minutes: default_torrent_refresh_minutes(),
+            torrent_auto_download: false,
             players: default_players(),
             title_language: default_title_language(),
+            settings_recovered: false,
         }
     }
 }
@@ -353,44 +370,107 @@ fn strip_trailing_season(norm: &str, season: u32) -> &str {
     norm.trim()
 }
 
-/// Compute character 2-gram Sorensen-Dice similarity in `[0.0, 1.0]`.
-fn bigram_dice_similarity(a: &str, b: &str) -> f64 {
+/// Byte bigrams of `s` packed as `u16`, sorted (the multiset [`dice`] compares).
+fn sorted_bigrams(s: &str) -> Vec<u16> {
+    let mut grams: Vec<u16> = s
+        .as_bytes()
+        .windows(2)
+        .map(|w| (w[0] as u16) << 8 | w[1] as u16)
+        .collect();
+    grams.sort_unstable();
+    grams
+}
+
+/// Size of the multiset intersection of two sorted bigram lists (one merge pass, no allocation).
+fn common_bigrams(a: &[u16], b: &[u16]) -> usize {
+    let (mut i, mut j, mut n) = (0, 0, 0);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                n += 1;
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    n
+}
+
+/// Character 2-gram Sorensen-Dice similarity in `[0.0, 1.0]` from precomputed sorted bigrams, or `0.0`
+/// without comparing when even a full overlap could not reach `min` (dice <= 2 * min(na, nb) / (na + nb)).
+fn dice(a: &str, a_grams: &[u16], b: &str, b_grams: &[u16], min: f64) -> f64 {
     if a == b {
         return 1.0;
     }
-    let a_bytes = a.as_bytes();
-    let b_bytes = b.as_bytes();
-    if a_bytes.len() < 2 || b_bytes.len() < 2 {
+    if a_grams.is_empty() || b_grams.is_empty() {
         return 0.0;
     }
-    let mut a_grams: Vec<[u8; 2]> = Vec::with_capacity(a_bytes.len() - 1);
-    for w in a_bytes.windows(2) {
-        a_grams.push([w[0], w[1]]);
+    let total = (a_grams.len() + b_grams.len()) as f64;
+    if (2.0 * a_grams.len().min(b_grams.len()) as f64) / total < min {
+        return 0.0;
     }
-    let mut b_grams: Vec<[u8; 2]> = Vec::with_capacity(b_bytes.len() - 1);
-    for w in b_bytes.windows(2) {
-        b_grams.push([w[0], w[1]]);
+    (2.0 * common_bigrams(a_grams, b_grams) as f64) / total
+}
+
+/// A word of a [`PreparedTitle`]: its byte range in the text and its sorted bigrams.
+#[derive(Debug, Clone)]
+struct PreparedWord {
+    start: usize,
+    end: usize,
+    grams: Vec<u16>,
+}
+
+/// Bit (0..64) of a bigram in a [`PreparedTitle::mask`].
+fn gram_bit(gram: u16) -> u8 {
+    ((gram as u32).wrapping_mul(0x9E37_79B1) >> 26) as u8
+}
+
+/// How many of `bits` are set in `mask`: an upper bound on how many of those bigrams the masked title has.
+fn bits_in(bits: &[u8], mask: u64) -> usize {
+    bits.iter().filter(|&&b| (mask >> b) & 1 == 1).count()
+}
+
+/// A core title with its bigrams and words precomputed, so fuzzy comparisons don't allocate.
+#[derive(Debug, Clone)]
+pub struct PreparedTitle {
+    pub text: String,
+    grams: Vec<u16>,
+    words: Vec<PreparedWord>,
+    /// Bloom-style set of all bigrams (one bit each, see [`gram_bit`]).
+    mask: u64,
+    /// [`gram_bit`] of every bigram, and of every bigram inside a word (no space), for [`bits_in`].
+    bits: Vec<u8>,
+    word_bits: Vec<u8>,
+}
+
+impl PreparedTitle {
+    pub fn new(text: &str) -> Self {
+        let words: Vec<PreparedWord> = text
+            .split_whitespace()
+            .map(|w| {
+                let start = w.as_ptr() as usize - text.as_ptr() as usize;
+                PreparedWord { start, end: start + w.len(), grams: sorted_bigrams(w) }
+            })
+            .collect();
+        let grams = sorted_bigrams(text);
+        let bits: Vec<u8> = grams.iter().map(|&g| gram_bit(g)).collect();
+        let word_bits = words.iter().flat_map(|w| w.grams.iter().map(|&g| gram_bit(g))).collect();
+        let mask = bits.iter().fold(0u64, |m, &b| m | 1 << b);
+        Self { text: text.to_string(), grams, words, mask, bits, word_bits }
     }
-    let total = a_grams.len() + b_grams.len();
-    let mut matches = 0usize;
-    let mut b_used = vec![false; b_grams.len()];
-    for ag in &a_grams {
-        if let Some(pos) = b_grams
-            .iter()
-            .enumerate()
-            .position(|(i, bg)| !b_used[i] && bg == ag)
-        {
-            b_used[pos] = true;
-            matches += 1;
-        }
+
+    fn word(&self, w: &PreparedWord) -> &str {
+        &self.text[w.start..w.end]
     }
-    (2.0 * matches as f64) / (total as f64)
 }
 
 /// Score similarity between a query core title and a candidate entry's core title (after season isolation).
 /// Handles exact matches, abbreviated titles (e.g. `"kusuriya"` vs `"kusuriya no hitorigoto"`),
 /// word-subset matches (e.g. `"frieren"` vs `"sousou no frieren"`), and fuzzy Romanization variants.
-fn compute_core_title_similarity(query_core: &str, cand_core: &str) -> f64 {
+fn core_title_similarity(query: &PreparedTitle, cand: &PreparedTitle) -> f64 {
+    let (query_core, cand_core) = (query.text.as_str(), cand.text.as_str());
     if query_core.is_empty() || cand_core.is_empty() {
         return 0.0;
     }
@@ -399,31 +479,45 @@ fn compute_core_title_similarity(query_core: &str, cand_core: &str) -> f64 {
     }
 
     let (shorter, longer) = if query_core.len() <= cand_core.len() {
-        (query_core, cand_core)
+        (query, cand)
     } else {
-        (cand_core, query_core)
+        (cand, query)
     };
+    let (short_text, long_text) = (shorter.text.as_str(), longer.text.as_str());
 
-    if shorter.len() < 4 {
+    if short_text.len() < 4 {
         return 0.0;
     }
 
-    let len_ratio = shorter.len() as f64 / longer.len() as f64;
+    let len_ratio = short_text.len() as f64 / long_text.len() as f64;
+
+    // Cheap exact bounds that rule steps out before any string work (they never change a score):
+    // a substring (steps 1 and 3) has all of its bigrams in the longer title, and step 2 needs at least
+    // ~72.4% of the shorter title's in-word bigrams there (a word dice >= 0.84 shares >= 0.724 of its bigrams).
+    let short_hits = bits_in(&shorter.bits, longer.mask);
+    let substring_possible = short_hits == shorter.bits.len();
+    let words_possible =
+        bits_in(&shorter.word_bits, longer.mask) as f64 >= 0.72 * shorter.word_bits.len() as f64;
 
     // 1. Word-boundary prefix match (e.g. "kusuriya" -> "kusuriya no hitorigoto")
-    if longer.starts_with(shorter) && longer.as_bytes().get(shorter.len()) == Some(&b' ') {
+    if substring_possible
+        && long_text.starts_with(short_text)
+        && long_text.as_bytes().get(short_text.len()) == Some(&b' ')
+    {
         return 0.92 + 0.07 * len_ratio;
     }
 
     // 2. All words of the shorter title appear as complete words (or strong fuzzy word matches) in the longer title
-    let short_words: Vec<&str> = shorter.split_whitespace().collect();
-    let long_words: Vec<&str> = longer.split_whitespace().collect();
-    if !short_words.is_empty() {
-        let all_words_match = short_words.iter().all(|sw| {
-            long_words.iter().any(|lw| {
-                *lw == *sw
-                    || (sw.len() >= 5 && lw.starts_with(*sw))
-                    || (sw.len() >= 5 && lw.len() >= 5 && bigram_dice_similarity(sw, lw) >= 0.84)
+    if words_possible && !shorter.words.is_empty() {
+        let all_words_match = shorter.words.iter().all(|swp| {
+            let sw = shorter.word(swp);
+            longer.words.iter().any(|lwp| {
+                let lw = longer.word(lwp);
+                lw == sw
+                    || (sw.len() >= 5 && lw.starts_with(sw))
+                    || (sw.len() >= 5
+                        && lw.len() >= 5
+                        && dice(sw, &swp.grams, lw, &lwp.grams, 0.84) >= 0.84)
             })
         });
         if all_words_match {
@@ -432,26 +526,30 @@ fn compute_core_title_similarity(query_core: &str, cand_core: &str) -> f64 {
     }
 
     // 3. Contiguous substring match for titles >= 5 chars with reasonable length ratio
-    if shorter.len() >= 5 && len_ratio >= 0.55 && longer.contains(shorter) {
+    if substring_possible && short_text.len() >= 5 && len_ratio >= 0.55 && long_text.contains(short_text) {
         return 0.78 + 0.10 * len_ratio;
     }
 
-    // 4. Overall character bigram Sorensen-Dice fuzzy similarity
-    let dice = bigram_dice_similarity(query_core, cand_core);
-    if dice >= 0.74 {
-        return dice;
+    // 4. Overall character bigram Sorensen-Dice fuzzy similarity (shared bigrams <= short_hits)
+    let total = (shorter.grams.len() + longer.grams.len()) as f64;
+    if total == 0.0 || (2.0 * short_hits as f64) / total < 0.74 {
+        return 0.0;
+    }
+    let score = dice(query_core, &query.grams, cand_core, &cand.grams, 0.74);
+    if score >= 0.74 {
+        return score;
     }
 
     0.0
 }
 
-/// One fuzzy-matchable normalized title in [`AnimeMatcherIndex::norm_list`].
+/// One fuzzy-matchable normalized title in [`AnimeMatcherIndex::norms_by_season`].
 #[derive(Debug, Clone)]
 pub struct NormTitle {
     /// Full normalized title (e.g. `"kusuriya no hitorigoto 2"`).
     pub norm: String,
-    /// Season-stripped core title, precomputed at build time (e.g. `"kusuriya no hitorigoto"`).
-    pub core: String,
+    /// Season-stripped core title with its bigrams, precomputed at build time (e.g. `"kusuriya no hitorigoto"`).
+    pub core: PreparedTitle,
     /// Effective season of this title / entry.
     pub season: u32,
     pub anime_id: i64,
@@ -469,7 +567,8 @@ pub struct AnimeMatcherIndex {
     pub user_aliases: HashMap<String, i64>,
     pub exact_norm: HashMap<String, i64>,
     pub custom_folders: Vec<(String, i64)>,
-    pub norm_list: Vec<NormTitle>,
+    /// Fuzzy-matchable titles by effective season, each bucket in build order (earlier wins ties).
+    pub norms_by_season: HashMap<u32, Vec<NormTitle>>,
 }
 
 impl AnimeMatcherIndex {
@@ -520,12 +619,10 @@ impl AnimeMatcherIndex {
         let query_core = strip_trailing_season(normalized_title, query_season);
 
         if query_core.len() >= 4 {
+            let query = PreparedTitle::new(query_core);
             let mut best_match: Option<(f64, i64)> = None;
-            for cand in &self.norm_list {
-                if cand.season != query_season {
-                    continue;
-                }
-                let score = compute_core_title_similarity(query_core, &cand.core);
+            for cand in self.norms_by_season.get(&query_season).into_iter().flatten() {
+                let score = core_title_similarity(&query, &cand.core);
                 if score >= 0.74 && best_match.map_or(true, |(best_score, _)| score > best_score) {
                     best_match = Some((score, cand.anime_id));
                 }
@@ -685,6 +782,8 @@ pub struct Database {
     matcher_cache: RwLock<Option<(u64, Arc<AnimeMatcherIndex>)>>,
     /// Bumped by the SQLite update hook on every row change in `anime_entries` / `title_aliases`.
     matcher_generation: Arc<AtomicU64>,
+    /// `app_dataackups` for settings snapshots (`None` for in-memory test databases).
+    backup_dir: Option<PathBuf>,
 }
 
 /// AniList ids of the demo entries the removed seed used to insert.
@@ -697,6 +796,9 @@ const SEEDED_TORRENT_RULE_NAMES: [&str; 2] = [
     "Dandadan - Erai-raws 1080p Auto",
 ];
 const SEED_MARKER_KEY: &str = "seeded_kusuriya_s3";
+/// Flat torrent rules from before filters / priority tiers; converted once by
+/// `migrate_legacy_torrent_rules`, then dropped.
+const LEGACY_TORRENT_RULES_TABLE: &str = "torrent_rules";
 /// `app_settings` key holding the AniList user id the local list belongs to. Deliberately not part of
 /// `AppSettings`, so a frontend settings save can never overwrite it.
 const LIST_OWNER_KEY: &str = "list_owner_user_id";
@@ -940,7 +1042,7 @@ fn build_matcher_index_from(conn: &Connection) -> Result<AnimeMatcherIndex, Stri
     let mut user_aliases = HashMap::new();
     let mut exact_norm = HashMap::new();
     let mut custom_folders = Vec::new();
-    let mut norm_list = Vec::new();
+    let mut norm_list: Vec<NormTitle> = Vec::new();
 
     {
         let mut stmt = conn
@@ -1019,7 +1121,7 @@ fn build_matcher_index_from(conn: &Connection) -> Result<AnimeMatcherIndex, Stri
                     exact_norm.entry(n.clone()).or_insert(id);
                     if n.len() >= 4 {
                         norm_list.push(NormTitle {
-                            core: strip_trailing_season(&n, s).to_string(),
+                            core: PreparedTitle::new(strip_trailing_season(&n, s)),
                             norm: n,
                             season: s,
                             anime_id: id,
@@ -1046,7 +1148,7 @@ fn build_matcher_index_from(conn: &Connection) -> Result<AnimeMatcherIndex, Stri
                 exact_norm.insert(alias.clone(), aid);
                 if alias.len() >= 4 {
                     norm_list.push(NormTitle {
-                        core: strip_trailing_season(&alias, s).to_string(),
+                        core: PreparedTitle::new(strip_trailing_season(&alias, s)),
                         norm: alias,
                         season: s,
                         anime_id: aid,
@@ -1054,6 +1156,11 @@ fn build_matcher_index_from(conn: &Connection) -> Result<AnimeMatcherIndex, Stri
                 }
             }
         }
+    }
+
+    let mut norms_by_season: HashMap<u32, Vec<NormTitle>> = HashMap::new();
+    for n in norm_list {
+        norms_by_season.entry(n.season).or_default().push(n);
     }
 
     Ok(AnimeMatcherIndex {
@@ -1064,7 +1171,7 @@ fn build_matcher_index_from(conn: &Connection) -> Result<AnimeMatcherIndex, Stri
         user_aliases,
         exact_norm,
         custom_folders,
-        norm_list,
+        norms_by_season,
     })
 }
 
@@ -1282,6 +1389,15 @@ fn add_column_if_missing(
     Ok(())
 }
 
+fn table_exists(conn: &Connection, table: &str) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+        params![table],
+        |r| r.get(0),
+    )
+    .map_err(|e| e.to_string())
+}
+
 /// One-time / idempotent data migrations:
 /// - purge entries without an AniList id (they can never be synced),
 /// - drop season snapshots in the old inline format (media now live in `media_metadata`),
@@ -1314,9 +1430,11 @@ fn run_data_migrations(conn: &mut Connection) -> Result<(), String> {
         for id in SEEDED_ANIME_IDS {
             delete_entry_rows_tx(&tx, id)?;
         }
-        for name in SEEDED_TORRENT_RULE_NAMES {
-            tx.execute("DELETE FROM torrent_rules WHERE name = ?1", params![name])
-                .map_err(|e| e.to_string())?;
+        if table_exists(&tx, LEGACY_TORRENT_RULES_TABLE)? {
+            for name in SEEDED_TORRENT_RULE_NAMES {
+                tx.execute("DELETE FROM torrent_rules WHERE name = ?1", params![name])
+                    .map_err(|e| e.to_string())?;
+            }
         }
         tx.execute(
             "DELETE FROM app_settings WHERE key = ?1",
@@ -1530,6 +1648,7 @@ impl Database {
         let mut db = Self::from_connection(conn)?;
         // Opened after the schema exists and WAL mode is persisted in the file.
         db.read_conn = Some(Mutex::new(Self::open_read_connection(db_path)?));
+        db.backup_dir = db_path.parent().map(|p| p.join("backups"));
         Ok(db)
     }
 
@@ -1586,8 +1705,10 @@ impl Database {
             read_conn: None,
             matcher_cache: RwLock::new(None),
             matcher_generation,
+            backup_dir: None,
         };
         db.init_schema()?;
+        db.migrate_legacy_torrent_rules()?;
         Ok(db)
     }
 
@@ -1598,6 +1719,44 @@ impl Database {
             .as_ref()
             .unwrap_or(&self.conn)
             .lock()
+            .map_err(|e| e.to_string())
+    }
+
+    /// Converts the old `torrent_rules` rows into filters / priority tiers / fansub overrides and drops the table.
+    fn migrate_legacy_torrent_rules(&self) -> Result<(), String> {
+        use crate::torrents::config::{apply_legacy_conversion, convert_legacy_rules, LegacyRule};
+        let rules = {
+            let conn = self.conn.lock().map_err(|e| e.to_string())?;
+            if !table_exists(&conn, LEGACY_TORRENT_RULES_TABLE)? {
+                return Ok(());
+            }
+            let mut stmt = conn
+                .prepare(
+                    "SELECT name, enabled, anime_title_filter, anime_id, release_group, resolution,
+                            exclude_keywords, action, only_unwatched
+                     FROM torrent_rules ORDER BY id ASC",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok(LegacyRule {
+                        name: r.get(0)?,
+                        enabled: r.get::<_, i32>(1)? != 0,
+                        anime_title_filter: r.get(2)?,
+                        anime_id: r.get(3)?,
+                        release_group: r.get(4)?,
+                        resolution: r.get(5)?,
+                        exclude_keywords: r.get(6)?,
+                        action: r.get(7)?,
+                        only_unwatched: r.get::<_, i32>(8)? != 0,
+                    })
+                })
+                .map_err(|e| e.to_string())?;
+            rows.flatten().collect::<Vec<_>>()
+        };
+        apply_legacy_conversion(self, convert_legacy_rules(&rules))?;
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute_batch("DROP TABLE IF EXISTS torrent_rules;")
             .map_err(|e| e.to_string())
     }
 
@@ -1721,19 +1880,6 @@ impl Database {
             CREATE TABLE IF NOT EXISTS title_aliases (
                 normalized_alias TEXT PRIMARY KEY,
                 anime_id INTEGER NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS torrent_rules (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                enabled INTEGER NOT NULL DEFAULT 1,
-                anime_title_filter TEXT NOT NULL DEFAULT '',
-                anime_id INTEGER,
-                release_group TEXT NOT NULL DEFAULT '',
-                resolution TEXT NOT NULL DEFAULT '1080p',
-                exclude_keywords TEXT NOT NULL DEFAULT '',
-                action TEXT NOT NULL DEFAULT 'highlight',
-                only_unwatched INTEGER NOT NULL DEFAULT 1
             );
 
             CREATE TABLE IF NOT EXISTS watch_history (
@@ -2977,6 +3123,20 @@ impl Database {
         Ok(changed)
     }
 
+    /// Sets a local-only `custom_folder` (e.g. a new torrent download folder) unless the entry already has one.
+    /// Written directly like the scanner's auto-binding: it's not a tracker field, so nothing is pushed.
+    pub fn set_custom_folder_if_empty(&self, anime_id: i64, folder: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let changed = conn
+            .execute(
+                "UPDATE anime_entries SET custom_folder = ?1
+                 WHERE id = ?2 AND (custom_folder IS NULL OR TRIM(custom_folder) = '')",
+                params![folder, anime_id],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(changed > 0)
+    }
+
     /// AniList user id the local list belongs to (`None` before the first sign-in).
     pub fn list_owner(&self) -> Result<Option<i64>, String> {
         let conn = self.reader()?;
@@ -3004,7 +3164,8 @@ impl Database {
     /// A different AniList account signed in: drop everything that belonged to the previous one in one
     /// transaction (list entries with their custom folders, queued pushes and deletions, watch history,
     /// title aliases) and make `new_owner` the owner. Machine data stays: library folders and the indexed
-    /// files (only unmatched), settings, torrent rules (unlinked from anime) and the public metadata caches.
+    /// files (only unmatched), settings, torrent config (feeds, filters, priority, fansub overrides) and the public
+    /// metadata caches.
     /// Returns how many unsent changes of the previous account were discarded.
     pub fn reset_for_account_switch(&self, new_owner: i64) -> Result<usize, String> {
         let discarded = {
@@ -3021,7 +3182,6 @@ impl Database {
             tx.execute_batch(
                 "UPDATE local_episodes SET matched_anime_id = NULL, watched = 0
                    WHERE matched_anime_id IS NOT NULL OR watched != 0;
-                 UPDATE torrent_rules SET anime_id = NULL WHERE anime_id IS NOT NULL;
                  DELETE FROM tracker_pending_deletions;
                  DELETE FROM watch_history;
                  DELETE FROM title_aliases;
@@ -3079,7 +3239,7 @@ impl Database {
         eprintln!(
             "[matcher] built index: {} titles, {} norms in {}ms",
             index.by_id.len(),
-            index.norm_list.len(),
+            index.norms_by_season.values().map(Vec::len).sum::<usize>(),
             start.elapsed().as_millis()
         );
         Ok((generation, index))
@@ -3186,49 +3346,6 @@ impl Database {
     ) -> Option<(i64, String, String, u32, Option<u32>)> {
         let index = self.matcher_index().ok()?;
         index.match_episode(parsed, file_path)
-    }
-
-    pub fn get_settings(&self) -> Result<AppSettings, String> {
-        const SELECT_SETTINGS: &str = "SELECT value_json FROM app_settings WHERE key = 'main'";
-        let raw: Option<String> = {
-            let reader = self.reader()?;
-            reader
-                .query_row(SELECT_SETTINGS, [], |r| r.get(0))
-                .optional()
-                .map_err(|e| e.to_string())?
-        };
-        if let Some(json) = raw {
-            return Ok(serde_json::from_str(&json).unwrap_or_default());
-        }
-
-        // First run: persist the defaults on the write connection (re-check under the writer lock).
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let raw: Option<String> = conn
-            .query_row(SELECT_SETTINGS, [], |r| r.get(0))
-            .optional()
-            .map_err(|e| e.to_string())?;
-        if let Some(json) = raw {
-            return Ok(serde_json::from_str(&json).unwrap_or_default());
-        }
-        let def = AppSettings::default();
-        let json = serde_json::to_string(&def).map_err(|e| e.to_string())?;
-        conn.execute(
-            "INSERT OR REPLACE INTO app_settings (key, value_json) VALUES ('main', ?1)",
-            params![json],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(def)
-    }
-
-    pub fn save_settings(&self, settings: &AppSettings) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let json = serde_json::to_string(settings).map_err(|e| e.to_string())?;
-        conn.execute(
-            "INSERT OR REPLACE INTO app_settings (key, value_json) VALUES ('main', ?1)",
-            params![json],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(())
     }
 
     pub fn record_watch_history(
@@ -3452,88 +3569,6 @@ impl Database {
             })
             .map_err(|e| e.to_string())?;
         Ok(rows.flatten().collect())
-    }
-
-    pub fn list_torrent_rules(&self) -> Result<Vec<TorrentRule>, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, name, enabled, anime_title_filter, anime_id, release_group, resolution, exclude_keywords, action, only_unwatched
-                 FROM torrent_rules ORDER BY id ASC",
-            )
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok(TorrentRule {
-                    id: r.get(0)?,
-                    name: r.get(1)?,
-                    enabled: r.get::<_, i32>(2)? != 0,
-                    anime_title_filter: r.get(3)?,
-                    anime_id: r.get(4)?,
-                    release_group: r.get(5)?,
-                    resolution: r.get(6)?,
-                    exclude_keywords: r.get(7)?,
-                    action: r.get(8)?,
-                    only_unwatched: r.get::<_, i32>(9)? != 0,
-                })
-            })
-            .map_err(|e| e.to_string())?;
-        Ok(rows.flatten().collect())
-    }
-
-    pub fn save_torrent_rule(&self, rule: &TorrentRule) -> Result<Vec<TorrentRule>, String> {
-        {
-            let conn = self.conn.lock().map_err(|e| e.to_string())?;
-            if rule.id > 0 {
-                conn.execute(
-                    "UPDATE torrent_rules SET
-                        name = ?1, enabled = ?2, anime_title_filter = ?3, anime_id = ?4,
-                        release_group = ?5, resolution = ?6, exclude_keywords = ?7,
-                        action = ?8, only_unwatched = ?9
-                     WHERE id = ?10",
-                    params![
-                        rule.name,
-                        rule.enabled as i32,
-                        rule.anime_title_filter,
-                        rule.anime_id,
-                        rule.release_group,
-                        rule.resolution,
-                        rule.exclude_keywords,
-                        rule.action,
-                        rule.only_unwatched as i32,
-                        rule.id
-                    ],
-                )
-                .map_err(|e| e.to_string())?;
-            } else {
-                conn.execute(
-                    "INSERT INTO torrent_rules (name, enabled, anime_title_filter, anime_id, release_group, resolution, exclude_keywords, action, only_unwatched)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                    params![
-                        rule.name,
-                        rule.enabled as i32,
-                        rule.anime_title_filter,
-                        rule.anime_id,
-                        rule.release_group,
-                        rule.resolution,
-                        rule.exclude_keywords,
-                        rule.action,
-                        rule.only_unwatched as i32,
-                    ],
-                )
-                .map_err(|e| e.to_string())?;
-            }
-        }
-        self.list_torrent_rules()
-    }
-
-    pub fn delete_torrent_rule(&self, rule_id: i64) -> Result<Vec<TorrentRule>, String> {
-        {
-            let conn = self.conn.lock().map_err(|e| e.to_string())?;
-            conn.execute("DELETE FROM torrent_rules WHERE id = ?1", params![rule_id])
-                .map_err(|e| e.to_string())?;
-        }
-        self.list_torrent_rules()
     }
 }
 
@@ -4084,6 +4119,49 @@ mod tests {
     }
 
     #[test]
+    fn test_set_custom_folder_if_empty() {
+        let db = Database::open_in_memory().expect("db");
+        db.upsert_anime_entry(&test_entry(7, "Show")).unwrap();
+        assert!(db.set_custom_folder_if_empty(7, "D:/Anime/Show").unwrap());
+        assert!(!db.set_custom_folder_if_empty(7, "D:/Other").unwrap());
+        assert_eq!(db.get_anime_entry_by_id(7).unwrap().custom_folder.as_deref(), Some("D:/Anime/Show"));
+    }
+
+    #[test]
+    fn test_legacy_torrent_rules_migrate_and_drop() {
+        let db = Database::open_in_memory().expect("db");
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute_batch(
+                "CREATE TABLE torrent_rules (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+                    anime_title_filter TEXT NOT NULL DEFAULT '', anime_id INTEGER,
+                    release_group TEXT NOT NULL DEFAULT '', resolution TEXT NOT NULL DEFAULT '1080p',
+                    exclude_keywords TEXT NOT NULL DEFAULT '', action TEXT NOT NULL DEFAULT 'highlight',
+                    only_unwatched INTEGER NOT NULL DEFAULT 1);
+                 INSERT INTO torrent_rules (name, release_group, action) VALUES
+                    ('SubsPlease 1080p (Watching)', 'SubsPlease', 'highlight'),
+                    ('No dubs', '', 'discard');
+                 INSERT INTO torrent_rules (name, release_group, action, anime_id) VALUES
+                    ('Kusuriya', 'Judas', 'auto_download', 195516);
+                 INSERT INTO app_settings (key, value_json) VALUES ('seeded_kusuriya_s3', 'true');",
+            )
+            .unwrap();
+        }
+        db.init_schema().unwrap();
+        db.migrate_legacy_torrent_rules().unwrap();
+        let filters = crate::torrents::config::load_filters(&db).unwrap();
+        // The seeded rule was purged before conversion; the others became filters / overrides.
+        assert_eq!(filters.len(), 2);
+        assert_eq!(filters[0].name, "No dubs");
+        assert_eq!(filters[1].anime_ids, vec![195516]);
+        let fansubs = crate::torrents::config::load_fansubs(&db).unwrap();
+        assert_eq!(fansubs[0].groups, vec!["Judas"]);
+        let conn = db.conn.lock().unwrap();
+        assert!(!table_exists(&conn, LEGACY_TORRENT_RULES_TABLE).unwrap());
+    }
+
+    #[test]
     fn test_migrations_purge_null_anilist_and_seed() {
         let db = Database::open_in_memory().expect("db");
         db.upsert_anime_entries_batch(&[
@@ -4108,11 +4186,6 @@ mod tests {
                 [],
             )
             .unwrap();
-            conn.execute(
-                "INSERT INTO torrent_rules (name) VALUES ('SubsPlease 1080p (Watching)'), ('Dandadan - Erai-raws 1080p Auto'), ('My Own Rule')",
-                [],
-            )
-            .unwrap();
         }
         insert_matched_episode(&db, 900001, "C:/lib/local.mkv");
         insert_matched_episode(&db, 154587, "C:/lib/frieren.mkv");
@@ -4124,9 +4197,8 @@ mod tests {
         assert_eq!(matched_id_of(&db, "C:/lib/local.mkv"), None);
         assert!(db.get_anime_entry_by_id(154587).is_ok());
         assert_eq!(matched_id_of(&db, "C:/lib/frieren.mkv"), Some(154587));
-        assert_eq!(db.list_torrent_rules().unwrap().len(), 3);
 
-        // With the marker: seeded anime + rules are purged, the marker is removed
+        // With the marker: seeded anime are purged, the marker is removed
         {
             let conn = db.conn.lock().unwrap();
             conn.execute(
@@ -4140,9 +4212,6 @@ mod tests {
         assert_eq!(alias_count(&db, 154587), 0);
         assert_eq!(matched_id_of(&db, "C:/lib/frieren.mkv"), None);
         assert!(db.get_anime_entry_by_id(5114).is_ok());
-        let rules = db.list_torrent_rules().unwrap();
-        assert_eq!(rules.len(), 1);
-        assert_eq!(rules[0].name, "My Own Rule");
         {
             let conn = db.conn.lock().unwrap();
             let marker: Option<String> = conn
@@ -4997,6 +5066,182 @@ mod tests {
                 .is_err());
         }
 
+        drop(db);
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    /// The previous allocating O(n*m) dice, kept as the reference the merge version must equal.
+    fn reference_dice(a: &str, b: &str) -> f64 {
+        if a == b {
+            return 1.0;
+        }
+        let (a, b) = (a.as_bytes(), b.as_bytes());
+        if a.len() < 2 || b.len() < 2 {
+            return 0.0;
+        }
+        let a_grams: Vec<[u8; 2]> = a.windows(2).map(|w| [w[0], w[1]]).collect();
+        let b_grams: Vec<[u8; 2]> = b.windows(2).map(|w| [w[0], w[1]]).collect();
+        let total = a_grams.len() + b_grams.len();
+        let mut matches = 0usize;
+        let mut b_used = vec![false; b_grams.len()];
+        for ag in &a_grams {
+            if let Some(pos) = b_grams.iter().enumerate().position(|(i, bg)| !b_used[i] && bg == ag) {
+                b_used[pos] = true;
+                matches += 1;
+            }
+        }
+        (2.0 * matches as f64) / (total as f64)
+    }
+
+    /// The previous `compute_core_title_similarity` (string splitting + reference dice), kept as a reference.
+    fn reference_similarity(query_core: &str, cand_core: &str) -> f64 {
+        if query_core.is_empty() || cand_core.is_empty() {
+            return 0.0;
+        }
+        if query_core == cand_core {
+            return 1.0;
+        }
+        let (shorter, longer) =
+            if query_core.len() <= cand_core.len() { (query_core, cand_core) } else { (cand_core, query_core) };
+        if shorter.len() < 4 {
+            return 0.0;
+        }
+        let len_ratio = shorter.len() as f64 / longer.len() as f64;
+        if longer.starts_with(shorter) && longer.as_bytes().get(shorter.len()) == Some(&b' ') {
+            return 0.92 + 0.07 * len_ratio;
+        }
+        let short_words: Vec<&str> = shorter.split_whitespace().collect();
+        let long_words: Vec<&str> = longer.split_whitespace().collect();
+        if !short_words.is_empty()
+            && short_words.iter().all(|sw| {
+                long_words.iter().any(|lw| {
+                    *lw == *sw
+                        || (sw.len() >= 5 && lw.starts_with(*sw))
+                        || (sw.len() >= 5 && lw.len() >= 5 && reference_dice(sw, lw) >= 0.84)
+                })
+            })
+        {
+            return 0.86 + 0.10 * len_ratio;
+        }
+        if shorter.len() >= 5 && len_ratio >= 0.55 && longer.contains(shorter) {
+            return 0.78 + 0.10 * len_ratio;
+        }
+        let d = reference_dice(query_core, cand_core);
+        if d >= 0.74 {
+            d
+        } else {
+            0.0
+        }
+    }
+
+    #[test]
+    fn merge_dice_equals_reference() {
+        let mut titles: Vec<String> = test_fixture_entries()
+            .iter()
+            .flat_map(|e| {
+                let mut t = vec![e.title_romaji.clone()];
+                t.extend(e.title_english.clone());
+                t.extend(e.synonyms.clone());
+                t
+            })
+            .map(|t| normalize_anime_title(&t))
+            .collect();
+        titles.extend(
+            [
+                "aaaa", "aaa", "a", "", "ab", "abab", "baba", "kyojin", "kyoujin", "shingeki no kyojin",
+                "shingeki no kyoujin", "kusuriya", "kusuriya no hitorigoto", "frieren", "sousou no frieren",
+                "sousou no furiiren", "ore dake level up na ken", "solo leveling", "dandadan", "dan da dan",
+                "boku no hero academia", "hero academia", "a b c", "no no no",
+            ]
+                .iter()
+                .map(|s| s.to_string()),
+        );
+        for a in &titles {
+            for b in &titles {
+                let (ga, gb) = (sorted_bigrams(a), sorted_bigrams(b));
+                let expected = reference_dice(a, b);
+                assert_eq!(dice(a, &ga, b, &gb, 0.0).to_bits(), expected.to_bits(), "{:?} vs {:?}", a, b);
+                // The length bound only ever drops scores below the threshold.
+                let bounded = dice(a, &ga, b, &gb, 0.74);
+                if expected >= 0.74 {
+                    assert_eq!(bounded.to_bits(), expected.to_bits(), "{:?} vs {:?}", a, b);
+                }
+                // The whole similarity (with the bigram-mask bounds) scores exactly like before.
+                let (pa, pb) = (PreparedTitle::new(a), PreparedTitle::new(b));
+                assert_eq!(
+                    core_title_similarity(&pa, &pb).to_bits(),
+                    reference_similarity(a, b).to_bits(),
+                    "similarity {:?} vs {:?}",
+                    a,
+                    b
+                );
+            }
+        }
+    }
+
+    /// Fuzzy matcher timing over a large synthetic list. Prints a checksum of the results so a
+    /// matcher change can be compared with the previous implementation. Run with
+    /// `cargo test fuzzy_bench -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn fuzzy_bench() {
+        const SYLLABLES: [&str; 24] = [
+            "ka", "shi", "no", "to", "ri", "mi", "sa", "ku", "ra", "ya", "hi", "ko", "ne", "ma", "tsu", "yo",
+            "ga", "ren", "sou", "kyo", "jin", "hou", "ten", "sei",
+        ];
+        let mut seed: u64 = 0x5eed;
+        let mut next = move |n: usize| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((seed >> 33) as usize) % n
+        };
+        let word = |next: &mut dyn FnMut(usize) -> usize| {
+            (0..2 + next(3)).map(|_| SYLLABLES[next(SYLLABLES.len())]).collect::<String>()
+        };
+        let title = |next: &mut dyn FnMut(usize) -> usize| {
+            (0..2 + next(4)).map(|_| word(next)).collect::<Vec<_>>().join(" ")
+        };
+
+        let tmp_dir = std::env::temp_dir().join("tora_test_fuzzy_bench");
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        let db = Database::open(&tmp_dir.join("test.db")).expect("open test db");
+        let mut entries = Vec::new();
+        for i in 0..1500i64 {
+            let mut e = test_entry(10_000 + i, &title(&mut next));
+            e.title_english = Some(title(&mut next));
+            e.synonyms = vec![title(&mut next)];
+            entries.push(e);
+        }
+        db.upsert_anime_entries_batch(&entries).unwrap();
+        let matcher = db.matcher_index().unwrap();
+
+        // Mostly unknown shows (the common case in a general feed), plus near-misses of list titles.
+        let mut queries: Vec<String> = (0..240).map(|_| title(&mut next)).collect();
+        for e in entries.iter().step_by(25) {
+            let t = normalize_anime_title(&e.title_romaji);
+            queries.push(t.split(' ').take(2).collect::<Vec<_>>().join(" "));
+            queries.push(format!("{}u", t));
+        }
+        let queries: Vec<String> = queries.iter().map(|q| normalize_anime_title(q)).collect();
+
+        let start = std::time::Instant::now();
+        let mut checksum: i64 = 0;
+        let mut hits = 0;
+        for q in &queries {
+            if let Some(aid) = matcher.match_title_only(q) {
+                checksum = checksum.wrapping_mul(31).wrapping_add(aid);
+                hits += 1;
+            } else {
+                checksum = checksum.wrapping_mul(31);
+            }
+        }
+        eprintln!(
+            "[fuzzy_bench] {} queries x {} titles: {} hits, checksum {}, {} ms",
+            queries.len(),
+            matcher.by_id.len(),
+            hits,
+            checksum,
+            start.elapsed().as_millis()
+        );
         drop(db);
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }

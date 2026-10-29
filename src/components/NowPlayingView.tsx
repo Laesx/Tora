@@ -3,6 +3,7 @@ import { Activity } from "lucide-react";
 import { AnimeEntry, AppSettings, BatchAnimeUpdatePatch, DetectedMediaSession } from "../types";
 import { NowPlayingHero } from "./NowPlayingHero";
 import { NowPlayingDashboard } from "./NowPlayingDashboard";
+import type { TorrentSearchRequest } from "../torrents";
 
 interface NowPlayingViewProps {
   activeSession: DetectedMediaSession | null;
@@ -15,7 +16,7 @@ interface NowPlayingViewProps {
   onStepEpisode: (anime: AnimeEntry, delta: number) => void;
   onBatchUpdate: (patch: BatchAnimeUpdatePatch, summaryToast: string) => Promise<void>;
   onBatchDelete: (animeList: AnimeEntry[]) => Promise<void>;
-  onSearchTorrents: (query: string) => void;
+  onSearchTorrents: (req: TorrentSearchRequest) => void;
   onDeleteAnime: (anime: AnimeEntry) => void;
   showToast: (msg: string, type?: "success" | "info" | "error") => void;
 }

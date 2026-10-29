@@ -1,592 +1,705 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
+import { Download, Magnet, RefreshCw, Rss, Search, Settings, SlidersHorizontal, Star, X } from "lucide-react";
 import {
-  Download,
-  Search,
-  Filter,
-  Sparkles,
-  CheckCircle2,
-  ShieldCheck,
-  ArrowUp,
-  ArrowDown,
-  Plus,
-  Trash2,
-  SlidersHorizontal,
-  Magnet,
-  RefreshCw,
-} from "lucide-react";
-import { AnimeEntry, TorrentItem, TorrentRule } from "../types";
+  AnimeEntry,
+  AnimeReleaseCard,
+  BoardOptions,
+  BoardRelease,
+  BoardSource,
+  DownloadRequest,
+  FansubOverride,
+  PriorityConfig,
+  SearchFeed,
+  TorrentBoard,
+  TorrentFeed,
+  TorrentFilter,
+} from "../types";
 import { toraApi } from "../api";
-import { useAnimeTitle } from "../titles";
+import { displayUrl, fillSearchTemplate, groupQuery, quoteValue, TorrentSearchRequest } from "../torrents";
+import { FloatingQuickMenu } from "./FloatingQuickMenu";
+import { ReleaseCard } from "./torrents/ReleaseCard";
+import { ReleaseMenu, ReleaseMenuAction } from "./torrents/ReleaseMenu";
+import { FeedsPanel } from "./torrents/FeedsPanel";
+import { FiltersPanel } from "./torrents/FiltersPanel";
 
 interface TorrentsViewProps {
   animeList: AnimeEntry[];
-  initialQuery: string;
+  /** Search handed over from elsewhere (drawer, quick menu, palette); a new `nonce` searches again */
+  searchRequest: (TorrentSearchRequest & { nonce: number }) | null;
   onSelectAnime: (anime: AnimeEntry) => void;
+  onRefreshAnimeList: () => Promise<void> | void;
+  /** Opens Settings → Torrents (app, download folder, refresh interval) */
+  onOpenSettings: () => void;
   showToast: (msg: string, type?: "success" | "info" | "error") => void;
 }
 
+type SubTab = "releases" | "feeds" | "filters";
+
+// View state kept for the session while the tab is unmounted (the feed data itself is cached in the backend).
+const memory = {
+  subTab: "releases" as SubTab,
+  /** Ticked feeds; null = every enabled feed */
+  feedIds: null as number[] | null,
+  search: null as TorrentSearchRequest | null,
+  lastNonce: 0,
+  showDiscarded: false,
+  showUnmatched: false,
+  /** Checkbox changes the user made, by release key (otherwise the auto-selection applies) */
+  manual: new Map<string, boolean>(),
+  /** Last board and the source it was built for, shown at once when the tab mounts again */
+  board: null as { key: string; board: TorrentBoard } | null,
+};
+
+const sourceFor = (search: TorrentSearchRequest | null, feedIds: number[] | null): BoardSource =>
+  search ? { search: search.query, anime_id: search.animeId } : { feed_ids: feedIds };
+
+const sourceKey = (source: BoardSource) => JSON.stringify(source);
+
+const chipClass = (active: boolean) =>
+  `px-2.5 py-1 rounded-lg text-[11px] font-medium border transition flex items-center gap-1.5 ${active
+    ? "bg-accent/20 border-accent/60 text-accent"
+    : "bg-bg-primary border-border-subtle text-text-secondary hover:text-text-primary"
+  }`;
+
+function updatedLabel(fetchedAt: number | null, now: number): string {
+  if (!fetchedAt) return "Not fetched yet";
+  const s = Math.max(0, now - fetchedAt);
+  if (s < 60) return "Updated just now";
+  if (s < 3600) return `Updated ${Math.round(s / 60)} min ago`;
+  return `Updated ${Math.round(s / 3600)} h ago`;
+}
+
+const toRequest = (r: BoardRelease, card: AnimeReleaseCard): DownloadRequest => ({
+  key: r.key,
+  title: r.title,
+  torrent_url: r.torrent_url,
+  magnet_url: r.magnet_url,
+  anime_id: card.anime_id,
+  parsed_title: r.parsed_title,
+});
+
 export const TorrentsView: React.FC<TorrentsViewProps> = ({
   animeList,
-  initialQuery,
+  searchRequest,
   onSelectAnime,
+  onRefreshAnimeList,
+  onOpenSettings,
   showToast,
 }) => {
-  const titleOf = useAnimeTitle();
-  const [subTab, setSubTab] = useState<"search" | "rules">("search");
-  const [query, setQuery] = useState(initialQuery || "");
-  const [provider, setProvider] = useState("nyaa");
-  const [loading, setLoading] = useState(false);
-  const [items, setItems] = useState<TorrentItem[]>([]);
-  const [rules, setRules] = useState<TorrentRule[]>([]);
-  const [onlyHighlighted, setOnlyHighlighted] = useState(false);
-  const [resolutionFilter, setResolutionFilter] = useState("ALL");
+  const [subTab, setSubTabState] = useState<SubTab>(memory.subTab);
+  const [feedIds, setFeedIdsState] = useState<number[] | null>(memory.feedIds);
+  const [search, setSearchState] = useState<TorrentSearchRequest | null>(() => {
+    if (searchRequest && searchRequest.nonce !== memory.lastNonce) {
+      memory.lastNonce = searchRequest.nonce;
+      memory.search = { query: searchRequest.query, animeId: searchRequest.animeId };
+      memory.subTab = "releases";
+    }
+    return memory.search;
+  });
+  const [searchText, setSearchText] = useState(search?.query ?? "");
+  const [showDiscarded, setShowDiscarded] = useState(memory.showDiscarded);
+  const [showUnmatched, setShowUnmatched] = useState(memory.showUnmatched);
+  const [manual, setManualState] = useState(memory.manual);
 
-  // New rule state
-  const [ruleName, setRuleName] = useState("");
-  const [ruleTitleFilter, setRuleTitleFilter] = useState("");
-  const [ruleGroup, setRuleGroup] = useState("SubsPlease");
-  const [ruleRes, setRuleRes] = useState("1080p");
-  const [ruleExclude, setRuleExclude] = useState("480p, Dub, Batch");
-  const [ruleAction, setRuleAction] = useState("highlight");
-  const [ruleOnlyUnwatched, setRuleOnlyUnwatched] = useState(true);
-
-  const watchingAnime = useMemo(
-    () => animeList.filter((a) => a.user_status === "CURRENT"),
-    [animeList]
+  const [board, setBoardState] = useState<TorrentBoard | null>(() =>
+    memory.board?.key === sourceKey(sourceFor(memory.search, memory.feedIds)) ? memory.board.board : null
   );
+  const [loading, setLoading] = useState(false);
+  /** A network fetch is running (Refresh or a search), not just a re-read of the cache */
+  const [fetching, setFetching] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const [now, setNow] = useState(() => Date.now() / 1000);
 
-  const loadRules = async () => {
+  const [feeds, setFeeds] = useState<TorrentFeed[]>([]);
+  const [searchFeeds, setSearchFeeds] = useState<SearchFeed[]>([]);
+  const [filters, setFilters] = useState<TorrentFilter[]>([]);
+  const [priority, setPriority] = useState<PriorityConfig>({ tiers: [], fallback_to_best: true });
+  const [fansubs, setFansubs] = useState<FansubOverride[]>([]);
+  const [boardOptions, setBoardOptions] = useState<BoardOptions>({ hidden_statuses: [], search_feed_id: null });
+  const [pendingFilter, setPendingFilter] = useState<TorrentFilter | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; release: BoardRelease; card: AnimeReleaseCard } | null>(null);
+
+  const setSubTab = (t: SubTab) => {
+    memory.subTab = t;
+    setSubTabState(t);
+  };
+  const setFeedIds = (ids: number[] | null) => {
+    memory.feedIds = ids;
+    setFeedIdsState(ids);
+  };
+  const setSearch = (s: TorrentSearchRequest | null) => {
+    memory.search = s;
+    setSearchState(s);
+    setSearchText(s?.query ?? "");
+  };
+  const setManual = (m: Map<string, boolean>) => {
+    memory.manual = m;
+    setManualState(m);
+  };
+
+  const animeById = useMemo(() => new Map(animeList.map((a) => [a.id, a])), [animeList]);
+  // App recreates showToast every render; keep the loaders stable
+  const toastRef = useRef(showToast);
+  toastRef.current = showToast;
+
+  const seqRef = useRef(0);
+  // Reads never fetch general feeds (only Refresh does); a search fetches when it isn't cached yet.
+  const load = useCallback(
+    async (force = false, quiet = false) => {
+      const source = sourceFor(search, feedIds);
+      const key = sourceKey(source);
+      const seq = ++seqRef.current;
+      if (!quiet) {
+        setLoading(true);
+        setFetching(force || !!search);
+      }
+      try {
+        const b = await toraApi.getTorrentBoard(source, force);
+        if (seq !== seqRef.current) return;
+        memory.board = { key, board: b };
+        setBoardState(b);
+        if (force && b.errors.length) toastRef.current(b.errors.join(" · "), "error");
+      } catch (e) {
+        if (seq === seqRef.current) toastRef.current(String(e), "error");
+      } finally {
+        if (seq === seqRef.current) {
+          setLoading(false);
+          setFetching(false);
+        }
+      }
+    },
+    [search, feedIds]
+  );
+  const loadRef = useRef(load);
+  loadRef.current = load;
+
+  const loadConfig = useCallback(async () => {
     try {
-      const r = await toraApi.getTorrentRules();
-      setRules(r);
+      const [fd, sf, fl, pr, fs, bo] = await Promise.all([
+        toraApi.getTorrentFeeds(),
+        toraApi.getTorrentSearchFeeds(),
+        toraApi.getTorrentFilters(),
+        toraApi.getTorrentPriority(),
+        toraApi.getTorrentFansubs(),
+        toraApi.getTorrentBoardOptions(),
+      ]);
+      setFeeds(fd);
+      setSearchFeeds(sf);
+      setFilters(fl);
+      setPriority(pr);
+      setFansubs(fs);
+      setBoardOptions(bo);
     } catch (e) {
-      console.error(e);
+      toastRef.current(String(e), "error");
     }
-  };
-
-  const runSearch = async (searchText = query, prov = provider) => {
-    setLoading(true);
-    try {
-      const res = await toraApi.searchTorrents(searchText, prov);
-      setItems(res);
-    } catch (err: any) {
-      showToast(String(err), "error");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadRules();
-    runSearch(initialQuery || "", provider);
   }, []);
 
   useEffect(() => {
-    if (initialQuery) {
-      setQuery(initialQuery);
-      setSubTab("search");
-      runSearch(initialQuery, provider);
-    }
-  }, [initialQuery]);
+    void loadConfig();
+  }, [loadConfig]);
 
-  const handleDownload = async (item: TorrentItem) => {
-    try {
-      const msg = await toraApi.downloadTorrent(
-        item.magnet_url,
-        item.torrent_url,
-        item.matched_anime_id
-      );
-      showToast(msg, "success");
-    } catch (err: any) {
-      showToast(String(err), "error");
+  const firstLoad = useRef(true);
+  useEffect(() => {
+    // A remembered board is already on screen: re-read the cache quietly (selection may have changed)
+    const quiet = firstLoad.current && board !== null;
+    firstLoad.current = false;
+    void load(false, quiet);
+  }, [load]);
+
+  // A new hand-over while this tab is already open
+  useEffect(() => {
+    if (!searchRequest || searchRequest.nonce === memory.lastNonce) return;
+    memory.lastNonce = searchRequest.nonce;
+    setSubTab("releases");
+    setSearch({ query: searchRequest.query, animeId: searchRequest.animeId });
+  }, [searchRequest]);
+
+  // List changes (progress, new files) only re-run selection on the cached feeds
+  const firstList = useRef(true);
+  useEffect(() => {
+    if (firstList.current) {
+      firstList.current = false;
+      return;
     }
+    const t = setTimeout(() => void loadRef.current(false, true), 400);
+    return () => clearTimeout(t);
+  }, [animeList]);
+
+  useEffect(() => {
+    let off: (() => void) | undefined;
+    let disposed = false;
+    listen("torrent-feeds-refreshed", () => {
+      if (!memory.search) void loadRef.current(false, true);
+    }).then((u) => (disposed ? u() : (off = u)));
+    return () => {
+      disposed = true;
+      off?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now() / 1000), 30_000);
+    return () => clearInterval(t);
+  }, []);
+
+  const isChecked = useCallback((r: BoardRelease) => manual.get(r.key) ?? r.selected, [manual]);
+
+  const toggle = (keys: string[], checked: boolean) => {
+    const next = new Map(manual);
+    keys.forEach((k) => next.set(k, checked));
+    setManual(next);
   };
 
-  const handleCreateRule = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!ruleName.trim()) return;
-    try {
-      const updated = await toraApi.saveTorrentRule({
-        id: 0,
-        name: ruleName.trim(),
-        enabled: true,
-        anime_title_filter: ruleTitleFilter.trim(),
-        anime_id: null,
-        release_group: ruleGroup.trim(),
-        resolution: ruleRes,
-        exclude_keywords: ruleExclude.trim(),
-        action: ruleAction,
-        only_unwatched: ruleOnlyUnwatched,
-      });
-      setRules(updated);
-      setRuleName("");
-      setRuleTitleFilter("");
-      showToast("Saved Taiga RSS filter rule!", "success");
-    } catch (err: any) {
-      showToast(String(err), "error");
-    }
-  };
-
-  const handleToggleRule = async (rule: TorrentRule) => {
-    const updated = await toraApi.saveTorrentRule({
-      ...rule,
-      enabled: !rule.enabled,
+  const visibleCards = useMemo(() => {
+    if (!board) return [];
+    return board.cards.filter((c) => {
+      if (c.anime_id == null && !showUnmatched) return false;
+      const isFocus = search?.animeId != null && c.anime_id === search.animeId;
+      return isFocus || c.releases.some((r) => showDiscarded || !r.discarded_by);
     });
-    setRules(updated);
+  }, [board, showUnmatched, showDiscarded, search]);
+
+  const checkedReleases = useMemo(() => {
+    const out: { r: BoardRelease; card: AnimeReleaseCard }[] = [];
+    for (const card of board?.cards ?? []) {
+      if (card.anime_id == null && !showUnmatched) continue;
+      for (const r of card.releases) {
+        if (r.discarded_by && !showDiscarded) continue;
+        if (isChecked(r)) out.push({ r, card });
+      }
+    }
+    return out;
+  }, [board, isChecked, showUnmatched, showDiscarded]);
+
+  const unmatchedCount = board?.cards.filter((c) => c.anime_id == null).length ?? 0;
+
+  const download = async (items: { r: BoardRelease; card: AnimeReleaseCard }[]) => {
+    if (items.length === 0) return;
+    setDownloading(true);
+    try {
+      const summary = await toraApi.downloadReleases(items.map(({ r, card }) => toRequest(r, card)));
+      const ok = summary.results.filter((x) => x.ok);
+      const failed = summary.results.filter((x) => !x.ok);
+      if (ok.length) {
+        showToast(`Sent ${ok.length} torrent${ok.length === 1 ? "" : "s"} to ${summary.app.label}`, "success");
+      }
+      if (failed.length) showToast(failed.map((f) => f.message).join(" · "), "error");
+      const next = new Map(manual);
+      ok.forEach((x) => next.delete(x.key));
+      setManual(next);
+      if (summary.bound_anime_ids.length) await onRefreshAnimeList();
+      await load(false, true);
+    } catch (e) {
+      showToast(String(e), "error");
+    } finally {
+      setDownloading(false);
+    }
   };
 
-  const handleDeleteRule = async (ruleId: number) => {
-    const updated = await toraApi.deleteTorrentRule(ruleId);
-    setRules(updated);
-    showToast("Deleted filter rule", "info");
+  const saveFansubs = async (animeId: number, groups: string[]) => {
+    try {
+      setFansubs(await toraApi.setAnimeFansubs(animeId, groups));
+      await load(false, true);
+    } catch (e) {
+      showToast(String(e), "error");
+    }
   };
 
-  const filteredItems = useMemo(() => {
-    return items.filter((item) => {
-      if (item.matched_rule_action === "discard") return false;
-      if (onlyHighlighted && !item.matched_rule_action && !item.matched_anime_id) {
-        return false;
+  const savePriority = async (p: PriorityConfig) => {
+    try {
+      setPriority(await toraApi.saveTorrentPriority(p));
+      await load(false, true);
+    } catch (e) {
+      showToast(String(e), "error");
+    }
+  };
+
+  const saveFilters = async (f: TorrentFilter[]) => {
+    try {
+      setFilters(await toraApi.saveTorrentFilters(f));
+      await load(false, true);
+      showToast("Filters saved", "success");
+    } catch (e) {
+      showToast(String(e), "error");
+    }
+  };
+
+  const saveBoardOptions = async (o: BoardOptions) => {
+    setBoardOptions(o);
+    try {
+      setBoardOptions(await toraApi.saveTorrentBoardOptions(o));
+      await load(false, true);
+    } catch (e) {
+      showToast(String(e), "error");
+    }
+  };
+
+  // The backend searches with the stored choice, so save it before reloading
+  const activeSearchFeed =
+    searchFeeds.find((f) => f.id === boardOptions.search_feed_id) ?? searchFeeds[0] ?? null;
+
+  const chooseSearchFeed = async (id: number) => {
+    await saveBoardOptions({ ...boardOptions, search_feed_id: id });
+  };
+
+  const saveSearchFeeds = async (f: SearchFeed[]) => {
+    try {
+      setSearchFeeds(await toraApi.saveTorrentSearchFeeds(f));
+      showToast("Search feeds saved", "success");
+      if (search) await load(false, true);
+    } catch (e) {
+      showToast(String(e), "error");
+    }
+  };
+
+  const saveFeeds = async (f: TorrentFeed[]) => {
+    try {
+      const saved = await toraApi.saveTorrentFeeds(f);
+      setFeeds(saved);
+      if (feedIds) setFeedIds(feedIds.filter((id) => saved.some((x) => x.id === id)));
+      showToast("Feeds saved", "success");
+      if (!search) await load(false, true);
+    } catch (e) {
+      showToast(String(e), "error");
+    }
+  };
+
+  const groupTierIndex = (group: string | null) => {
+    if (!group) return null;
+    const q = groupQuery(group).toLowerCase();
+    const i = priority.tiers.findIndex((t) => t.query.trim().toLowerCase() === q);
+    return i < 0 ? null : i;
+  };
+
+  const handleMenu = async (action: ReleaseMenuAction) => {
+    if (!menu) return;
+    const { release: r, card } = menu;
+    setMenu(null);
+    const override = card.fansub_override ?? [];
+    switch (action.kind) {
+      case "download":
+        return download([{ r, card }]);
+      case "copy-magnet":
+        await navigator.clipboard.writeText(r.magnet_url);
+        return showToast("Copied magnet link", "info");
+      case "copy-title":
+        await navigator.clipboard.writeText(r.title);
+        return showToast("Copied release name", "info");
+      case "open-page":
+        return toraApi.openExternalUrl(r.view_url).catch((e) => showToast(String(e), "error"));
+      case "only-group":
+        await saveFansubs(card.anime_id!, [action.group]);
+        return showToast(`Only ${action.group} will be picked for this anime`, "success");
+      case "add-group":
+        return saveFansubs(card.anime_id!, [...override, action.group]);
+      case "remove-group":
+        return saveFansubs(card.anime_id!, override.filter((g) => g.toLowerCase() !== action.group.toLowerCase()));
+      case "clear-override":
+        return saveFansubs(card.anime_id!, []);
+      case "top-priority": {
+        const q = groupQuery(action.group);
+        const rest = priority.tiers.filter((t) => t.query.trim().toLowerCase() !== q.toLowerCase());
+        const existing = priority.tiers.find((t) => t.query.trim().toLowerCase() === q.toLowerCase());
+        await savePriority({ ...priority, tiers: [existing ?? { id: 0, query: q, enabled: true }, ...rest] });
+        return showToast(`${action.group} is now the top priority`, "success");
       }
-      if (
-        resolutionFilter !== "ALL" &&
-        item.parsed.video_resolution !== resolutionFilter
-      ) {
-        return false;
+      case "discard-group":
+        await saveFilters([
+          ...filters,
+          { id: 0, name: `Hide ${action.group}`, enabled: true, action: "discard", query: groupQuery(action.group), anime_ids: [] },
+        ]);
+        return;
+      case "create-filter": {
+        const parts: string[] = [];
+        if (r.group) parts.push(groupQuery(r.group));
+        if (r.traits.resolution) parts.push(`res:${r.traits.resolution}`);
+        if (r.traits.codec) parts.push(`codec:${r.traits.codec}`);
+        if (!r.group && r.parsed_title) parts.push(`title:${quoteValue(r.parsed_title)}`);
+        setPendingFilter({
+          id: 0,
+          name: r.group ? `${r.group} releases` : "New filter",
+          enabled: true,
+          action: "discard",
+          query: parts.join(" "),
+          anime_ids: card.anime_id != null ? [card.anime_id] : [],
+        });
+        return setSubTab("filters");
       }
-      return true;
-    });
-  }, [items, onlyHighlighted, resolutionFilter]);
+      case "open-anime": {
+        const a = card.anime_id != null ? animeById.get(card.anime_id) : undefined;
+        if (a) onSelectAnime(a);
+        return;
+      }
+    }
+  };
+
+  const enabledFeeds = feeds.filter((f) => f.enabled);
+  const allFeedsActive = !search && feedIds === null;
+  const feedActive = (id: number) => !search && feedIds !== null && feedIds.includes(id);
+  const toggleFeed = (id: number) => {
+    setSearch(null);
+    const current = feedIds ?? [];
+    const next = current.includes(id) ? current.filter((x) => x !== id) : [...current, id];
+    setFeedIds(next.length ? next : null);
+  };
+
+  const runSearch = () => {
+    const q = searchText.trim();
+    if (!q) {
+      setSearch(null);
+      return;
+    }
+    setSearch({ query: q, animeId: search && search.query === q ? search.animeId : null });
+  };
+
+  const saveSearchAsFeed = async () => {
+    if (!search) return;
+    if (!activeSearchFeed) return;
+    await saveFeeds([
+      ...feeds,
+      { id: 0, name: search.query, enabled: true, url: fillSearchTemplate(activeSearchFeed.url, search.query) },
+    ]);
+  };
 
   return (
     <div className="p-6 space-y-5 max-w-7xl mx-auto">
-      {/* Header & Sub-navigation */}
       <div className="flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h1 className="text-xl font-bold text-text-primary flex items-center gap-2.5">
-            <Magnet className="w-6 h-6 text-accent" />
-            Torrent Search
-          </h1>
-        </div>
-
+        <h1 className="text-xl font-bold text-text-primary flex items-center gap-2.5">
+          <Magnet className="w-6 h-6 text-accent" />
+          Torrents
+        </h1>
         <div className="flex items-center gap-1.5 bg-bg-secondary p-1 rounded-xl border border-border-subtle">
+          {(
+            [
+              ["releases", "Releases", Download],
+              ["feeds", `Feeds (${feeds.length})`, Rss],
+              ["filters", "Filters & priority", SlidersHorizontal],
+            ] as const
+          ).map(([id, label, Icon]) => (
+            <button
+              key={id}
+              onClick={() => setSubTab(id)}
+              className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 ${subTab === id ? "bg-accent text-white" : "text-text-secondary hover:text-text-primary"
+                }`}
+            >
+              <Icon className="w-3.5 h-3.5" />
+              {label}
+            </button>
+          ))}
           <button
-            onClick={() => setSubTab("search")}
-            className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 ${subTab === "search"
-                ? "bg-accent text-white"
-                : "text-text-secondary hover:text-text-primary"
-              }`}
+            onClick={onOpenSettings}
+            className="px-2.5 py-1.5 rounded-lg text-text-secondary hover:text-text-primary transition"
+            title="Torrent settings (app, download folder, refresh interval)"
           >
-            <Search className="w-3.5 h-3.5" />
-            Torrent Feed & Search
-          </button>
-          <button
-            onClick={() => setSubTab("rules")}
-            className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 ${subTab === "rules"
-                ? "bg-accent text-white"
-                : "text-text-secondary hover:text-text-primary"
-              }`}
-          >
-            <SlidersHorizontal className="w-3.5 h-3.5" />
-            Smart Filter Rules ({rules.length})
+            <Settings className="w-3.5 h-3.5" />
           </button>
         </div>
       </div>
 
-      {subTab === "search" ? (
+      {subTab === "releases" && (
         <>
-          {/* Search Bar & Watching Quick Chips */}
           <div className="bg-bg-secondary border border-border-subtle rounded-2xl p-4 space-y-3">
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                runSearch(query, provider);
-              }}
-              className="flex flex-wrap items-center gap-2.5"
-            >
-              <div className="relative flex-1 min-w-[240px]">
+            <div className="flex flex-wrap items-center gap-2.5">
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  runSearch();
+                }}
+                className="relative flex-1 min-w-[240px]"
+              >
                 <Search className="w-4 h-4 text-text-muted absolute left-3.5 top-1/2 -translate-y-1/2" />
                 <input
-                  type="text"
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Search anime title, release group, episode (or leave blank for latest RSS feed)..."
+                  value={searchText}
+                  onChange={(e) => setSearchText(e.target.value)}
+                  placeholder="Search for an anime (Enter)…"
                   className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-bg-primary border border-border-subtle text-xs text-text-primary focus:outline-none focus:border-accent"
                 />
-              </div>
-
-              <select
-                value={provider}
-                onChange={(e) => {
-                  setProvider(e.target.value);
-                  runSearch(query, e.target.value);
-                }}
-                className="px-3 py-2.5 rounded-xl bg-bg-primary border border-border-subtle text-xs text-text-primary"
-              >
-                <option value="nyaa">Nyaa.si (Anime Eng-Translated)</option>
-                <option value="animetosho">AnimeTosho RSS2</option>
-              </select>
-
-              <select
-                value={resolutionFilter}
-                onChange={(e) => setResolutionFilter(e.target.value)}
-                className="px-3 py-2.5 rounded-xl bg-bg-primary border border-border-subtle text-xs text-text-primary"
-              >
-                <option value="ALL">All Resolutions</option>
-                <option value="2160p">2160p (4K)</option>
-                <option value="1080p">1080p</option>
-                <option value="720p">720p</option>
-              </select>
-
+              </form>
+              {searchFeeds.length > 0 && (
+                <select
+                  value={activeSearchFeed?.id ?? ""}
+                  onChange={(e) => void chooseSearchFeed(Number(e.target.value))}
+                  title="Search feed used for searches"
+                  className="px-3 py-2.5 rounded-xl bg-bg-primary border border-border-subtle text-xs text-text-primary max-w-[220px]"
+                >
+                  {searchFeeds.map((f) => (
+                    <option key={f.id} value={f.id}>
+                      {f.name}
+                    </option>
+                  ))}
+                </select>
+              )}
               <button
-                type="button"
-                onClick={() => setOnlyHighlighted(!onlyHighlighted)}
-                className={`px-3 py-2.5 rounded-xl text-xs font-medium border transition flex items-center gap-1.5 ${onlyHighlighted
-                    ? "bg-amber-500/20 border-amber-500 text-amber-300"
-                    : "bg-bg-primary border-border-subtle text-text-secondary hover:text-text-primary"
-                  }`}
-              >
-                <Filter className="w-3.5 h-3.5" />
-                Watchlist / Rules Only
-              </button>
-
-              <button
-                type="submit"
+                onClick={() => void load(true)}
                 disabled={loading}
-                className="px-5 py-2.5 rounded-xl bg-accent hover:bg-accent-hover text-white text-xs font-semibold transition flex items-center gap-1.5"
+                className="px-4 py-2.5 rounded-xl bg-bg-primary border border-border-subtle hover:bg-bg-tertiary text-text-primary text-xs font-semibold transition flex items-center gap-1.5"
+                title="Fetch the feeds again"
               >
-                <RefreshCw
-                  className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`}
-                />
-                {loading ? "Fetching..." : "Search"}
+                <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
+                Refresh
               </button>
-            </form>
+              <span className="text-[11px] text-text-muted">{updatedLabel(board?.fetched_at ?? null, now)}</span>
+              <button
+                onClick={() => void download(checkedReleases)}
+                disabled={downloading || checkedReleases.length === 0}
+                className="ml-auto px-4 py-2.5 rounded-xl bg-accent hover:bg-accent-hover disabled:opacity-40 text-white text-xs font-semibold transition flex items-center gap-1.5"
+              >
+                <Download className="w-3.5 h-3.5" />
+                {downloading ? "Sending…" : `Download selected (${checkedReleases.length})`}
+              </button>
+            </div>
 
-            {/* Quick Search Chips for Currently Watching Shows */}
-            {watchingAnime.length > 0 && (
-              <div className="flex flex-wrap items-center gap-1.5 pt-1">
-                <span className="text-[11px] text-text-muted mr-1">
-                  Quick Next Ep Search:
-                </span>
-                {watchingAnime.map((a) => {
-                  const nextEp = String(a.user_progress + 1).padStart(2, "0");
-                  const chipQuery = `${a.title_romaji} ${nextEp}`;
-                  return (
-                    <button
-                      key={a.id}
-                      onClick={() => {
-                        setQuery(chipQuery);
-                        runSearch(chipQuery, provider);
-                      }}
-                      className="px-2.5 py-1 rounded-lg bg-bg-tertiary hover:bg-accent/20 hover:text-accent text-text-secondary text-[11px] border border-border-subtle transition"
-                    >
-                      {a.title_romaji}{" "}
-                      <span className="font-mono font-bold text-accent">
-                        #{nextEp}
-                      </span>
+            <div className="flex flex-wrap items-center gap-1.5">
+              {search ? (
+                <>
+                  <span className={chipClass(true)}>
+                    <Search className="w-3 h-3" />
+                    Search: {search.query}
+                    <button onClick={() => setSearch(null)} className="hover:text-text-primary" title="Back to feeds">
+                      <X className="w-3 h-3" />
                     </button>
-                  );
-                })}
+                  </span>
+                  <button onClick={() => void saveSearchAsFeed()} className={chipClass(false)}>
+                    <Star className="w-3 h-3" /> Save as feed
+                  </button>
+                </>
+              ) : (
+                <button onClick={() => setFeedIds(null)} className={chipClass(allFeedsActive)}>
+                  All feeds ({enabledFeeds.length})
+                </button>
+              )}
+              {feeds.map((f) => (
+                <button key={f.id} onClick={() => toggleFeed(f.id)} className={chipClass(feedActive(f.id))} title={displayUrl(f.url)}>
+                  <Rss className="w-3 h-3" />
+                  {f.name}
+                  {!f.enabled && <span className="text-text-muted">(off)</span>}
+                </button>
+              ))}
+              <span className="ml-auto flex items-center gap-1.5">
                 <button
                   onClick={() => {
-                    setQuery("");
-                    runSearch("", provider);
+                    memory.showUnmatched = !showUnmatched;
+                    setShowUnmatched(!showUnmatched);
                   }}
-                  className="px-2.5 py-1 rounded-lg bg-bg-primary hover:bg-bg-tertiary text-text-muted text-[11px] border border-border-subtle transition"
+                  className={chipClass(showUnmatched)}
                 >
-                  Latest Feed
+                  Not in my list ({unmatchedCount})
                 </button>
-              </div>
-            )}
+                <button
+                  onClick={() => {
+                    memory.showDiscarded = !showDiscarded;
+                    setShowDiscarded(!showDiscarded);
+                  }}
+                  className={chipClass(showDiscarded)}
+                >
+                  Show hidden
+                </button>
+              </span>
+            </div>
           </div>
 
-          {/* Torrent Results List */}
-          <div className="bg-bg-secondary border border-border-subtle rounded-2xl overflow-hidden">
-            {loading ? (
+          {board?.errors.length ? (
+            <div className="rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-2.5 text-xs text-red-300">
+              {board.errors.join(" · ")}
+            </div>
+          ) : null}
+
+          {!search && board && board.unfetched.length > 0 && board.fetched_at != null && (
+            <div className="text-[11px] text-text-muted px-1">
+              {board.unfetched.join(", ")} not fetched yet. Press Refresh to fetch {board.unfetched.length === 1 ? "it" : "them"}.
+            </div>
+          )}
+
+          {!board ? (
+            fetching ? (
               <div className="py-16 text-center text-xs text-text-muted flex flex-col items-center gap-2">
                 <RefreshCw className="w-6 h-6 text-accent animate-spin" />
-                <span>Querying {provider.toUpperCase()} RSS feed & parsing with Anitomy...</span>
+                {search ? "Searching…" : "Fetching feeds…"}
               </div>
-            ) : filteredItems.length === 0 ? (
-              <div className="py-14 text-center text-xs text-text-muted">
-                No torrents matched your search or filter criteria.
-              </div>
-            ) : (
-              <div className="divide-y divide-border-subtle">
-                {filteredItems.map((item, idx) => {
-                  const isAuto = item.matched_rule_action === "auto_download";
-                  const isHighlight = item.matched_rule_action === "highlight";
-                  const linkedAnime = animeList.find(
-                    (a) => a.id === item.matched_anime_id
-                  );
-
-                  return (
-                    <div
-                      key={`${item.info_hash || idx}-${idx}`}
-                      className={`p-3.5 flex flex-wrap items-center justify-between gap-3 transition text-xs ${isAuto
-                          ? "bg-emerald-500/10 hover:bg-emerald-500/15"
-                          : isHighlight
-                            ? "bg-amber-500/10 hover:bg-amber-500/15"
-                            : "hover:bg-bg-tertiary/40"
-                        }`}
-                    >
-                      <div className="flex-1 min-w-[280px] space-y-1.5">
-                        {/* Anitomy Badges Row */}
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          {item.matched_rule_name && (
-                            <span
-                              className={`px-2 py-0.5 rounded font-semibold text-[10px] flex items-center gap-1 ${isAuto
-                                  ? "bg-emerald-500 text-black"
-                                  : "bg-amber-500 text-black"
-                                }`}
-                            >
-                              <Sparkles className="w-3 h-3" />
-                              Rule: {item.matched_rule_name}
-                            </span>
-                          )}
-
-                          {linkedAnime && (
-                            <button
-                              onClick={() => onSelectAnime(linkedAnime)}
-                              className="px-2 py-0.5 rounded bg-accent/20 text-accent font-semibold text-[10px] hover:underline flex items-center gap-1"
-                            >
-                              <CheckCircle2 className="w-3 h-3" />
-                              In Library: {titleOf(linkedAnime)}
-                            </button>
-                          )}
-
-                          {item.parsed.release_group && (
-                            <span className="px-1.5 py-0.5 rounded bg-bg-tertiary border border-border-subtle text-text-secondary font-mono text-[10px]">
-                              [{item.parsed.release_group}]
-                            </span>
-                          )}
-
-                          {item.parsed.episode_number !== null && (
-                            <span className="px-1.5 py-0.5 rounded bg-accent/15 text-accent font-mono font-bold text-[10px]">
-                              Ep {item.parsed.episode_number}
-                            </span>
-                          )}
-
-                          {item.parsed.video_resolution && (
-                            <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 font-mono text-[10px]">
-                              {item.parsed.video_resolution}
-                            </span>
-                          )}
-
-                          {item.parsed.video_term.map((vt) => (
-                            <span
-                              key={vt}
-                              className="px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400 font-mono text-[10px]"
-                            >
-                              {vt}
-                            </span>
-                          ))}
-
-                          {item.is_trusted && (
-                            <span className="px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-300 text-[10px] flex items-center gap-0.5">
-                              <ShieldCheck className="w-3 h-3" />
-                              Trusted
-                            </span>
-                          )}
-                        </div>
-
-                        {/* Full Raw Torrent Title */}
-                        <div className="font-medium text-text-primary break-all">
-                          {item.title}
-                        </div>
-                      </div>
-
-                      {/* Stats & Download Action */}
-                      <div className="flex items-center gap-4 shrink-0">
-                        <div className="text-right font-mono text-[11px] space-y-0.5">
-                          <div className="text-text-secondary font-semibold">
-                            {item.size}
-                          </div>
-                          <div className="flex items-center gap-2 text-[10px]">
-                            <span className="text-emerald-400 flex items-center">
-                              <ArrowUp className="w-3 h-3" />
-                              {item.seeders}
-                            </span>
-                            <span className="text-red-400 flex items-center">
-                              <ArrowDown className="w-3 h-3" />
-                              {item.leechers}
-                            </span>
-                          </div>
-                        </div>
-
-                        <button
-                          onClick={() => handleDownload(item)}
-                          className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-accent hover:bg-accent-hover text-white text-xs font-semibold shadow-sm transition"
-                        >
-                          <Download className="w-3.5 h-3.5" />
-                          Download
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
+            ) : null
+          ) : !search && board.fetched_at == null ? (
+            <div className="bg-bg-secondary border border-border-subtle rounded-2xl py-14 text-center text-xs text-text-muted flex flex-col items-center gap-3">
+              {board.unfetched.length > 0 ? (
+                <>
+                  Feeds aren't fetched yet.
+                  <button
+                    onClick={() => void load(true)}
+                    disabled={loading}
+                    className="px-4 py-2 rounded-xl bg-accent hover:bg-accent-hover disabled:opacity-40 text-white text-xs font-semibold flex items-center gap-1.5"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${fetching ? "animate-spin" : ""}`} />
+                    {fetching ? "Fetching…" : "Refresh"}
+                  </button>
+                </>
+              ) : (
+                "No feeds selected. Add one on the Feeds tab."
+              )}
+            </div>
+          ) : visibleCards.length === 0 ? (
+            <div className="bg-bg-secondary border border-border-subtle rounded-2xl py-14 text-center text-xs text-text-muted">
+              {search ? "No releases found for this search." : "No releases for anime in your list in these feeds."}
+              {unmatchedCount > 0 && !showUnmatched && " Turn on “Not in my list” to see the rest."}
+            </div>
+          ) : (
+            <div className={`space-y-3 transition-opacity ${loading ? "opacity-60" : ""}`}>
+              {visibleCards.map((card) => (
+                <ReleaseCard
+                  key={card.key}
+                  card={card}
+                  entry={card.anime_id != null ? animeById.get(card.anime_id) : undefined}
+                  tierLabels={board?.tier_labels ?? []}
+                  showDiscarded={showDiscarded}
+                  isChecked={isChecked}
+                  onToggle={toggle}
+                  onContextMenu={(e, release, c) => {
+                    e.preventDefault();
+                    setMenu({ x: e.clientX, y: e.clientY, release, card: c });
+                  }}
+                  onOpenAnime={onSelectAnime}
+                />
+              ))}
+            </div>
+          )}
         </>
-      ) : (
-        /* Smart RSS Rules Tab */
-        <div className="space-y-5">
-          <form
-            onSubmit={handleCreateRule}
-            className="bg-bg-secondary border border-border-subtle rounded-2xl p-5 space-y-4"
-          >
-            <h2 className="text-sm font-bold text-text-primary flex items-center gap-2">
-              <Plus className="w-4 h-4 text-accent" />
-              Create Taiga-Style Smart RSS Filter Rule
-            </h2>
+      )}
 
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
-              <div>
-                <label className="block text-[11px] text-text-muted mb-1">
-                  Rule Name
-                </label>
-                <input
-                  type="text"
-                  value={ruleName}
-                  onChange={(e) => setRuleName(e.target.value)}
-                  placeholder="e.g. SubsPlease 1080p Seasonal"
-                  className="w-full px-3 py-2 rounded-xl bg-bg-primary border border-border-subtle text-text-primary"
-                />
-              </div>
+      {subTab === "feeds" && (
+        <FeedsPanel
+          feeds={feeds}
+          searchFeeds={searchFeeds}
+          onSave={saveFeeds}
+          onSaveSearchFeeds={saveSearchFeeds}
+          onOpenSettings={onOpenSettings}
+        />
+      )}
 
-              <div>
-                <label className="block text-[11px] text-text-muted mb-1">
-                  Anime Title Filter (blank = any anime in Watchlist)
-                </label>
-                <input
-                  type="text"
-                  value={ruleTitleFilter}
-                  onChange={(e) => setRuleTitleFilter(e.target.value)}
-                  placeholder="e.g. Sousou no Frieren"
-                  className="w-full px-3 py-2 rounded-xl bg-bg-primary border border-border-subtle text-text-primary"
-                />
-              </div>
+      {subTab === "filters" && (
+        <FiltersPanel
+          animeList={animeList}
+          priority={priority}
+          filters={filters}
+          fansubs={fansubs}
+          boardOptions={boardOptions}
+          onSaveBoardOptions={saveBoardOptions}
+          groups={board?.groups ?? []}
+          onSavePriority={savePriority}
+          onSaveFilters={saveFilters}
+          onSetFansubs={saveFansubs}
+          pendingFilter={pendingFilter}
+          onPendingConsumed={() => setPendingFilter(null)}
+        />
+      )}
 
-              <div>
-                <label className="block text-[11px] text-text-muted mb-1">
-                  Preferred Release Group
-                </label>
-                <input
-                  type="text"
-                  value={ruleGroup}
-                  onChange={(e) => setRuleGroup(e.target.value)}
-                  placeholder="e.g. SubsPlease, Erai-raws"
-                  className="w-full px-3 py-2 rounded-xl bg-bg-primary border border-border-subtle text-text-primary"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[11px] text-text-muted mb-1">
-                  Resolution
-                </label>
-                <select
-                  value={ruleRes}
-                  onChange={(e) => setRuleRes(e.target.value)}
-                  className="w-full px-3 py-2 rounded-xl bg-bg-primary border border-border-subtle text-text-primary"
-                >
-                  <option value="1080p">1080p</option>
-                  <option value="2160p">2160p (4K)</option>
-                  <option value="720p">720p</option>
-                  <option value="any">Any Resolution</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-[11px] text-text-muted mb-1">
-                  Exclude Keywords (comma-separated)
-                </label>
-                <input
-                  type="text"
-                  value={ruleExclude}
-                  onChange={(e) => setRuleExclude(e.target.value)}
-                  placeholder="e.g. 480p, Dub, CAM"
-                  className="w-full px-3 py-2 rounded-xl bg-bg-primary border border-border-subtle text-text-primary"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[11px] text-text-muted mb-1">
-                  Rule Action
-                </label>
-                <select
-                  value={ruleAction}
-                  onChange={(e) => setRuleAction(e.target.value)}
-                  className="w-full px-3 py-2 rounded-xl bg-bg-primary border border-border-subtle text-text-primary"
-                >
-                  <option value="highlight">Highlight in Feed</option>
-                  <option value="auto_download">Mark for Auto-Download</option>
-                  <option value="discard">Hide / Discard Matching Items</option>
-                </select>
-              </div>
-            </div>
-
-            <div className="flex items-center justify-between pt-2">
-              <label className="flex items-center gap-2 text-xs text-text-secondary cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={ruleOnlyUnwatched}
-                  onChange={(e) => setRuleOnlyUnwatched(e.target.checked)}
-                  className="rounded accent-accent"
-                />
-                Only match episodes greater than my current watched progress
-              </label>
-
-              <button
-                type="submit"
-                className="px-4 py-2 rounded-xl bg-accent hover:bg-accent-hover text-white text-xs font-semibold transition"
-              >
-                Save Filter Rule
-              </button>
-            </div>
-          </form>
-
-          {/* Existing Rules List */}
-          <div className="bg-bg-secondary border border-border-subtle rounded-2xl divide-y divide-border-subtle overflow-hidden">
-            {rules.map((r) => (
-              <div
-                key={r.id}
-                className="p-4 flex items-center justify-between gap-4 text-xs"
-              >
-                <div className="space-y-1">
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="checkbox"
-                      checked={r.enabled}
-                      onChange={() => handleToggleRule(r)}
-                      className="rounded accent-accent"
-                    />
-                    <span className="font-bold text-text-primary">{r.name}</span>
-                    <span className="px-2 py-0.5 rounded bg-accent/15 text-accent font-mono text-[10px] uppercase">
-                      {r.action}
-                    </span>
-                  </div>
-                  <div className="text-text-muted flex flex-wrap gap-3 font-mono text-[11px]">
-                    <span>
-                      Title: {r.anime_title_filter || "(Any Watchlist Anime)"}
-                    </span>
-                    <span>Group: {r.release_group || "Any"}</span>
-                    <span>Res: {r.resolution}</span>
-                    {r.exclude_keywords && (
-                      <span>Exclude: {r.exclude_keywords}</span>
-                    )}
-                  </div>
-                </div>
-
-                <button
-                  onClick={() => handleDeleteRule(r.id)}
-                  className="p-2 rounded-lg text-red-400 hover:bg-red-500/15 transition"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
-              </div>
-            ))}
-          </div>
-        </div>
+      {menu && (
+        <FloatingQuickMenu anchor={{ x: menu.x, y: menu.y }} onClose={() => setMenu(null)}>
+          <ReleaseMenu
+            release={menu.release}
+            card={menu.card}
+            groupTierIndex={groupTierIndex(menu.release.group)}
+            onAction={(a) => void handleMenu(a)}
+          />
+        </FloatingQuickMenu>
       )}
     </div>
   );

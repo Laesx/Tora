@@ -8,7 +8,7 @@ pub mod torrents;
 use crate::db::{
     AnimeEntry, AppSettings, BatchAnimeUpdatePatch, CachedSeason, CustomListChange,
     CustomListsState, Database, LibraryFolder, ListStats,
-    LocalEpisodeFile, TorrentRule, WatchHistoryEntry,
+    LocalEpisodeFile, SettingsBackupInfo, WatchHistoryEntry,
 };
 use crate::detection::anisthesia::{detect_active_media_player, DetectedMediaSession};
 use crate::detection::anitomy::{parse_filename, AnitomyElements};
@@ -18,9 +18,13 @@ use crate::sync::{
     AiringScheduleResult, ChangeSource, SeasonResult, SignOutOutcome, SyncEmitter, SyncStatus, SyncSummary,
     TrackerSyncService, UserStateChange,
 };
-use crate::torrents::{
-    search_torrents, send_to_qbittorrent, test_qbittorrent_connection, TorrentItem,
+use crate::torrents::board::TorrentBoard;
+use crate::torrents::client::DetectedApp;
+use crate::torrents::config::{
+    BoardOptions, FansubOverride, PriorityConfig, SearchFeed, TorrentFeed, TorrentFilter,
 };
+use crate::torrents::query::{ParsedQuery, Query};
+use crate::torrents::{BoardSource, DownloadRequest, DownloadSummary, TorrentCache};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::process::Command;
@@ -40,6 +44,8 @@ pub struct AppState {
     /// `Database::matcher_generation` at the last match attempt for the active (unmatched) session.
     /// A continuing unmatched session is only re-matched once the matcher data changed since then.
     pub unmatched_check_generation: AtomicU64,
+    /// RAM cache of fetched torrent feeds + releases sent this session.
+    pub torrents: Arc<TorrentCache>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -875,99 +881,177 @@ async fn get_media_metadata(
 }
 
 #[tauri::command]
-async fn search_torrents_cmd(
+async fn get_torrent_board(
     state: State<'_, AppState>,
-    query: String,
-    provider: Option<String>,
-) -> Result<Vec<TorrentItem>, String> {
-    let settings = state.db.get_settings()?;
-    let prov = provider.unwrap_or(settings.torrent_provider);
-    search_torrents(&query, &prov, &state.db).await
+    source: BoardSource,
+    force: Option<bool>,
+) -> Result<TorrentBoard, String> {
+    torrents::get_board(state.db.clone(), state.torrents.clone(), source, force.unwrap_or(false)).await
 }
 
 #[tauri::command]
-async fn get_torrent_rules(state: State<'_, AppState>) -> Result<Vec<TorrentRule>, String> {
+async fn download_releases(
+    state: State<'_, AppState>,
+    releases: Vec<DownloadRequest>,
+) -> Result<DownloadSummary, String> {
+    torrents::download_releases(state.db.clone(), state.torrents.clone(), releases).await
+}
+
+#[tauri::command]
+async fn get_torrent_feeds(state: State<'_, AppState>) -> Result<Vec<TorrentFeed>, String> {
     let db = state.db.clone();
-    tokio::task::spawn_blocking(move || db.list_torrent_rules())
+    tokio::task::spawn_blocking(move || torrents::config::load_feeds(&db))
         .await
         .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-async fn save_torrent_rule(
+async fn save_torrent_feeds(
     state: State<'_, AppState>,
-    rule: TorrentRule,
-) -> Result<Vec<TorrentRule>, String> {
+    feeds: Vec<TorrentFeed>,
+) -> Result<Vec<TorrentFeed>, String> {
     let db = state.db.clone();
-    tokio::task::spawn_blocking(move || db.save_torrent_rule(&rule))
+    tokio::task::spawn_blocking(move || torrents::config::save_feeds(&db, feeds))
         .await
         .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-async fn delete_torrent_rule(
-    state: State<'_, AppState>,
-    rule_id: i64,
-) -> Result<Vec<TorrentRule>, String> {
+async fn get_torrent_search_feeds(state: State<'_, AppState>) -> Result<Vec<SearchFeed>, String> {
     let db = state.db.clone();
-    tokio::task::spawn_blocking(move || db.delete_torrent_rule(rule_id))
+    tokio::task::spawn_blocking(move || torrents::config::load_search_feeds(&db))
         .await
         .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-async fn download_torrent_cmd(
+async fn save_torrent_search_feeds(
     state: State<'_, AppState>,
-    magnet_url: String,
-    torrent_url: String,
-    anime_id: Option<i64>,
-) -> Result<String, String> {
-    let settings = state.db.get_settings()?;
-    let target_uri = if !magnet_url.trim().is_empty() {
-        magnet_url.trim()
-    } else {
-        torrent_url.trim()
-    };
-
-    if settings.qbittorrent_enabled {
-        let mut save_path = settings.qbittorrent_save_path.clone();
-        if let Some(aid) = anime_id {
-            if let Ok(entry) = state.db.get_anime_entry_by_id(aid) {
-                if let Some(cf) = entry.custom_folder.filter(|s| !s.trim().is_empty()) {
-                    save_path = cf;
-                }
-            }
-        }
-
-        return send_to_qbittorrent(
-            &settings.qbittorrent_url,
-            &settings.qbittorrent_username,
-            &settings.qbittorrent_password,
-            target_uri,
-            &settings.qbittorrent_category,
-            &save_path,
-        )
-        .await;
-    }
-
-    #[cfg(windows)]
-    {
-        Command::new("cmd")
-            .args(["/C", "start", "", target_uri])
-            .spawn()
-            .map_err(|e| format!("Failed to launch magnet/torrent link: {}", e))?;
-    }
-
-    Ok("Launched torrent in default system client".into())
+    feeds: Vec<SearchFeed>,
+) -> Result<Vec<SearchFeed>, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || torrents::config::save_search_feeds(&db, feeds))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-async fn test_qbittorrent_cmd(
-    qb_url: String,
-    username: String,
-    password: String,
-) -> Result<String, String> {
-    test_qbittorrent_connection(&qb_url, &username, &password).await
+async fn get_torrent_filters(state: State<'_, AppState>) -> Result<Vec<TorrentFilter>, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || torrents::config::load_filters(&db))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn save_torrent_filters(
+    state: State<'_, AppState>,
+    filters: Vec<TorrentFilter>,
+) -> Result<Vec<TorrentFilter>, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || torrents::config::save_filters(&db, filters))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn get_torrent_priority(state: State<'_, AppState>) -> Result<PriorityConfig, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || torrents::config::load_priority(&db))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn save_torrent_priority(
+    state: State<'_, AppState>,
+    priority: PriorityConfig,
+) -> Result<PriorityConfig, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || torrents::config::save_priority(&db, priority))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn get_torrent_fansubs(state: State<'_, AppState>) -> Result<Vec<FansubOverride>, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || torrents::config::load_fansubs(&db))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn set_anime_fansubs(
+    state: State<'_, AppState>,
+    anime_id: i64,
+    groups: Vec<String>,
+) -> Result<Vec<FansubOverride>, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || torrents::config::set_anime_fansubs(&db, anime_id, groups))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn get_torrent_board_options(state: State<'_, AppState>) -> Result<BoardOptions, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || torrents::config::load_board_options(&db))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn save_torrent_board_options(
+    state: State<'_, AppState>,
+    options: BoardOptions,
+) -> Result<BoardOptions, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || torrents::config::save_board_options(&db, options))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn parse_torrent_query(query: String) -> Result<ParsedQuery, String> {
+    Query::parse(&query).map(|q| ParsedQuery::from(&q))
+}
+
+#[tauri::command]
+async fn detect_torrent_app(custom_path: Option<String>) -> Result<DetectedApp, String> {
+    tokio::task::spawn_blocking(move || torrents::client::detect_app(custom_path.as_deref().unwrap_or("")))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn list_settings_backups(state: State<'_, AppState>) -> Result<Vec<SettingsBackupInfo>, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || db.list_settings_backups())
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn backup_settings_now(state: State<'_, AppState>) -> Result<Vec<SettingsBackupInfo>, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        db.backup_settings_now()?;
+        db.list_settings_backups()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn restore_settings_backup(
+    state: State<'_, AppState>,
+    file_name: String,
+) -> Result<AppSettings, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || db.restore_settings_backup(&file_name))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -984,12 +1068,39 @@ async fn save_app_settings(
     settings: AppSettings,
 ) -> Result<AppSettings, String> {
     let db = state.db.clone();
+    let monitor = state.monitor.clone();
     tokio::task::spawn_blocking(move || {
+        let previous_folder = db.get_settings().map(|s| s.torrent_download_folder).unwrap_or_default();
         db.save_settings(&settings)?;
+        let folder = settings.torrent_download_folder.trim();
+        if !folder.is_empty() && !folder.eq_ignore_ascii_case(previous_folder.trim()) {
+            ensure_library_folder(&db, &monitor, folder);
+        }
         db.get_settings()
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Adds `folder` as a library folder (and starts watching it) unless an enabled library folder already
+/// contains it, so files downloaded there are indexed and matched.
+fn ensure_library_folder(db: &Database, monitor: &LibraryMonitorHandle, folder: &str) {
+    let norm = |p: &str| p.trim().trim_end_matches(['\\', '/']).replace('/', "\\").to_lowercase();
+    let target = norm(folder);
+    let covered = db.list_library_folders().unwrap_or_default().iter().any(|f| {
+        let root = norm(&f.path);
+        f.enabled && (target == root || target.starts_with(&format!("{}\\", root)))
+    });
+    if covered {
+        return;
+    }
+    match db.add_library_folder(folder, None) {
+        Ok(_) => {
+            let _ = db.quick_scan_library_folders();
+            monitor.reload();
+        }
+        Err(e) => eprintln!("[torrents] couldn't add the download folder to the library: {}", e),
+    }
 }
 
 #[tauri::command]
@@ -1345,6 +1456,11 @@ pub fn run() {
                 .unwrap_or_else(|_| std::path::PathBuf::from("."));
             let db_path = app_data.join("tora_library.db");
             let db = Arc::new(Database::open(&db_path).expect("Failed to initialize Tora SQLite DB"));
+            // Snapshot the settings as they were at startup (a known-good restore point).
+            if let Err(e) = db.backup_settings_if_changed(None) {
+                eprintln!("[settings] startup backup failed: {}", e);
+            }
+            let torrent_cache = Arc::new(TorrentCache::new(app_data.join("torrents")));
             let plugins = Arc::new(PluginManager::new());
 
             let monitor = start_library_monitor(app.handle().clone(), db.clone());
@@ -1381,7 +1497,17 @@ pub fn run() {
                 oauth_listener_active,
                 sync: sync.clone(),
                 unmatched_check_generation: AtomicU64::new(u64::MAX),
+                torrents: torrent_cache.clone(),
             });
+
+            let torrent_emit_handle = app.handle().clone();
+            torrents::spawn_refresh_loop(
+                app.state::<AppState>().db.clone(),
+                torrent_cache,
+                Arc::new(move |name: &str, payload: Value| {
+                    let _ = torrent_emit_handle.emit(name, payload);
+                }),
+            );
 
             // Startup two-way sync. Without a token `pull` returns early (before emitting any event),
             // so a signed-out user sees no failure toast.
@@ -1428,12 +1554,25 @@ pub fn run() {
             get_stats,
             get_app_info,
             get_media_metadata,
-            search_torrents_cmd,
-            get_torrent_rules,
-            save_torrent_rule,
-            delete_torrent_rule,
-            download_torrent_cmd,
-            test_qbittorrent_cmd,
+            get_torrent_board,
+            download_releases,
+            get_torrent_feeds,
+            save_torrent_feeds,
+            get_torrent_search_feeds,
+            save_torrent_search_feeds,
+            get_torrent_filters,
+            save_torrent_filters,
+            get_torrent_priority,
+            save_torrent_priority,
+            get_torrent_fansubs,
+            set_anime_fansubs,
+            get_torrent_board_options,
+            save_torrent_board_options,
+            parse_torrent_query,
+            detect_torrent_app,
+            list_settings_backups,
+            backup_settings_now,
+            restore_settings_backup,
             get_app_settings,
             save_app_settings,
             open_external_url,

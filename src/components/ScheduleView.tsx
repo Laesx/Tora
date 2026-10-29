@@ -33,6 +33,7 @@ import { FloatingQuickMenu } from "./FloatingQuickMenu";
 import { LIST_STATUS_META } from "./AnimePosterCard";
 import { SeasonAnimeMenu } from "./SeasonAnimeMenu";
 import { useAnimeTitle } from "../titles";
+import type { TorrentSearchRequest } from "../torrents";
 
 interface ScheduleViewProps {
   animeList: AnimeEntry[];
@@ -43,7 +44,7 @@ interface ScheduleViewProps {
   onStepEpisode: (anime: AnimeEntry, delta: number) => void;
   onBatchUpdate: (patch: BatchAnimeUpdatePatch, summaryToast: string) => Promise<void>;
   onBatchDelete: (animeList: AnimeEntry[]) => Promise<void>;
-  onSearchTorrents: (query: string) => void;
+  onSearchTorrents: (req: TorrentSearchRequest) => void;
   onDeleteAnime: (anime: AnimeEntry) => void;
   showToast: (msg: string, type?: "success" | "info" | "error") => void;
 }

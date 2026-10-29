@@ -72,7 +72,7 @@ import { animeTitle, setCurrentTitleLanguage, TitleLanguageContext } from "./tit
 import { SeasonsView } from "./components/SeasonsView";
 import { ScheduleView } from "./components/ScheduleView";
 import { SearchView } from "./components/SearchView";
-import { SettingsView } from "./components/SettingsView";
+import { SettingsSection, SettingsView } from "./components/SettingsView";
 import { CommandPalette, PaletteCommand } from "./components/CommandPalette";
 import { CLOSE_MENUS_EVENT } from "./components/FloatingQuickMenu";
 import { CustomListsChip } from "./components/CustomListsChip";
@@ -82,6 +82,7 @@ import {
   CustomListsContext,
   EMPTY_CUSTOM_LISTS,
 } from "./customLists";
+import type { TorrentSearchRequest } from "./torrents";
 
 type NavTab =
   | "watchlist"
@@ -170,7 +171,9 @@ export const App: React.FC = () => {
   const [selectedAnime, setSelectedAnime] = useState<AnimeEntry | null>(null);
   const [selectedAnimeIds, setSelectedAnimeIds] = useState<number[]>([]);
   const [quickMenuAnimeId, setQuickMenuAnimeId] = useState<number | null>(null);
-  const [torrentSearchQuery, setTorrentSearchQuery] = useState("");
+  // Search handed to the Torrents tab; `nonce` makes the same anime search again
+  const [torrentSearch, setTorrentSearch] = useState<(TorrentSearchRequest & { nonce: number }) | null>(null);
+  const [settingsRequest, setSettingsRequest] = useState<{ section: SettingsSection; nonce: number } | null>(null);
   // Query handed to the Search tab (e.g. Enter in the Seasons filter)
   const [globalSearchQuery, setGlobalSearchQuery] = useState("");
   // Bumped with every hand-over so the same query searches again
@@ -223,6 +226,9 @@ export const App: React.FC = () => {
       setSettings(s);
       applyThemeToDocument(s.theme, s.accent_color);
       setAnimeList(list);
+      if (s.settings_recovered) {
+        showToast("Your settings couldn't be read, so defaults are in use. Restore a backup in Settings → About.", "error");
+      }
       refreshCustomLists();
 
       // Seed the sync spinner in case the backend startup pull is already running
@@ -360,6 +366,13 @@ export const App: React.FC = () => {
             "success"
           );
         }
+      }),
+
+      listen<{ count: number; failed: string[]; bound_anime_ids?: number[] }>("torrent-auto-downloaded", async (event) => {
+        const { count, failed, bound_anime_ids } = event.payload;
+        if (count > 0) showToast(`Auto-downloaded ${count} new episode${count === 1 ? "" : "s"}`, "success");
+        if (failed.length) showToast(`Auto-download failed: ${failed.join(" · ")}`, "error");
+        if (bound_anime_ids?.length) await refreshAnimeList();
       }),
 
       listen<AppSettings>("tracker-auth-updated", (event) => {
@@ -564,6 +577,21 @@ export const App: React.FC = () => {
       }
     >
   >({});
+
+  const searchTorrents = useCallback((req: TorrentSearchRequest) => {
+    setTorrentSearch({ ...req, nonce: Date.now() });
+    setActiveTab("torrents");
+  }, []);
+
+  const openSettings = useCallback((section: SettingsSection) => {
+    setSettingsRequest({ section, nonce: Date.now() });
+    setActiveTab("settings");
+  }, []);
+
+  // A section request only applies to the visit it opened (the sidebar button opens Settings as usual)
+  useEffect(() => {
+    if (activeTab !== "settings") setSettingsRequest(null);
+  }, [activeTab]);
 
   const handleUpdateSettings = async (next: AppSettings) => {
     setSettings(next);
@@ -977,6 +1005,7 @@ export const App: React.FC = () => {
     { id: "go-history", label: "Go to History", keywords: ["watched", "scrobbles"], icon: History, run: () => setActiveTab("history") },
     { id: "go-stats", label: "Go to Stats", keywords: ["statistics", "activity", "backlog"], icon: BarChart3, run: () => setActiveTab("stats") },
     { id: "go-settings", label: "Go to Settings", keywords: ["preferences", "options"], icon: Settings, run: () => setActiveTab("settings") },
+    { id: "torrent-settings", label: "Torrent settings", keywords: ["qbittorrent", "download folder", "refresh interval", "torrents"], icon: Settings, run: () => openSettings("torrents") },
     { id: "rescan-library", label: "Rescan All Library Folders", keywords: ["scan", "refresh", "files", "disk"], icon: HardDrive, shortcut: "F5", run: () => void handleRescanLibrary() },
     {
       id: "sync-anilist",
@@ -1695,10 +1724,7 @@ export const App: React.FC = () => {
                 onStepEpisode={handleStepEpisode}
                 onBatchUpdate={handleBatchUpdate}
                 onBatchDelete={handleBatchDelete}
-                onSearchTorrents={(q) => {
-                  setTorrentSearchQuery(q);
-                  setActiveTab("torrents");
-                }}
+                onSearchTorrents={searchTorrents}
                 onDeleteAnime={handleDeleteAnime}
                 showToast={showToast}
               />
@@ -1708,8 +1734,10 @@ export const App: React.FC = () => {
           {activeTab === "torrents" && (
             <TorrentsView
               animeList={animeList}
-              initialQuery={torrentSearchQuery}
+              searchRequest={torrentSearch}
               onSelectAnime={(a) => setSelectedAnime(a)}
+              onRefreshAnimeList={() => refreshAnimeList()}
+              onOpenSettings={() => openSettings("torrents")}
               showToast={showToast}
             />
           )}
@@ -1748,10 +1776,7 @@ export const App: React.FC = () => {
               onStepEpisode={handleStepEpisode}
               onBatchUpdate={handleBatchUpdate}
               onBatchDelete={handleBatchDelete}
-              onSearchTorrents={(q) => {
-                setTorrentSearchQuery(q);
-                setActiveTab("torrents");
-              }}
+              onSearchTorrents={searchTorrents}
               onDeleteAnime={handleDeleteAnime}
               showToast={showToast}
             />
@@ -1780,10 +1805,7 @@ export const App: React.FC = () => {
               onStepEpisode={handleStepEpisode}
               onBatchUpdate={handleBatchUpdate}
               onBatchDelete={handleBatchDelete}
-              onSearchTorrents={(q) => {
-                setTorrentSearchQuery(q);
-                setActiveTab("torrents");
-              }}
+              onSearchTorrents={searchTorrents}
               onDeleteAnime={handleDeleteAnime}
               showToast={showToast}
             />
@@ -1815,6 +1837,7 @@ export const App: React.FC = () => {
               onRefreshAnimeList={() => refreshAnimeList()}
               onSelectAnime={(a) => setSelectedAnime(a)}
               showToast={showToast}
+              sectionRequest={settingsRequest}
             />
           )}
         </main>
@@ -1841,11 +1864,10 @@ export const App: React.FC = () => {
             setSelectedAnime(null);
             showToast("Removed anime from library", "info");
           }}
-          onSearchTorrents={(q) => {
+          onSearchTorrents={(req) => {
             setSelectedAnime(null);
-            setTorrentSearchQuery(q);
-            setActiveTab("torrents");
-          }}
+            searchTorrents(req);
+            }}
           showToast={showToast}
         />
       )}
@@ -1866,10 +1888,7 @@ export const App: React.FC = () => {
             onStepEpisode: handleStepEpisode,
             onBatchUpdate: handleBatchUpdate,
             onOpenDetails: openAnime,
-            onSearchTorrents: (q) => {
-              setTorrentSearchQuery(q);
-              setActiveTab("torrents");
-            },
+            onSearchTorrents: searchTorrents,
             onDeleteAnime: handleDeleteAnime,
             showToast,
             customLists: customListsApi,

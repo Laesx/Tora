@@ -30,8 +30,10 @@ import {
 import { TITLE_LANGUAGES } from "../titles";
 import { LibraryManagerView } from "./LibraryManagerView";
 import { AnitomyParserPanel } from "./AnitomyParserPanel";
+import { TorrentSettingsSection } from "./torrents/TorrentSettings";
+import { SettingsBackupsPanel } from "./SettingsBackups";
 
-type SettingsSection =
+export type SettingsSection =
   | "appearance"
   | "tracker"
   | "library"
@@ -57,7 +59,7 @@ const CREDITS: { name: string; role: string; license?: string; url: string }[] =
   { name: "Anisthesia", role: "Media player detection", license: "MIT", url: "https://github.com/erengy/anisthesia" },
   { name: "anime-relations", role: "Sequel episode redirection", license: "CC0-1.0", url: "https://github.com/erengy/anime-relations" },
   { name: "AniList", role: "List sync, metadata, seasons & schedule", url: "https://anilist.co" },
-  { name: "Nyaa & AnimeTosho", role: "Torrent RSS feeds", url: "https://nyaa.si" },
+  { name: "Nyaa, SubsPlease & other RSS feeds", role: "Torrent feeds and search", url: "https://nyaa.si" },
   { name: "Tauri", role: "Desktop app framework", license: "MIT / Apache-2.0", url: "https://tauri.app" },
   { name: "React & Tailwind CSS", role: "User interface", license: "MIT", url: "https://react.dev" },
 ];
@@ -70,6 +72,8 @@ interface SettingsViewProps {
   onRefreshAnimeList: () => Promise<void>;
   onSelectAnime: (anime: AnimeEntry) => void;
   showToast: (msg: string, type?: "success" | "info" | "error") => void;
+  /** Section to open (e.g. the Torrents tab's settings button); a new `nonce` opens it again */
+  sectionRequest?: { section: SettingsSection; nonce: number } | null;
 }
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
@@ -80,10 +84,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   onRefreshAnimeList,
   onSelectAnime,
   showToast,
+  sectionRequest,
 }) => {
   const [plugins, setPlugins] = useState<TrackerPluginDescriptor[]>([]);
-  const [testingQb, setTestingQb] = useState(false);
-  const [section, setSection] = useState<SettingsSection>("appearance");
+  const [section, setSection] = useState<SettingsSection>(sectionRequest?.section ?? "appearance");
+
+  useEffect(() => {
+    if (sectionRequest) setSection(sectionRequest.section);
+  }, [sectionRequest]);
 
   useEffect(() => {
     toraApi.getTrackerPlugins().then(setPlugins).catch(console.error);
@@ -112,22 +120,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       p.id === playerId ? { ...p, enabled: !p.enabled } : p
     );
     await onUpdateSettings({ ...settings, players: updatedPlayers });
-  };
-
-  const handleTestQb = async () => {
-    setTestingQb(true);
-    try {
-      const msg = await toraApi.testQbittorrent(
-        settings.qbittorrent_url,
-        settings.qbittorrent_username,
-        settings.qbittorrent_password
-      );
-      showToast(msg, "success");
-    } catch (err: any) {
-      showToast(String(err), "error");
-    } finally {
-      setTestingQb(false);
-    }
   };
 
   return (
@@ -427,136 +419,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         )}
 
         {section === "torrents" && (
-          <>
-            {/* qBittorrent WebUI Integration */}
-            <div className="bg-bg-secondary border border-border-subtle rounded-2xl p-5 space-y-4">
-              <div className="flex items-center justify-between">
-                <h2 className="text-sm font-bold text-text-primary flex items-center gap-2">
-                  <Download className="w-4 h-4 text-accent" />
-                  qBittorrent WebUI Integration
-                </h2>
-                <label className="flex items-center gap-2 text-xs text-text-secondary cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={settings.qbittorrent_enabled}
-                    onChange={(e) =>
-                      onUpdateSettings({
-                        ...settings,
-                        qbittorrent_enabled: e.target.checked,
-                      })
-                    }
-                    className="rounded accent-accent"
-                  />
-                  Enable WebUI API
-                </label>
-              </div>
-
-              <p className="text-[11px] text-text-muted">
-                When disabled, clicking "Download" opens Magnet links in your default system torrent client. When enabled, torrents are sent directly to qBittorrent WebUI.
-              </p>
-
-              <div className="space-y-3 text-xs">
-                <div>
-                  <label className="block text-[11px] text-text-muted mb-1">
-                    qBittorrent WebUI URL
-                  </label>
-                  <input
-                    type="text"
-                    value={settings.qbittorrent_url}
-                    onChange={(e) =>
-                      onUpdateSettings({
-                        ...settings,
-                        qbittorrent_url: e.target.value,
-                      })
-                    }
-                    placeholder="http://127.0.0.1:8080"
-                    className="w-full px-3 py-2 rounded-xl bg-bg-primary border border-border-subtle font-mono text-text-primary"
-                  />
-                </div>
-
-                <div className="grid grid-cols-2 gap-2.5">
-                  <div>
-                    <label className="block text-[11px] text-text-muted mb-1">
-                      Username
-                    </label>
-                    <input
-                      type="text"
-                      value={settings.qbittorrent_username}
-                      onChange={(e) =>
-                        onUpdateSettings({
-                          ...settings,
-                          qbittorrent_username: e.target.value,
-                        })
-                      }
-                      className="w-full px-3 py-2 rounded-xl bg-bg-primary border border-border-subtle text-text-primary"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[11px] text-text-muted mb-1">
-                      Password
-                    </label>
-                    <input
-                      type="password"
-                      value={settings.qbittorrent_password}
-                      onChange={(e) =>
-                        onUpdateSettings({
-                          ...settings,
-                          qbittorrent_password: e.target.value,
-                        })
-                      }
-                      className="w-full px-3 py-2 rounded-xl bg-bg-primary border border-border-subtle text-text-primary"
-                    />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-2.5">
-                  <div>
-                    <label className="block text-[11px] text-text-muted mb-1">
-                      Category
-                    </label>
-                    <input
-                      type="text"
-                      value={settings.qbittorrent_category}
-                      onChange={(e) =>
-                        onUpdateSettings({
-                          ...settings,
-                          qbittorrent_category: e.target.value,
-                        })
-                      }
-                      className="w-full px-3 py-2 rounded-xl bg-bg-primary border border-border-subtle text-text-primary"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[11px] text-text-muted mb-1">
-                      Default Save Path (Optional)
-                    </label>
-                    <input
-                      type="text"
-                      value={settings.qbittorrent_save_path}
-                      onChange={(e) =>
-                        onUpdateSettings({
-                          ...settings,
-                          qbittorrent_save_path: e.target.value,
-                        })
-                      }
-                      placeholder="D:\Anime"
-                      className="w-full px-3 py-2 rounded-xl bg-bg-primary border border-border-subtle font-mono text-text-primary"
-                    />
-                  </div>
-                </div>
-
-                <button
-                  onClick={handleTestQb}
-                  disabled={testingQb}
-                  className="px-4 py-2 rounded-xl bg-bg-tertiary hover:bg-bg-elevated border border-border-subtle text-text-primary text-xs font-semibold transition"
-                >
-                  {testingQb
-                    ? "Testing Connection..."
-                    : "Test qBittorrent WebUI Connection"}
-                </button>
-              </div>
-            </div>
-          </>
+          <TorrentSettingsSection settings={settings} onUpdateSettings={onUpdateSettings} showToast={showToast} />
         )}
 
         {section === "diagnostics" && (
@@ -565,7 +428,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </>
         )}
 
-        {section === "about" && <AboutSection showToast={showToast} />}
+        {section === "about" && (
+          <AboutSection
+            showToast={showToast}
+            onRestored={async (restored) => {
+              applyThemeToDocument(restored.theme, restored.accent_color);
+              await onUpdateSettings(restored);
+            }}
+          />
+        )}
       </div>
     </div>
   );
@@ -573,7 +444,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
 const AboutSection: React.FC<{
   showToast: (msg: string, type?: "success" | "info" | "error") => void;
-}> = ({ showToast }) => {
+  onRestored: (settings: AppSettings) => Promise<void>;
+}> = ({ showToast, onRestored }) => {
   const [version, setVersion] = useState<string | null>(null);
   const [tauriVersion, setTauriVersion] = useState<string | null>(null);
   const [info, setInfo] = useState<AppInfo | null>(null);
@@ -652,6 +524,8 @@ const AboutSection: React.FC<{
           Tora is not affiliated with AniList, Taiga or any torrent site.
         </p>
       </div>
+
+      <SettingsBackupsPanel onRestored={onRestored} showToast={showToast} />
     </>
   );
 };

@@ -23,6 +23,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useCustomLists } from "../customLists";
 import { CustomListsPanel } from "./CustomListsPanel";
 import { altTitles, useAnimeTitle, useTitleLanguage } from "../titles";
+import { TorrentSearchRequest, torrentSearchFor } from "../torrents";
 
 interface AnimeDetailModalProps {
   anime: AnimeEntry;
@@ -34,7 +35,7 @@ interface AnimeDetailModalProps {
   /** A debounced ± step saved after the drawer closed or switched anime: update the list only */
   onSavedInBackground?: (updated: AnimeEntry) => void;
   onDeleted: (animeId: number) => void;
-  onSearchTorrents: (query: string) => void;
+  onSearchTorrents: (req: TorrentSearchRequest) => void;
   showToast: (msg: string, type?: "success" | "info" | "error") => void;
 }
 
@@ -241,8 +242,7 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
         showToast(String(e), "error");
       }
     } else {
-      const nextQuery = `${anime.title_romaji} ${String(epNum).padStart(2, "0")}`;
-      onSearchTorrents(nextQuery);
+      onSearchTorrents(torrentSearchFor(anime));
     }
   };
 
@@ -408,15 +408,11 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
                 </button>
 
                 <button
-                  onClick={() =>
-                    onSearchTorrents(
-                      `${anime.title_romaji} ${String(progress + 1).padStart(2, "0")}`
-                    )
-                  }
+                  onClick={() => onSearchTorrents(torrentSearchFor(anime))}
                   className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-bg-elevated hover:bg-bg-primary text-text-primary text-xs font-medium border border-border-subtle transition"
                 >
                   <Search className="w-3.5 h-3.5 text-accent" />
-                  Find Ep {progress + 1} Torrent
+                  Find Torrents
                 </button>
               </>
             ) : (
@@ -668,7 +664,7 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
                           title={
                             hasLocal
                               ? `Episode ${epNum} available on disk — Click to play`
-                              : `Episode ${epNum} — Click to search torrent`
+                              : `Episode ${epNum} — Click to search torrents for this anime`
                           }
                           className={`py-1.5 rounded-md text-xs font-mono border transition flex items-center justify-center gap-0.5 ${btnClass}`}
                         >
