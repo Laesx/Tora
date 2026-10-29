@@ -229,10 +229,12 @@ impl AniListPlugin {
                     .to_string(),
                 parse_fuzzy_date(en.get("startedAt")),
                 parse_fuzzy_date(en.get("completedAt")),
-                en.get("updatedAt")
-                    .and_then(|v| v.as_i64())
-                    .filter(|&t| t > 0)
-                    .unwrap_or(now),
+                // Old entries can have updatedAt = 0: fall back to createdAt, else 0 ("oldest"). Never `now`,
+                // which would make an untouched entry look freshly edited and win newest-wins comparisons.
+                ["updatedAt", "createdAt"]
+                    .iter()
+                    .find_map(|k| en.get(*k).and_then(|v| v.as_i64()).filter(|&t| t > 0))
+                    .unwrap_or(0),
                 en.get("id").and_then(|v| v.as_i64()),
             )
         } else {
@@ -939,6 +941,7 @@ impl TrackerPlugin for AniListPlugin {
                                     day
                                 }}
                                 updatedAt
+                                createdAt
                                 media {{
                                     {MEDIA_LIST_FRAGMENT}
                                 }}
@@ -1498,6 +1501,16 @@ mod tests {
         assert_eq!(e.user_completed_at, None);
         assert_eq!(e.anilist_list_entry_id, Some(900));
         assert_eq!(e.updated_at, 1_800_000_000);
+
+        // updatedAt 0 (old entries) falls back to createdAt, then to 0; never to the import time
+        let mut old = entry_node.clone();
+        old["updatedAt"] = json!(0);
+        old["createdAt"] = json!(1_500_000_000);
+        let e_old = AniListPlugin::parse_media_node(&old["media"], Some(&old)).unwrap();
+        assert_eq!(e_old.updated_at, 1_500_000_000);
+        old["createdAt"] = json!(0);
+        let e_old = AniListPlugin::parse_media_node(&old["media"], Some(&old)).unwrap();
+        assert_eq!(e_old.updated_at, 0);
         // Heavy metadata is absent in the light fetch (the merge never writes these for existing rows)
         assert!(e.synopsis.is_empty() && e.genres.is_empty() && e.studios.is_empty());
         assert_eq!((e.mal_id, e.banner_image, e.trailer_url), (None, None, None));

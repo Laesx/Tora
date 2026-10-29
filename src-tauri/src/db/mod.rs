@@ -1882,7 +1882,9 @@ impl Database {
     /// - Existing entries: if the local entry is `sync_pending` or newer (`updated_at`) than the remote, local
     ///   user fields are kept (`kept_local` counts only entries whose user fields differ). Otherwise differing
     ///   remote user fields replace local ones (`updated_from_remote`); `local_episodes.watched` follows a
-    ///   progress change in the same transaction.
+    ///   progress change in the same transaction. With the same user fields, a non-pending entry newer than
+    ///   the remote adopts the remote `updated_at` (repairs import-time stamps); a newer remote time alone is
+    ///   never written.
     /// - Light metadata (titles, synonyms, format, status, episodes, season, score, cover, next airing,
     ///   list-entry id) is compared and written with a targeted UPDATE only when it differs. Heavy metadata
     ///   (synopsis, genres, studios, banner, trailer, …) is never touched for existing entries, so a light
@@ -2006,6 +2008,14 @@ impl Database {
                     }
                     wrote = true;
                 }
+            } else if !local.user.sync_pending && local.user.updated_at > remote.updated_at {
+                // Same user state, but the local stamp is newer than AniList's although nothing is unsent:
+                // only an import-time stamp does that (entries with updatedAt = 0). Adopt AniList's time so it
+                // can't win newest-wins or sort as recently edited. A newer remote time alone is never written.
+                tx.prepare_cached("UPDATE anime_entries SET updated_at = ?1 WHERE id = ?2")
+                    .and_then(|mut s| s.execute(params![remote.updated_at, id]))
+                    .map_err(|e| e.to_string())?;
+                wrote = true;
             }
 
             // ---- light metadata
@@ -4471,6 +4481,44 @@ mod tests {
         assert_eq!(db.get_anime_entry_by_id(2).unwrap().next_airing_episode, Some(6));
         let changes_before = total_changes(&db);
         let stats = db.merge_remote_list(&remote2, &HashSet::new(), true).unwrap();
+        assert!(stats.changed_ids.is_empty());
+        assert_eq!(total_changes(&db), changes_before);
+    }
+
+    #[test]
+    fn test_merge_repairs_import_time_stamps_but_keeps_pending_ones() {
+        let db = Database::open_in_memory().expect("db");
+        // Imported with the old "updatedAt = 0 -> now" fallback: newer than AniList, nothing unsent
+        let mut stamped = test_entry(1, "Alpha");
+        stamped.updated_at = 5_000;
+        // A local edit waiting to be pushed keeps its own time
+        let mut pending = test_entry(2, "Beta");
+        pending.updated_at = 5_000;
+        pending.sync_pending = true;
+        // Already in step with AniList
+        let mut in_step = test_entry(3, "Gamma");
+        in_step.updated_at = 100;
+        db.upsert_anime_entries_batch(&[stamped.clone(), pending.clone(), in_step.clone()])
+            .unwrap();
+
+        let mut r1 = remote_of(&stamped);
+        r1.updated_at = 0;
+        let mut r2 = remote_of(&pending);
+        r2.updated_at = 0;
+        let r3 = remote_of(&in_step);
+        let remote = vec![r1, r2, r3];
+
+        let stats = db.merge_remote_list(&remote, &HashSet::new(), true).unwrap();
+        assert_eq!(stats.changed_ids, vec![1]);
+        assert_eq!(stats.updated_from_remote, 0);
+        assert!(stats.rematch_ids.is_empty());
+        assert_eq!(db.get_anime_entry_by_id(1).unwrap().updated_at, 0);
+        assert_eq!(db.get_anime_entry_by_id(2).unwrap().updated_at, 5_000);
+        assert_eq!(db.get_anime_entry_by_id(3).unwrap().updated_at, 100);
+
+        // Repaired once: the next identical pull writes nothing
+        let changes_before = total_changes(&db);
+        let stats = db.merge_remote_list(&remote, &HashSet::new(), true).unwrap();
         assert!(stats.changed_ids.is_empty());
         assert_eq!(total_changes(&db), changes_before);
     }
