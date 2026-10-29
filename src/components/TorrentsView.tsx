@@ -144,6 +144,7 @@ export const TorrentsView: React.FC<TorrentsViewProps> = ({
   toastRef.current = showToast;
 
   const seqRef = useRef(0);
+  const inFlightPromiseRef = useRef<Map<string, Promise<TorrentBoard>>>(new Map());
   // Reads never fetch general feeds (only Refresh does); a search fetches when it isn't cached yet.
   const load = useCallback(
     async (force = false, quiet = false) => {
@@ -154,8 +155,12 @@ export const TorrentsView: React.FC<TorrentsViewProps> = ({
         setLoading(true);
         setFetching(force || !!search);
       }
+      const promise = (!force && inFlightPromiseRef.current.get(key)) || toraApi.getTorrentBoard(source, force);
+      if (!force) {
+        inFlightPromiseRef.current.set(key, promise);
+      }
       try {
-        const b = await toraApi.getTorrentBoard(source, force);
+        const b = await promise;
         if (seq !== seqRef.current) return;
         memory.board = { key, board: b };
         setBoardState(b);
@@ -163,6 +168,9 @@ export const TorrentsView: React.FC<TorrentsViewProps> = ({
       } catch (e) {
         if (seq === seqRef.current) toastRef.current(String(e), "error");
       } finally {
+        if (!force && inFlightPromiseRef.current.get(key) === promise) {
+          inFlightPromiseRef.current.delete(key);
+        }
         if (seq === seqRef.current) {
           setLoading(false);
           setFetching(false);
@@ -199,12 +207,9 @@ export const TorrentsView: React.FC<TorrentsViewProps> = ({
     void loadConfig();
   }, [loadConfig]);
 
-  const firstLoad = useRef(true);
   useEffect(() => {
     // A remembered board is already on screen: re-read the cache quietly (selection may have changed)
-    const quiet = firstLoad.current && board !== null;
-    firstLoad.current = false;
-    void load(false, quiet);
+    void load(false, board !== null);
   }, [load]);
 
   // A new hand-over while this tab is already open
@@ -216,12 +221,10 @@ export const TorrentsView: React.FC<TorrentsViewProps> = ({
   }, [searchRequest]);
 
   // List changes (progress, new files) only re-run selection on the cached feeds
-  const firstList = useRef(true);
+  const prevAnimeListRef = useRef(animeList);
   useEffect(() => {
-    if (firstList.current) {
-      firstList.current = false;
-      return;
-    }
+    if (prevAnimeListRef.current === animeList) return;
+    prevAnimeListRef.current = animeList;
     const t = setTimeout(() => void loadRef.current(false, true), 400);
     return () => clearTimeout(t);
   }, [animeList]);
