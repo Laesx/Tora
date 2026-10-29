@@ -10,7 +10,9 @@ import type { AnimeEntry } from "./types";
  *  - every space-separated token matches some field, in any order ("season 2 kusuriya").
  * Queries/tokens of 1–2 characters only match as substrings (word starts score highest). Longer
  * ones match as a subsequence anywhere, scored fzf-style: bonuses for word starts and consecutive
- * characters, penalties for gaps; matches spread too far apart are rejected. A per-record
+ * characters, penalties for gaps; matches spread too far apart are rejected. A gap may skip
+ * letters inside a word, but a gap that crosses a space must land on a word start ("spyfam" →
+ * "spy x family", but not "house" → "t(h)at dev(ou)r(s) th(e)"). A per-record
  * character bitmask rejects most non-matches before any scoring.
  */
 
@@ -87,40 +89,25 @@ function charMask(s: string): number {
 const isBoundary = (text: string, i: number) =>
   i === 0 || text.charCodeAt(i - 1) === 32;
 
-/** Scores the greedy alignment of `token` inside `text[start..end]`; optionally collects positions. */
-function scoreWindow(
-  token: string,
-  text: string,
-  start: number,
-  end: number,
-  positions?: number[]
-): number {
+/** Scores one alignment (`pos` = matched index of every token char, ascending). */
+function scoreAlignment(token: string, text: string, pos: number[]): number {
   let score = 0;
-  let p = 0;
-  let inGap = false;
   let chunkBonus = 0;
-  let prevMatched = false;
-  for (let i = start; i <= end && p < token.length; i++) {
-    if (text.charCodeAt(i) === token.charCodeAt(p)) {
-      score += SCORE_MATCH;
-      let bonus = isBoundary(text, i) ? BONUS_BOUNDARY : 0;
-      if (prevMatched) {
-        bonus = Math.max(bonus, chunkBonus, BONUS_CONSECUTIVE);
-      } else {
-        chunkBonus = bonus;
-      }
-      if (p === 0) bonus *= BONUS_FIRST_CHAR_MULTIPLIER;
-      score += bonus;
-      positions?.push(i);
-      p++;
-      prevMatched = true;
-      inGap = false;
+  for (let k = 0; k < pos.length; k++) {
+    const i = pos[k];
+    score += SCORE_MATCH;
+    let bonus = isBoundary(text, i) ? BONUS_BOUNDARY : 0;
+    if (k > 0 && pos[k - 1] === i - 1) {
+      bonus = Math.max(bonus, chunkBonus, BONUS_CONSECUTIVE);
     } else {
-      score += inGap ? GAP_EXTENSION : GAP_START;
-      inGap = true;
-      prevMatched = false;
+      chunkBonus = bonus;
+      if (k > 0) score += GAP_START + (i - pos[k - 1] - 2) * GAP_EXTENSION;
     }
+    if (k === 0) bonus *= BONUS_FIRST_CHAR_MULTIPLIER;
+    score += bonus;
   }
+  const start = pos[0];
+  const end = pos[pos.length - 1];
   if (start === 0) score += BONUS_FIELD_PREFIX;
   if (
     end - start + 1 === token.length &&
@@ -133,75 +120,107 @@ function scoreWindow(
   return score - Math.min(text.length, 200) / 100;
 }
 
-/** Best [start, end] window of `token` in `text`, or null. */
-function align(
-  token: string,
-  text: string,
-  fuzzy: boolean
-): { start: number; end: number } | null {
+/** Fuzzy DP rows, reused across calls (index p * text.length + i) */
+let endAt = new Int32Array(0);
+let nextAt = new Int32Array(0);
+
+/**
+ * Best alignment of `token` in `text` (matched positions), or null.
+ *
+ * Fuzzy rule: letters inside a word may be skipped, but a gap that crosses a space must land on a
+ * word start. For every possible start the DP finds the earliest end that keeps to the rule
+ * (scanning right to left, one row per token char); the best-scoring start within the spread cap
+ * wins.
+ */
+function align(token: string, text: string, fuzzy: boolean): number[] | null {
   const n = token.length;
-  if (n === 0 || n > text.length) return null;
+  const len = text.length;
+  if (n === 0 || n > len) return null;
 
   // Substring: take the first occurrence at a word start, else the first occurrence
   let idx = text.indexOf(token);
   if (idx !== -1) {
-    let first = idx;
+    const first = idx;
     while (idx !== -1 && !isBoundary(text, idx)) idx = text.indexOf(token, idx + 1);
     const start = idx !== -1 ? idx : first;
-    return { start, end: start + n - 1 };
+    return Array.from({ length: n }, (_, k) => start + k);
   }
   if (!fuzzy) return null;
 
-  // Subsequence anywhere in the text. Candidate windows: one starting at every occurrence of the
-  // first char that is a word start, plus the tightest window (fzf v1: earliest end, then the
-  // latest start for it). The best-scoring window within the spread cap wins.
-  const first = token.charCodeAt(0);
-  const maxSpread = n * MAX_SPREAD_PER_CHAR;
-  let best: { start: number; end: number } | null = null;
-  let bestScore = NO_MATCH;
-  const consider = (start: number, end: number) => {
-    if (end - start + 1 > maxSpread) return;
-    const s = scoreWindow(token, text, start, end);
-    if (s > bestScore) {
-      bestScore = s;
-      best = { start, end };
-    }
-  };
-  const endFrom = (start: number) => {
-    let p = 1;
-    for (let i = start + 1; i < text.length; i++) {
-      if (text.charCodeAt(i) === token.charCodeAt(p) && ++p === n) return i;
-    }
-    return n === 1 ? start : -1;
-  };
+  // Cheap reject: not even a plain subsequence
+  for (let i = 0, p = 0; ; i++) {
+    if (i === len) return null;
+    if (text.charCodeAt(i) === token.charCodeAt(p) && ++p === n) break;
+  }
 
-  const firstAt = text.indexOf(token[0]);
-  if (firstAt === -1) return null;
-  const tightEnd = endFrom(firstAt);
-  if (tightEnd < 0) return null;
-  let tightStart = tightEnd;
-  for (let i = tightEnd, p = n - 1; i >= 0; i--) {
-    if (text.charCodeAt(i) === token.charCodeAt(p) && --p < 0) {
-      tightStart = i;
-      break;
+  if (endAt.length < n * len) {
+    endAt = new Int32Array(n * len * 2);
+    nextAt = new Int32Array(n * len * 2);
+  }
+  for (let p = n - 1; p >= 0; p--) {
+    const row = p * len;
+    const nextRow = row + len;
+    const ch = token.charCodeAt(p);
+    // Best continuation (earliest end) among row p + 1 at j > i: in i's word, or at any word start
+    let wordEnd = -1, wordAt = -1, startEnd = -1, startAt = -1;
+    for (let i = len - 1; i >= 0; i--) {
+      const c = text.charCodeAt(i);
+      if (c === 32) {
+        wordEnd = -1;
+        endAt[row + i] = -1;
+        continue;
+      }
+      let e = -1, at = -1;
+      if (c === ch) {
+        if (p === n - 1) {
+          e = i;
+        } else if (wordEnd !== -1 && (startEnd === -1 || wordEnd <= startEnd)) {
+          e = wordEnd;
+          at = wordAt;
+        } else if (startEnd !== -1) {
+          e = startEnd;
+          at = startAt;
+        }
+      }
+      endAt[row + i] = e;
+      nextAt[row + i] = at;
+      if (p < n - 1) {
+        const ne = endAt[nextRow + i];
+        if (ne !== -1) {
+          if (wordEnd === -1 || ne <= wordEnd) {
+            wordEnd = ne;
+            wordAt = i;
+          }
+          if (isBoundary(text, i) && (startEnd === -1 || ne <= startEnd)) {
+            startEnd = ne;
+            startAt = i;
+          }
+        }
+      }
     }
   }
-  consider(tightStart, tightEnd);
 
-  for (let b = firstAt; b < text.length; b++) {
-    if (text.charCodeAt(b) !== first || !isBoundary(text, b)) continue;
-    const end = endFrom(b);
-    // A later start can't complete if this one didn't
-    if (end < 0) break;
-    consider(b, end);
+  const maxSpread = n * MAX_SPREAD_PER_CHAR;
+  let best: number[] | null = null;
+  let bestScore = NO_MATCH;
+  for (let s = 0; s < len; s++) {
+    const e = endAt[s];
+    if (e === -1 || e - s + 1 > maxSpread) continue;
+    const pos = [s];
+    for (let p = 0, i = s; p < n - 1; p++) pos.push((i = nextAt[p * len + i]));
+    const score = scoreAlignment(token, text, pos);
+    if (score > bestScore) {
+      bestScore = score;
+      best = pos;
+    }
   }
   return best;
 }
 
 /** Score of one normalized token against one normalized field (`NO_MATCH` if absent). */
 export function scoreField(token: string, text: string, fuzzy: boolean): number {
-  const w = align(token, text, fuzzy);
-  return w ? scoreWindow(token, text, w.start, w.end) : NO_MATCH;
+  const pos = align(token, text, fuzzy);
+  return pos ? scoreAlignment(token, text, pos) : NO_MATCH;
 }
 
 export interface PreparedQuery {
@@ -337,11 +356,9 @@ export function matchRanges(query: string, original: string): [number, number][]
   const { text, map } = normalizeWithMap(original);
   const hit = new Set<number>();
   const mark = (token: string, fuzzy: boolean) => {
-    const w = align(token, text, fuzzy);
-    if (!w) return false;
-    const positions: number[] = [];
-    scoreWindow(token, text, w.start, w.end, positions);
-    for (const p of positions) hit.add(map[p]);
+    const pos = align(token, text, fuzzy);
+    if (!pos) return false;
+    for (const p of pos) hit.add(map[p]);
     return true;
   };
   // Same two ways a record can match as in `search`: all tokens, else the compact query
