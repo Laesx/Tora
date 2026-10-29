@@ -1,6 +1,12 @@
-# Tora (虎)
+<p align="center">
+  <img src="src/assets/tora-mark.svg" alt="Tora logo" width="96" height="96" />
+</p>
 
-A fast desktop anime manager inspired by [Taiga](https://github.com/erengy/taiga).
+<h1 align="center">Tora (虎)</h1>
+
+<p align="center">
+  A fast desktop anime manager inspired by <a href="https://github.com/erengy/taiga">Taiga</a>.
+</p>
 
 > [!WARNING]
 > Tora is under heavy development. Expect bugs and breaking changes.
