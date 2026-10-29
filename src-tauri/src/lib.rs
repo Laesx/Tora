@@ -131,6 +131,22 @@ async fn set_anime_custom_lists(
 }
 
 #[tauri::command]
+async fn create_custom_list(
+    state: State<'_, AppState>,
+    name: String,
+) -> Result<CustomListsState, String> {
+    state.sync.create_custom_list(name).await
+}
+
+#[tauri::command]
+async fn delete_custom_list(
+    state: State<'_, AppState>,
+    name: String,
+) -> Result<CustomListsState, String> {
+    state.sync.delete_custom_list(name).await
+}
+
+#[tauri::command]
 async fn batch_delete_anime_entries(
     state: State<'_, AppState>,
     anime_ids: Vec<i64>,
@@ -1545,6 +1561,8 @@ pub fn run() {
             batch_update_anime_entries,
             get_custom_lists,
             set_anime_custom_lists,
+            create_custom_list,
+            delete_custom_list,
             batch_delete_anime_entries,
             add_or_upsert_anime,
             delete_anime_entry,

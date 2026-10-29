@@ -536,6 +536,12 @@ impl Drop for InProgressGuard<'_> {
 // Service
 // ---------------------------------------------------------------------------------------------
 
+/// A custom-list change sent to the tracker immediately (see `TrackerSyncService::edit_custom_lists`).
+enum ListEdit {
+    Create(String),
+    Delete(String),
+}
+
 pub struct TrackerSyncService {
     db: Arc<Database>,
     plugins: Arc<PluginManager>,
@@ -756,6 +762,72 @@ impl TrackerSyncService {
             });
         }
         Ok(state)
+    }
+
+    /// Create a custom list on AniList right away (signed in only; never queued) and store the
+    /// tracker's resulting list names. Renaming lists stays on AniList. Returns the full
+    /// custom-list state.
+    pub async fn create_custom_list(&self, name: String) -> Result<CustomListsState, String> {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return Err("List name can't be empty".into());
+        }
+        self.edit_custom_lists(ListEdit::Create(name)).await
+    }
+
+    /// Delete a custom list on AniList right away (signed in only; never queued). Its entries stay
+    /// on the list; their membership in it is dropped locally too. Returns the full custom-list state.
+    pub async fn delete_custom_list(&self, name: String) -> Result<CustomListsState, String> {
+        self.edit_custom_lists(ListEdit::Delete(name)).await
+    }
+
+    /// Shared create / delete flow: validate against the local names, require a signed-in token whose
+    /// account owns the local list (same guard as pulls), call the tracker through the rate limiter and
+    /// store its resulting names.
+    async fn edit_custom_lists(&self, edit: ListEdit) -> Result<CustomListsState, String> {
+        let _op = self.op_lock.lock().await;
+        let (settings, owner, local) = self
+            .blocking(|db| Ok((db.get_settings()?, db.list_owner()?, db.get_custom_lists()?.names)))
+            .await?;
+        match &edit {
+            ListEdit::Create(name) if local.iter().any(|n| n.trim().eq_ignore_ascii_case(name)) => {
+                return Err(format!("A list named \"{}\" already exists", name));
+            }
+            ListEdit::Delete(name) if !local.contains(name) => {
+                return Err(format!("There is no list named \"{}\"", name));
+            }
+            _ => {}
+        }
+        let token = settings.anilist_token.trim().to_string();
+        if token.is_empty() {
+            return Err("Sign in to AniList to edit custom lists".into());
+        }
+        let plugin = self.plugin()?;
+        let viewer = plugin.viewer_id(&token).await?;
+        if [settings.anilist_user_id, owner].into_iter().flatten().any(|id| id != viewer) {
+            return Err("The signed-in AniList account doesn't own this list; sign in again".into());
+        }
+        let names = match self
+            .limiter
+            .run(|| match &edit {
+                ListEdit::Create(name) => plugin.create_custom_list(&token, name),
+                ListEdit::Delete(name) => plugin.delete_custom_list(&token, name),
+            })
+            .await
+        {
+            Ok(names) => names,
+            Err(e) => {
+                if matches!(e, TrackerError::Unauthorized(_)) {
+                    self.emit(EVENT_AUTH_INVALID, json!({ "message": e.to_string() }));
+                }
+                return Err(e.to_string());
+            }
+        };
+        self.blocking(move |db| {
+            db.set_custom_list_names(&names)?;
+            db.get_custom_lists()
+        })
+        .await
     }
 
     /// Add an anime (e.g. from Discover). Requires an AniList id. If it is already in the list, its user
@@ -2193,6 +2265,30 @@ mod tests {
                 Ok(())
             })
         }
+        fn create_custom_list<'a>(
+            &'a self,
+            _token: &'a str,
+            name: &'a str,
+        ) -> BoxFuture<'a, Result<Vec<String>, TrackerError>> {
+            Box::pin(async move {
+                let mut lists = self.custom_lists.lock().unwrap();
+                if !lists.iter().any(|n| n == name) {
+                    lists.push(name.to_string());
+                }
+                Ok(lists.clone())
+            })
+        }
+        fn delete_custom_list<'a>(
+            &'a self,
+            _token: &'a str,
+            name: &'a str,
+        ) -> BoxFuture<'a, Result<Vec<String>, TrackerError>> {
+            Box::pin(async move {
+                let mut lists = self.custom_lists.lock().unwrap();
+                lists.retain(|n| n != name);
+                Ok(lists.clone())
+            })
+        }
     }
 
     type Events = Arc<Mutex<Vec<(String, Value)>>>;
@@ -2423,6 +2519,62 @@ mod tests {
         assert!(status.last_synced_at.is_some());
         assert_eq!(status.pending_count, 0);
         assert_eq!(status.pending_deletions, 0);
+    }
+
+    #[tokio::test]
+    async fn create_custom_list_needs_owner_sign_in_and_keeps_remote_lists() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let mock = Arc::new(MockTracker {
+            viewer_id: 42,
+            ..Default::default()
+        });
+        let (svc, _events) = service(db.clone(), mock.clone());
+
+        // Signed out / empty name: nothing is sent
+        assert!(svc.create_custom_list("Favs".into()).await.is_err());
+        sign_in(&db, 42);
+        assert!(svc.create_custom_list("   ".into()).await.is_err());
+        assert!(mock.custom_lists.lock().unwrap().is_empty());
+
+        // A list made on AniList since the last pull survives (the tracker's names are stored)
+        *mock.custom_lists.lock().unwrap() = vec!["Made elsewhere".into()];
+        let state = svc.create_custom_list("  Favs ".into()).await.unwrap();
+        assert_eq!(state.names, vec!["Made elsewhere", "Favs"]);
+        assert_eq!(db.get_custom_lists().unwrap().names, vec!["Made elsewhere", "Favs"]);
+
+        // Duplicates (ignoring case) are rejected locally
+        assert!(svc.create_custom_list("favs".into()).await.is_err());
+        assert_eq!(mock.custom_lists.lock().unwrap().len(), 2);
+
+        // Another account's token never writes
+        sign_in(&db, 7);
+        assert!(svc.create_custom_list("Other".into()).await.is_err());
+        assert!(svc.delete_custom_list("Favs".into()).await.is_err());
+        assert_eq!(mock.custom_lists.lock().unwrap().len(), 2);
+        sign_in(&db, 42);
+
+        // Deleting drops the list and its memberships locally, without queueing a push
+        db.upsert_anime_entry(&test_entry(1, "Alpha")).unwrap();
+        svc.set_custom_lists(CustomListChange {
+            anime_ids: vec![1],
+            toggles: vec![
+                CustomListToggle { name: "Favs".into(), enabled: true },
+                CustomListToggle { name: "Made elsewhere".into(), enabled: true },
+            ],
+            hidden_from_status_lists: Some(true),
+        })
+        .await
+        .unwrap();
+        wait_until(|| !db.get_anime_entry_by_id(1).unwrap().sync_pending).await;
+        assert!(svc.delete_custom_list("Nope".into()).await.is_err());
+        let state = svc.delete_custom_list("Favs".into()).await.unwrap();
+        assert_eq!(state.names, vec!["Made elsewhere"]);
+        assert_eq!(state.members[0].lists, vec!["Made elsewhere"]);
+        assert!(state.members[0].hidden_from_status_lists);
+        let state = svc.delete_custom_list("Made elsewhere".into()).await.unwrap();
+        assert!(state.names.is_empty() && state.members.is_empty());
+        assert!(mock.custom_lists.lock().unwrap().is_empty());
+        assert!(!db.get_anime_entry_by_id(1).unwrap().sync_pending);
     }
 
     #[tokio::test]

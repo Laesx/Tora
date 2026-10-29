@@ -1,13 +1,26 @@
-import React, { useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import type { LucideIcon } from "lucide-react";
-import { LayoutGrid, List, RefreshCw, Rows, Search, Shuffle, X } from "lucide-react";
+import {
+  ArrowDownWideNarrow,
+  ArrowUpNarrowWide,
+  LayoutGrid,
+  List,
+  RefreshCw,
+  Rows,
+  Search,
+  Shuffle,
+  X,
+} from "lucide-react";
 import { AnimeEntry, AppSettings } from "@/lib/types";
 import { formatLastSynced } from "@/lib/format";
 import { WATCHLIST_TABS } from "@/lib/status";
 import { useAnimeActions } from "@/contexts/animeActions";
 import { CustomListsChip } from "./CustomListsChip";
-import { VirtualWatchlist } from "./VirtualWatchlist";
+import { VirtualWatchlist, WatchlistNav } from "./VirtualWatchlist";
 import type { WatchlistState } from "./useWatchlist";
+import { SORT_OPTIONS, WatchlistSortKey } from "./sort";
+
+const SORT_GROUPS = Array.from(new Set(SORT_OPTIONS.map((o) => o.group)));
 
 export type ViewMode = AppSettings["view_mode"];
 
@@ -22,6 +35,8 @@ interface WatchlistViewProps {
   animeList: AnimeEntry[];
   customListNames: string[];
   customListCounts: Map<string, number>;
+  onCreateCustomList: (name: string) => Promise<void>;
+  onDeleteCustomList: (name: string) => Promise<void>;
   viewMode: ViewMode;
   /** Undefined until settings are loaded (the switcher is hidden) */
   onViewModeChange?: (mode: ViewMode) => void;
@@ -34,6 +49,9 @@ interface WatchlistViewProps {
   onSetSelectedAnimeIds: React.Dispatch<React.SetStateAction<number[]>>;
   quickMenuAnimeId: number | null;
   onSetQuickMenuAnimeId: (id: number | null) => void;
+  /** Owned by App so the global shortcuts can type into the box and move the selection */
+  searchInputRef: React.MutableRefObject<HTMLInputElement | null>;
+  navRef: React.Ref<WatchlistNav>;
 }
 
 /** Anime Watchlist tab: status tabs / custom lists, search, sort, sync, view mode, virtualized list. */
@@ -42,6 +60,8 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
   animeList,
   customListNames,
   customListCounts,
+  onCreateCustomList,
+  onDeleteCustomList,
   viewMode,
   onViewModeChange,
   isSignedIn,
@@ -53,9 +73,32 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
   onSetSelectedAnimeIds,
   quickMenuAnimeId,
   onSetQuickMenuAnimeId,
+  searchInputRef,
+  navRef,
 }) => {
   const { openAnime } = useAnimeActions();
-  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const toolbarRef = useRef<HTMLDivElement | null>(null);
+  // Toolbar height (it wraps on narrow windows): scrolling to a card keeps it below the bar
+  const [toolbarHeight, setToolbarHeight] = useState(0);
+  // Scrolled: the bar gets its bottom border and shadow
+  const [stuck, setStuck] = useState(false);
+
+  useEffect(() => {
+    const el = toolbarRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setToolbarHeight(el.offsetHeight));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const scrollEl = scrollContainerRef.current;
+    if (!scrollEl) return;
+    const onScroll = () => setStuck(scrollEl.scrollTop > 0);
+    onScroll();
+    scrollEl.addEventListener("scroll", onScroll, { passive: true });
+    return () => scrollEl.removeEventListener("scroll", onScroll);
+  }, [scrollContainerRef]);
 
   const openRandom = () => {
     if (w.filteredAnime.length === 0) return;
@@ -63,9 +106,14 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
   };
 
   return (
-    <div className="p-6 space-y-4 max-w-7xl mx-auto">
-      {/* Filter & view mode toolbar */}
-      <div className="flex flex-wrap items-center justify-between gap-4" onClick={(e) => e.stopPropagation()}>
+    <div className="px-6 pb-6 max-w-7xl mx-auto">
+      {/* Filter & view mode toolbar: stays at the top while the list scrolls */}
+      <div
+        ref={toolbarRef}
+        className={`sticky top-0 z-30 -mx-6 px-6 pt-6 pb-4 mb-0 flex flex-wrap items-center justify-between gap-4 bg-bg-primary/90 backdrop-blur-md border-b transition-[border-color,box-shadow] ${stuck ? "border-border-subtle shadow-lg shadow-black/10" : "border-transparent"
+          }`}
+        onClick={(e) => e.stopPropagation()}
+      >
         {/* Status tabs */}
         <div className="flex flex-wrap items-center gap-1 bg-bg-secondary p-1 rounded-xl border border-border-subtle">
           {WATCHLIST_TABS.map((tab) => {
@@ -87,12 +135,15 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
               </button>
             );
           })}
-          {customListNames.length > 0 && (
+          {/* Signed in, the chip shows even with no lists so the first one can be created */}
+          {(customListNames.length > 0 || isSignedIn) && (
             <CustomListsChip
               names={customListNames}
               counts={customListCounts}
               active={w.isSearching ? null : w.customListFilter}
               onSelect={w.showCustomList}
+              onCreate={isSignedIn ? onCreateCustomList : undefined}
+              onDelete={isSignedIn ? onDeleteCustomList : undefined}
             />
           )}
         </div>
@@ -105,14 +156,8 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
               ref={searchInputRef}
               type="text"
               value={w.searchQuery}
+              // Esc / ↓ / Enter are handled by the global shortcuts (useGlobalShortcuts)
               onChange={(e) => w.setSearchQuery(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key !== "Escape") return;
-                // Esc clears; on an empty box it leaves the box. Never reaches the global handler.
-                e.stopPropagation();
-                if (w.searchQuery) w.setSearchQuery("");
-                else e.currentTarget.blur();
-              }}
               placeholder="Search all lists..."
               title="Searches every list; results are grouped by status (Esc clears)"
               className="pl-8 pr-7 py-1.5 rounded-xl bg-bg-secondary border border-border-subtle text-xs text-text-primary focus:outline-none focus:border-accent w-56"
@@ -131,16 +176,35 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
             )}
           </div>
 
-          <select
-            value={w.sortBy}
-            onChange={(e) => w.setSortBy(e.target.value as typeof w.sortBy)}
-            className="px-2.5 py-1.5 rounded-xl bg-bg-secondary border border-border-subtle text-xs text-text-primary"
-          >
-            <option value="updated">Sort: Last Updated</option>
-            <option value="title">Sort: Title (A-Z)</option>
-            <option value="score">Sort: My Score</option>
-            <option value="progress">Sort: Progress</option>
-          </select>
+          <div className="flex items-center gap-1">
+            <select
+              value={w.sortKey}
+              onChange={(e) => w.setSort(e.target.value as WatchlistSortKey)}
+              className="px-2.5 py-1.5 rounded-xl bg-bg-secondary border border-border-subtle text-xs text-text-primary"
+              title="Sort (with a search: best match first, then this)"
+            >
+              {SORT_GROUPS.map((group) => (
+                <optgroup key={group} label={group}>
+                  {SORT_OPTIONS.filter((o) => o.group === group).map((o) => (
+                    <option key={o.id} value={o.id}>
+                      {o.label}
+                    </option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+            <button
+              onClick={() => w.setSort(w.sortKey, w.sortDir === "asc" ? "desc" : "asc")}
+              className="p-2 rounded-xl bg-bg-secondary hover:bg-bg-tertiary border border-border-subtle text-text-secondary hover:text-text-primary transition"
+              title={w.sortDir === "asc" ? "Ascending (click for descending)" : "Descending (click for ascending)"}
+            >
+              {w.sortDir === "asc" ? (
+                <ArrowUpNarrowWide className="w-3.5 h-3.5" />
+              ) : (
+                <ArrowDownWideNarrow className="w-3.5 h-3.5" />
+              )}
+            </button>
+          </div>
 
           <button
             onClick={openRandom}
@@ -197,6 +261,11 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
         onSetSelectedAnimeIds={onSetSelectedAnimeIds}
         quickMenuAnimeId={quickMenuAnimeId}
         onSetQuickMenuAnimeId={onSetQuickMenuAnimeId}
+        navRef={navRef}
+        stickyOffset={toolbarHeight}
+        sortKey={w.sortKey}
+        sortDir={w.sortDir}
+        onSort={w.setSort}
       />
     </div>
   );

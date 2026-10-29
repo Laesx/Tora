@@ -1,5 +1,5 @@
 import React from "react";
-import { ExternalLink, LogIn, LogOut, Search, Settings, User } from "lucide-react";
+import { ExternalLink, Keyboard, LogIn, LogOut, Search, Settings, User } from "lucide-react";
 import { AppSettings } from "@/lib/types";
 import toraMark from "@/assets/tora-mark.svg";
 import { NAV_ITEMS, NavTab } from "./nav";
@@ -8,6 +8,9 @@ interface SidebarProps {
   activeTab: NavTab;
   onNavigate: (tab: NavTab) => void;
   onOpenPalette: () => void;
+  onOpenShortcuts: () => void;
+  /** Ctrl is held: show each tab's Ctrl+N badge */
+  showShortcutHints: boolean;
   /** A player session is active (pulsing dot on Now Playing) */
   isPlaying: boolean;
   listCount: number;
@@ -23,11 +26,33 @@ const navClass = (active: boolean) =>
   `w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${active ? "bg-accent text-white shadow-sm" : "text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
   }`;
 
+/** Square icon buttons next to the brand (keyboard shortcuts, settings) */
+const iconButtonClass = (active: boolean) =>
+  `p-2 rounded-xl border transition shrink-0 cursor-pointer ${active
+    ? "bg-accent border-accent text-white shadow-sm"
+    : "bg-bg-primary border-border-subtle hover:border-accent/50 text-text-muted hover:text-accent"
+  }`;
+
+/**
+ * Tab number badge for Ctrl+N (N = position in NAV_ITEMS, Settings last). Always mounted and absolutely
+ * positioned so showing it never changes the row's size; it fades in while Ctrl is held.
+ */
+const TabHint: React.FC<{ tab: NavTab; visible: boolean; className?: string }> = ({ tab, visible, className = "" }) => (
+  <kbd
+    aria-hidden={!visible}
+    className={`absolute pointer-events-none px-1.5 py-0.5 text-[10px] font-mono rounded bg-bg-primary text-text-primary border border-border-subtle shadow-sm whitespace-nowrap transition-opacity duration-200 ${visible ? "opacity-100" : "opacity-0"} ${className}`}
+  >
+    {NAV_ITEMS.findIndex((item) => item.id === tab) + 1}
+  </kbd>
+);
+
 /** Brand, Ctrl+K button, tab navigation and the AniList account card. */
 export const Sidebar: React.FC<SidebarProps> = ({
   activeTab,
   onNavigate,
   onOpenPalette,
+  onOpenShortcuts,
+  showShortcutHints,
   isPlaying,
   listCount,
   settings,
@@ -39,29 +64,33 @@ export const Sidebar: React.FC<SidebarProps> = ({
 }) => (
   <aside className="w-60 bg-bg-secondary border-r border-border-subtle flex flex-col justify-between shrink-0">
     <div className="p-4 space-y-5">
-      {/* Brand */}
+      {/* Brand, keyboard shortcuts & settings */}
       <div className="flex items-center justify-between px-1">
         <div className="flex items-center gap-2.5">
           <img src={toraMark} alt="" className="w-9 h-9 shrink-0" draggable={false} />
-          <div>
-            <div className="font-extrabold text-sm tracking-tight text-text-primary flex items-center gap-1.5">
-              TORA
-              <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-accent/15 text-accent">v0.1</span>
-            </div>
-            <div className="text-[10px] text-text-muted">Anime Library & Tracker</div>
+          <div className="font-extrabold text-sm tracking-tight text-text-primary flex items-center gap-1.5">
+            TORA
+            <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-accent/15 text-accent">v0.1</span>
           </div>
         </div>
 
-        <button
-          onClick={() => onNavigate("settings")}
-          className={`p-2 rounded-lg transition shrink-0 cursor-pointer ${activeTab === "settings"
-            ? "bg-accent text-white shadow-sm"
-            : "bg-bg-tertiary hover:bg-bg-elevated text-text-secondary hover:text-accent"
-            }`}
-          title="Settings"
-        >
-          <Settings className="w-4 h-4" />
-        </button>
+        <div className="flex items-center gap-1.5">
+          <button
+            onClick={onOpenShortcuts}
+            className={iconButtonClass(false)}
+            title="Keyboard shortcuts (?)"
+          >
+            <Keyboard className="w-4 h-4" />
+          </button>
+          <button
+            onClick={() => onNavigate("settings")}
+            className={`relative ${iconButtonClass(activeTab === "settings")}`}
+            title="Settings (Ctrl+9)"
+          >
+            <Settings className="w-4 h-4" />
+            <TabHint tab="settings" visible={showShortcutHints} className="top-full mt-1 right-0 z-10" />
+          </button>
+        </div>
       </div>
 
       {/* Ctrl+K */}
@@ -84,10 +113,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 <Icon className="w-4 h-4" />
                 {label}
               </span>
-              {id === "nowplaying" && isPlaying && (
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-              )}
-              {id === "watchlist" && <span className="text-[11px] font-mono opacity-80">{listCount}</span>}
+              {/* The count / playing dot fades out under the Ctrl badge */}
+              <span className="relative flex items-center">
+                <span className={`flex items-center transition-opacity duration-200 ${showShortcutHints ? "opacity-0" : "opacity-100"}`}>
+                  {id === "nowplaying" && isPlaying && (
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+                  )}
+                  {id === "watchlist" && <span className="text-[11px] font-mono opacity-80">{listCount}</span>}
+                </span>
+                <TabHint tab={id} visible={showShortcutHints} className="right-0 top-1/2 -translate-y-1/2" />
+              </span>
             </button>
             {id === "nowplaying" && (
               <div className="py-1.5 px-1">

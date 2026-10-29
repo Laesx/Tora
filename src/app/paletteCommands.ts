@@ -1,4 +1,4 @@
-import { HardDrive, LayoutGrid, List, ListChecks, Palette, RefreshCw, Rows, Settings, Shuffle } from "lucide-react";
+import { HardDrive, Keyboard, LayoutGrid, List, ListChecks, Palette, RefreshCw, Rows, Settings, Shuffle } from "lucide-react";
 import { THEME_PRESETS } from "@/lib/theme";
 import type { PaletteCommand } from "@/features/palette/CommandPalette";
 import type { ViewMode } from "@/features/watchlist/WatchlistView";
@@ -10,6 +10,7 @@ interface PaletteCommandDeps {
   rescanLibrary: () => void;
   syncFromAnilist: () => void;
   openRandomAnime: () => void;
+  openShortcuts: () => void;
   customListNames: string[];
   openCustomList: (name: string) => void;
   setViewMode: (mode: ViewMode) => void;
@@ -19,16 +20,18 @@ interface PaletteCommandDeps {
 /** Every command in the Ctrl+K Commands tab, in display order. */
 export function buildPaletteCommands(d: PaletteCommandDeps): PaletteCommand[] {
   return [
-    ...NAV_ITEMS.map((item) => ({
+    ...NAV_ITEMS.map((item, i) => ({
       id: `go-${item.id}`,
       label: `Go to ${item.label}`,
       keywords: item.keywords,
       icon: item.icon,
+      shortcut: `Ctrl+${i + 1}`,
       run: () => d.navigate(item.id),
     })),
     { id: "torrent-settings", label: "Torrent settings", keywords: ["qbittorrent", "download folder", "refresh interval", "torrents"], icon: Settings, run: d.openTorrentSettings },
     { id: "rescan-library", label: "Rescan All Library Folders", keywords: ["scan", "refresh", "files", "disk"], icon: HardDrive, shortcut: "F5", run: d.rescanLibrary },
     { id: "sync-anilist", label: "Sync from AniList", keywords: ["pull", "refresh", "tracker"], icon: RefreshCw, run: d.syncFromAnilist },
+    { id: "shortcuts", label: "Keyboard Shortcuts", keywords: ["keys", "hotkeys", "help", "keyboard"], icon: Keyboard, shortcut: "?", run: d.openShortcuts },
     { id: "random-anime", label: "Open a Random Anime from the Current List", keywords: ["shuffle", "pick", "random"], icon: Shuffle, run: d.openRandomAnime },
     ...d.customListNames.map((name) => ({
       id: `custom-list-${name}`,

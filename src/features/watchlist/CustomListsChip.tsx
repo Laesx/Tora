@@ -1,5 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ListChecks, Search } from "lucide-react";
+import { ChevronDown, ListChecks, Plus, Search, Trash2 } from "lucide-react";
+import { useToast } from "@/contexts/toast";
+import { DeleteCustomListModal } from "./DeleteCustomListModal";
+import { NewCustomListModal } from "./NewCustomListModal";
 
 interface CustomListsChipProps {
   // List names in the user's AniList order
@@ -8,6 +11,10 @@ interface CustomListsChipProps {
   // Selected custom list (null while a status tab is selected or searching)
   active: string | null;
   onSelect: (name: string) => void;
+  /** Creates a list on AniList; undefined when signed out (no "New list" row) */
+  onCreate?: (name: string) => Promise<void>;
+  /** Deletes a list on AniList; undefined when signed out (no delete buttons) */
+  onDelete?: (name: string) => Promise<void>;
 }
 
 // Above this many lists the popover gets a filter box
@@ -19,8 +26,14 @@ export const CustomListsChip: React.FC<CustomListsChipProps> = ({
   counts,
   active,
   onSelect,
+  onCreate,
+  onDelete,
 }) => {
+  const showToast = useToast();
   const [open, setOpen] = useState(false);
+  const [creating, setCreating] = useState(false);
+  // List awaiting delete confirmation
+  const [deleting, setDeleting] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const [highlight, setHighlight] = useState(0);
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -32,6 +45,8 @@ export const CustomListsChip: React.FC<CustomListsChipProps> = ({
     const q = filter.trim().toLowerCase();
     return q ? names.filter((n) => n.toLowerCase().includes(q)) : names;
   }, [names, filter]);
+  // The "New list" row sits after the lists and is reachable with the arrows
+  const rowCount = visible.length + (onCreate ? 1 : 0);
 
   useEffect(() => {
     if (!open) return;
@@ -59,6 +74,16 @@ export const CustomListsChip: React.FC<CustomListsChipProps> = ({
     setOpen(false);
   };
 
+  const startCreate = () => {
+    setOpen(false);
+    setCreating(true);
+  };
+
+  const startDelete = (name: string) => {
+    setOpen(false);
+    setDeleting(name);
+  };
+
   const onKeyDown = (e: React.KeyboardEvent) => {
     // Keep Escape / arrows away from the global watchlist handler
     e.stopPropagation();
@@ -67,7 +92,7 @@ export const CustomListsChip: React.FC<CustomListsChipProps> = ({
       setOpen(false);
     } else if (e.key === "ArrowDown") {
       e.preventDefault();
-      setHighlight((h) => Math.min(visible.length - 1, h + 1));
+      setHighlight((h) => Math.min(rowCount - 1, h + 1));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       setHighlight((h) => Math.max(0, h - 1));
@@ -75,6 +100,11 @@ export const CustomListsChip: React.FC<CustomListsChipProps> = ({
       e.preventDefault();
       const name = visible[highlight];
       if (name) pick(name);
+      else if (onCreate && highlight === visible.length) startCreate();
+    } else if (e.key === "Delete" && onDelete && visible[highlight] && e.target === listRef.current) {
+      // Only from the list itself, so Delete still edits the filter text
+      e.preventDefault();
+      startDelete(visible[highlight]);
     }
   };
 
@@ -123,25 +153,76 @@ export const CustomListsChip: React.FC<CustomListsChipProps> = ({
           )}
           <div ref={listRef} tabIndex={-1} className="max-h-72 overflow-y-auto focus:outline-none">
             {visible.length === 0 && (
-              <div className="px-3 py-2 text-text-muted">No lists match</div>
+              <div className="px-3 py-2 text-text-muted">{names.length === 0 ? "No custom lists yet" : "No lists match"}</div>
             )}
             {visible.map((name, i) => (
-              <button
+              <div
                 key={name}
                 data-index={i}
+                role="option"
+                aria-selected={name === active}
                 onClick={() => pick(name)}
                 onMouseEnter={() => setHighlight(i)}
-                className={`w-full flex items-center justify-between gap-2 px-3 py-1.5 text-left transition ${i === highlight ? "bg-bg-tertiary text-text-primary" : "text-text-secondary"
+                className={`w-full flex items-center justify-between gap-2 px-3 py-1.5 text-left cursor-pointer transition ${i === highlight ? "bg-bg-tertiary text-text-primary" : "text-text-secondary"
                   } ${name === active ? "font-bold text-accent" : ""}`}
               >
                 <span className="truncate">{name}</span>
-                <span className="text-[10px] font-mono text-text-muted shrink-0">
-                  {counts.get(name) ?? 0}
+                <span className="flex items-center gap-1.5 shrink-0">
+                  <span className="text-[10px] font-mono text-text-muted">{counts.get(name) ?? 0}</span>
+                  {onDelete && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        startDelete(name);
+                      }}
+                      className={`p-0.5 rounded text-text-muted hover:text-rose-400 hover:bg-rose-500/10 transition ${i === highlight ? "opacity-100" : "opacity-0"
+                        }`}
+                      title="Delete list (Del)"
+                      aria-label={`Delete list ${name}`}
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
+                  )}
                 </span>
-              </button>
+              </div>
             ))}
+            {onCreate && (
+              <button
+                data-index={visible.length}
+                onClick={startCreate}
+                onMouseEnter={() => setHighlight(visible.length)}
+                className={`w-full flex items-center gap-2 px-3 py-1.5 mt-1 text-left border-t border-border-subtle transition ${highlight === visible.length ? "bg-bg-tertiary text-text-primary" : "text-text-secondary"
+                  }`}
+              >
+                <Plus className="w-3.5 h-3.5 text-accent shrink-0" />
+                <span>New list…</span>
+              </button>
+            )}
           </div>
         </div>
+      )}
+
+      {deleting !== null && onDelete && (
+        <DeleteCustomListModal
+          name={deleting}
+          count={counts.get(deleting) ?? 0}
+          onDelete={async () => {
+            await onDelete(deleting);
+            showToast(`Deleted list "${deleting}" on AniList`, "success");
+          }}
+          onClose={() => setDeleting(null)}
+        />
+      )}
+
+      {creating && onCreate && (
+        <NewCustomListModal
+          existingNames={names}
+          onCreate={async (name) => {
+            await onCreate(name);
+            showToast(`Created list "${name}" on AniList`, "success");
+          }}
+          onClose={() => setCreating(false)}
+        />
       )}
     </div>
   );

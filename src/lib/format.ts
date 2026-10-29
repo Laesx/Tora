@@ -32,5 +32,41 @@ export function formatLastSynced(ts: number): string {
   return new Date(ms).toLocaleString();
 }
 
+const MINUTE = 60;
+const HOUR = 3600;
+const DAY = 86400;
+const WEEK = 7 * DAY;
+const MONTH = 30 * DAY;
+const YEAR = 365 * DAY;
+
+/**
+ * Unix seconds -> "3 days ago" (`long`) or "3d ago" (`short`, for tight card footers).
+ * Weeks cover anything under a month; months anything under a year.
+ */
+export function formatRelativeTime(unixSec: number, now: number, style: "short" | "long" = "long"): string {
+  const diff = Math.max(0, now - unixSec);
+  if (diff < MINUTE) return "just now";
+  const [n, short, long] =
+    diff < HOUR
+      ? [Math.floor(diff / MINUTE), "m", "min"]
+      : diff < DAY
+        ? [Math.floor(diff / HOUR), "h", "hour"]
+        : diff < WEEK
+          ? [Math.floor(diff / DAY), "d", "day"]
+          : diff < MONTH
+            ? [Math.floor(diff / WEEK), "w", "week"]
+            : diff < YEAR
+              ? [Math.floor(diff / MONTH), "mo", "month"]
+              : [Math.floor(diff / YEAR), "y", "year"];
+  if (style === "short") return `${n}${short} ago`;
+  if (long === "day" && n === 1) return "yesterday";
+  return long === "min" ? `${n} min ago` : `${plural(n, long)} ago`;
+}
+
+/** Unix seconds -> full local date and time (tooltips) */
+export function formatExactTime(unixSec: number): string {
+  return new Date(unixSec * 1000).toLocaleString(undefined, { dateStyle: "full", timeStyle: "short" });
+}
+
 /** "1 episode" / "3 episodes" */
 export const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;

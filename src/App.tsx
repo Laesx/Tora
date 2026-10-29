@@ -13,6 +13,7 @@ import { NavTab } from "@/app/nav";
 import { Sidebar } from "@/app/Sidebar";
 import { NowPlayingBanner } from "@/app/NowPlayingBanner";
 import { SignOutModal } from "@/app/SignOutModal";
+import { ShortcutsModal } from "@/app/ShortcutsModal";
 import { Toast, useToastState } from "@/app/Toast";
 import { useAnimeList } from "@/app/useAnimeList";
 import { useEpisodeStepper } from "@/app/useEpisodeStepper";
@@ -21,9 +22,11 @@ import { useTrackerSync } from "@/app/useTrackerSync";
 import { useMediaPoll } from "@/app/useMediaPoll";
 import { useAppEvents } from "@/app/useAppEvents";
 import { useGlobalShortcuts } from "@/app/useGlobalShortcuts";
+import { useCtrlHint } from "@/app/useCtrlHint";
 import { buildPaletteCommands } from "@/app/paletteCommands";
 import { useWatchlist } from "@/features/watchlist/useWatchlist";
 import { ViewMode, WatchlistView } from "@/features/watchlist/WatchlistView";
+import type { WatchlistNav } from "@/features/watchlist/VirtualWatchlist";
 import { AnimeDetailModal } from "@/features/detail/AnimeDetailModal";
 import { CommandPalette } from "@/features/palette/CommandPalette";
 import { CLOSE_MENUS_EVENT } from "@/components/FloatingQuickMenu";
@@ -38,6 +41,8 @@ import { SettingsSection, SettingsView } from "@/features/settings/SettingsView"
 
 export const App: React.FC = () => {
   const mainScrollRef = useRef<HTMLElement | null>(null);
+  const watchlistSearchRef = useRef<HTMLInputElement | null>(null);
+  const watchlistNavRef = useRef<WatchlistNav | null>(null);
   const [activeTab, setActiveTab] = useState<NavTab>("watchlist");
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const titleLanguage = settings?.title_language ?? "romaji";
@@ -69,6 +74,8 @@ export const App: React.FC = () => {
   // Command palette text; kept across opens
   const [cmdQuery, setCmdQuery] = useState("");
   const [signOutModalOpen, setSignOutModalOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const showShortcutHints = useCtrlHint();
   const [isAuthorizingAnilist, setIsAuthorizingAnilist] = useState(false);
   const [libraryRefreshTick, setLibraryRefreshTick] = useState(0);
   // Sync requires an OAuth token; a bare username no longer counts as signed in
@@ -232,6 +239,15 @@ export const App: React.FC = () => {
     setActiveTab("seasons");
   };
 
+  // Ctrl+1–9: switch tabs, closing the palette and any open menu (the drawer isn't tab-bound)
+  const navigateTo = (tab: NavTab) => {
+    setCmdOpen(false);
+    setShortcutsOpen(false);
+    list.setQuickMenuAnimeId(null);
+    window.dispatchEvent(new Event(CLOSE_MENUS_EVENT));
+    setActiveTab(tab);
+  };
+
   const showInWatchlist = (show: () => void) => {
     setActiveTab("watchlist");
     show();
@@ -356,17 +372,27 @@ export const App: React.FC = () => {
     drawerOpen: selectedAnime !== null,
     paletteOpen: cmdOpen,
     signOutOpen: signOutModalOpen,
+    shortcutsOpen,
     quickMenuOpen: list.quickMenuAnimeId !== null,
     selectedAnimeIds: list.selectedAnimeIds,
     visibleAnime: watchlist.filteredAnime,
     animeList,
+    getSearchInput: () => watchlistSearchRef.current,
+    searchQuery: watchlist.searchQuery,
+    searchSettled: watchlist.deferredSearchQuery === watchlist.searchQuery,
+    setSearchQuery: watchlist.setSearchQuery,
     togglePalette: () => setCmdOpen((prev) => !prev),
     closePalette: () => setCmdOpen(false),
     closeSignOut: () => setSignOutModalOpen(false),
+    openShortcuts: () => setShortcutsOpen(true),
+    closeShortcuts: () => setShortcutsOpen(false),
     closeQuickMenu: () => list.setQuickMenuAnimeId(null),
     closeDrawer: () => setSelectedAnime(null),
     openAnime: setSelectedAnime,
     setSelectedAnimeIds: list.setSelectedAnimeIds,
+    moveSelection: (dir) => watchlistNavRef.current?.move(dir) ?? false,
+    enterList: () => watchlistNavRef.current?.enter() ?? false,
+    navigate: navigateTo,
     rescanLibrary: () => void handleRescanLibrary(),
   });
 
@@ -376,6 +402,7 @@ export const App: React.FC = () => {
     rescanLibrary: () => void handleRescanLibrary(),
     syncFromAnilist: handleSyncFromAnilist,
     openRandomAnime,
+    openShortcuts: () => setShortcutsOpen(true),
     customListNames: customLists.names,
     openCustomList: (name) => showInWatchlist(() => watchlist.showCustomList(name)),
     setViewMode,
@@ -400,6 +427,8 @@ export const App: React.FC = () => {
         activeTab={activeTab}
         onNavigate={setActiveTab}
         onOpenPalette={() => setCmdOpen(true)}
+        onOpenShortcuts={() => setShortcutsOpen(true)}
+        showShortcutHints={showShortcutHints}
         isPlaying={activeSession !== null}
         listCount={animeList.length}
         settings={settings}
@@ -434,6 +463,8 @@ export const App: React.FC = () => {
               animeList={animeList}
               customListNames={customLists.names}
               customListCounts={customLists.counts}
+              onCreateCustomList={customLists.create}
+              onDeleteCustomList={customLists.remove}
               viewMode={settings?.view_mode || "grid"}
               onViewModeChange={settings ? setViewMode : undefined}
               isSignedIn={isSignedIn}
@@ -445,6 +476,8 @@ export const App: React.FC = () => {
               onSetSelectedAnimeIds={list.setSelectedAnimeIds}
               quickMenuAnimeId={list.quickMenuAnimeId}
               onSetQuickMenuAnimeId={list.setQuickMenuAnimeId}
+              searchInputRef={watchlistSearchRef}
+              navRef={watchlistNavRef}
             />
           )}
 
@@ -461,7 +494,7 @@ export const App: React.FC = () => {
             <SeasonsView
               animeList={animeList}
               scrollContainerRef={mainScrollRef}
-              keyboardEnabled={!selectedAnime && !cmdOpen && !signOutModalOpen}
+              keyboardEnabled={!selectedAnime && !cmdOpen && !signOutModalOpen && !shortcutsOpen}
               onGlobalSearch={openGlobalSearch}
               seasonRequest={seasonRequest}
               onSeasonRequestHandled={() => setSeasonRequest(null)}
@@ -551,6 +584,8 @@ export const App: React.FC = () => {
           onConfirm={handleConfirmSignOut}
         />
       )}
+
+      {shortcutsOpen && <ShortcutsModal onClose={() => setShortcutsOpen(false)} />}
 
       {toast && <Toast toast={toast} />}
     </div>

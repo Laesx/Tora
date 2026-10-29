@@ -1350,6 +1350,19 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, S
 }
 
 /// Custom list names in the user's tracker order.
+fn write_custom_list_names(conn: &Connection, names: &[String]) -> Result<(), String> {
+    conn.execute("DELETE FROM tracker_custom_lists", [])
+        .map_err(|e| e.to_string())?;
+    for (i, name) in names.iter().enumerate() {
+        conn.execute(
+            "INSERT OR IGNORE INTO tracker_custom_lists (name, position) VALUES (?1, ?2)",
+            params![name, i as i64],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 fn read_custom_list_names(conn: &Connection) -> Result<Vec<String>, String> {
     let mut stmt = conn
         .prepare_cached("SELECT name FROM tracker_custom_lists ORDER BY position, name")
@@ -3013,6 +3026,42 @@ impl Database {
         Ok(changed)
     }
 
+    /// Replace the custom list names (tracker order) after a list was created or deleted on the
+    /// tracker. Memberships of lists that no longer exist are dropped, unsent edits included (an
+    /// entry left in no list is no longer hidden from status lists). Nothing is queued: the tracker
+    /// already applied the change.
+    pub fn set_custom_list_names(&self, names: &[String]) -> Result<(), String> {
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        if read_custom_list_names(&tx)? != names {
+            write_custom_list_names(&tx, names)?;
+            let rows: Vec<(i64, String)> = {
+                let mut stmt = tx
+                    .prepare("SELECT anime_id, lists_json FROM anime_custom_lists")
+                    .map_err(|e| e.to_string())?;
+                let rows = stmt
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                    .map_err(|e| e.to_string())?;
+                rows.collect::<Result<_, _>>().map_err(|e| e.to_string())?
+            };
+            for (id, lists_json) in rows {
+                let lists = parse_list_names_json(&lists_json);
+                let kept: Vec<String> = lists.iter().filter(|n| names.contains(n)).cloned().collect();
+                if kept != lists {
+                    let kept_json = serde_json::to_string(&kept).map_err(|e| e.to_string())?;
+                    tx.execute(
+                        "UPDATE anime_custom_lists SET lists_json = ?1,
+                             hidden_from_status_lists = hidden_from_status_lists AND ?2
+                         WHERE anime_id = ?3",
+                        params![kept_json, !kept.is_empty(), id],
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())
+    }
+
     /// Diff-only merge of the tracker's custom lists after a pull. The names are rewritten only when they
     /// changed (removed names are also dropped from unsent local edits). Each entry's membership is replaced
     /// by the remote one unless it has an unsent local edit (`dirty`). Never writes `anime_entries`, so it
@@ -3028,15 +3077,7 @@ impl Database {
 
         let names_changed = read_custom_list_names(&tx)? != names;
         if names_changed {
-            tx.execute("DELETE FROM tracker_custom_lists", [])
-                .map_err(|e| e.to_string())?;
-            for (i, name) in names.iter().enumerate() {
-                tx.execute(
-                    "INSERT OR IGNORE INTO tracker_custom_lists (name, position) VALUES (?1, ?2)",
-                    params![name, i as i64],
-                )
-                .map_err(|e| e.to_string())?;
-            }
+            write_custom_list_names(&tx, names)?;
             changed = true;
         }
 

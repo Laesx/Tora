@@ -59,9 +59,12 @@ Tora/
 │   ├── App.tsx                           # Wiring only: app state hooks, context providers, tab switch, drawer / palette / modals
 │   ├── app/                              # App shell and app-wide state
 │   │   ├── nav.ts                        # `NavTab`, `NAV_ITEMS` (sidebar rows + palette "Go to" commands)
-│   │   ├── Sidebar.tsx                   # Brand, Ctrl+K button, tab navigation, AniList account card
+│   │   ├── Sidebar.tsx                   # Brand, Ctrl+K + shortcuts buttons, tab navigation (Ctrl+N badges while Ctrl is held), AniList account card
 │   │   ├── NowPlayingBanner.tsx          # Live playback strip above every tab except Now Playing
 │   │   ├── SignOutModal.tsx              # Sign-out confirmation
+│   │   ├── shortcuts.ts                  # `SHORTCUT_GROUPS`: every shortcut shown in the sheet (keep in step with the handlers)
+│   │   ├── ShortcutsModal.tsx            # Keyboard shortcuts sheet (?, sidebar keyboard button, palette command)
+│   │   ├── useCtrlHint.ts                # Ctrl held alone ~400 ms → sidebar shows Ctrl+1–9 badges
 │   │   ├── Toast.tsx                     # `useToastState` (stable `showToast`) + toast view
 │   │   ├── useAnimeList.ts               # The list + drawer / selection / quick-menu state; `setList`, `replaceEntries`, `applyDelta`, `refreshEntries`, list mutations
 │   │   ├── useEpisodeStepper.ts          # Optimistic debounced +1 / -1 (`stepEpisode`, position-locking `snapshots`)
@@ -69,7 +72,7 @@ Tora/
 │   │   ├── useMediaPoll.ts               # 2.5 s player recognition poll (`inFlight` guard), new-session / scrobbled callbacks
 │   │   ├── useAppEvents.ts               # Registers every Tauri listener before the initial load
 │   │   ├── useCustomListsState.ts        # AniList custom lists state, membership maps, counts, `CustomListsContext` value
-│   │   ├── useGlobalShortcuts.ts         # F5, Ctrl+K, Ctrl+A, Enter, Escape
+│   │   ├── useGlobalShortcuts.ts         # F5, Ctrl+K, Ctrl+1–9 tabs, ?, watchlist type-to-search / arrows / Enter / Ctrl+A, layered Escape
 │   │   └── paletteCommands.ts            # Ctrl+K Commands tab entries
 │   ├── contexts/                         # React contexts (provided by App)
 │   │   ├── toast.ts                      # `useToast()`; never pass `showToast` as a prop
@@ -78,6 +81,7 @@ Tora/
 │   │   └── titles.ts                     # Display title language (`useAnimeTitle`, `altTitles`, `displayTitle` for plain helpers)
 │   ├── hooks/                            # Generic hooks
 │   │   ├── virtual.ts                    # `useScrollViewport` (list width / top / scroll / viewport height) + `visibleRange` (binary search)
+│   │   ├── useNow.ts                     # Unix-seconds tick for relative labels ("3 days ago")
 │   │   └── usePrefs.ts                   # Per-device view prefs in localStorage (guarded, laid over defaults)
 │   ├── lib/                              # Plain helpers, no React state
 │   │   ├── api.ts                        # Typed Tauri invoke wrappers (`toraApi`)
@@ -101,10 +105,13 @@ Tora/
 │   │   └── AiringDot.tsx                 # Airing status dot with next-episode countdown
 │   ├── features/                         # One folder per tab / surface
 │   │   ├── watchlist/
-│   │   │   ├── WatchlistView.tsx         # Status tabs, custom-list chip, search, sort, sync, view mode + the list
-│   │   │   ├── useWatchlist.ts           # Filter state, `searchIndex`, status counts, search groups, `filteredAnime`, `focusAnime`
-│   │   │   ├── VirtualWatchlist.tsx      # Viewport-windowed virtual grid/list for Grid, Compact & Table modes (row model with optional status group headers, scroll-to-anime)
-│   │   │   └── CustomListsChip.tsx       # Single "Lists ▾" chip at the end of the status ribbon (filterable popover of custom lists)
+│   │   │   ├── WatchlistView.tsx         # Sticky toolbar (status tabs, custom-list chip, search, sort + direction, sync, view mode) + the list
+│   │   │   ├── useWatchlist.ts           # Filter state, sort prefs (`tora.watchlist.prefs`), `searchIndex`, status counts, search groups, `filteredAnime`, `focusAnime`
+│   │   │   ├── sort.ts                   # `SORT_OPTIONS` (grouped keys, natural direction, unknown values last) + `watchlistComparator`
+│   │   │   ├── VirtualWatchlist.tsx      # Viewport-windowed virtual grid/list for Grid, Compact & Table modes (row model with optional status group headers, scroll-to-anime, arrow-key `navRef`, last-updated labels)
+│   │   │   ├── CustomListsChip.tsx       # Single "Lists ▾" chip at the end of the status ribbon (filterable popover of custom lists, "New list…" row, per-list delete)
+│   │   │   ├── NewCustomListModal.tsx    # Name prompt for creating an AniList custom list
+│   │   │   └── DeleteCustomListModal.tsx # Confirmation before deleting an AniList custom list
 │   │   ├── detail/AnimeDetailModal.tsx   # Slide-over drawer for editing progress, score, notes, custom folder & synonyms
 │   │   ├── palette/
 │   │   │   ├── CommandPalette.tsx        # Ctrl+K keyboard palette: Anime / Commands tabs, recents, AniList row, Right-arrow anime actions
@@ -282,7 +289,7 @@ When a filename or media player window title is parsed (`parse_filename` in `src
 - **Airing schedule** (`TrackerSyncService::fetch_airing_schedule`): public data, no token. All pages of `Page.airingSchedules(airingAt_greater, airingAt_lesser)` for one `[from, to)` range (a local Mon–Sun week computed by the frontend, ≤ 8 days) go through the shared rate limiter; media carry only the light `MEDIA_LIST_FRAGMENT` fields (adult media dropped) plus the item's `country` (`countryOfOrigin`). Opening or adding a non-list anime from the schedule first swaps the light media for `media_metadata` (`getMediaMetadata`). "No episode this week" breaks are inferred in the frontend (`detectBreaks`, from list entries' `next_airing_at`) and never stored. Each range is cached as one row in `airing_schedule_cache`; ranges that already ended are never stale, others are flagged `stale` after 6h and refreshed in the background by the frontend. Browsing **never** writes `anime_entries` or `media_metadata`; list state comes from the local list by id.
 - **Media metadata** (`TrackerSyncService::media_metadata`, used by the Now Playing hero): served from `media_metadata`. Only a media with no row is fetched (once, `fetch_media_metadata`, through the rate limiter); playback **never** refreshes it — season fetches are the only refresh path.
 - **Airing dates**: `start_date` / `end_date` (fuzzy `YYYY[-MM[-DD]]`) are part of the light `MEDIA_LIST_FRAGMENT` and compared in `merge_remote_list`, so pulls keep them current without extra requests.
-- **Custom lists** (AniList `customLists` / `hiddenFromStatusLists`): a side channel that never touches `AnimeEntry`, the search index or the matcher. Names live in `tracker_custom_lists` (user order); membership in `anime_custom_lists` (one row per entry, `ON DELETE CASCADE`, wiped by `reset_for_account_switch`). The pull reads both from the existing `MediaListCollection` query and `Database::merge_remote_custom_lists` merges them diff-only (never writes `anime_entries`, never rematches; skipped when the remote list is empty). Edits go through `TrackerSyncService::set_custom_lists` → `apply_custom_list_change`: the row is marked `dirty` and the entry `sync_pending`, so the normal push queue sends it; `SaveMediaListEntry` gets `customLists` / `hiddenFromStatusLists` **only** while the row is dirty, and `finish_push` clears `dirty` (and `sync_pending` only once no membership edit is still unsent). Dirty rows keep local membership through pulls. Creating, renaming and deleting lists stays on AniList. Frontend: `get_custom_lists` state in `useCustomListsState`, provided through `CustomListsContext`; a selected list replaces the status filter (`customListFilter`), hidden entries leave the status tabs and counts (still in All Anime and search), and the watchlist search is unchanged.
+- **Custom lists** (AniList `customLists` / `hiddenFromStatusLists`): a side channel that never touches `AnimeEntry`, the search index or the matcher. Names live in `tracker_custom_lists` (user order); membership in `anime_custom_lists` (one row per entry, `ON DELETE CASCADE`, wiped by `reset_for_account_switch`). The pull reads both from the existing `MediaListCollection` query and `Database::merge_remote_custom_lists` merges them diff-only (never writes `anime_entries`, never rematches; skipped when the remote list is empty). Edits go through `TrackerSyncService::set_custom_lists` → `apply_custom_list_change`: the row is marked `dirty` and the entry `sync_pending`, so the normal push queue sends it; `SaveMediaListEntry` gets `customLists` / `hiddenFromStatusLists` **only** while the row is dirty, and `finish_push` clears `dirty` (and `sync_pending` only once no membership edit is still unsent). Dirty rows keep local membership through pulls. Creating and deleting a list go through `TrackerSyncService::create_custom_list` / `delete_custom_list` → `TrackerPlugin::create_custom_list` / `delete_custom_list`: immediate (never queued), signed-in owner only, they re-read the viewer's names from AniList before `UpdateUser(animeListOptions.customLists)` (AniList replaces the whole array, so a cached copy would delete lists made elsewhere) and store the returned names (`Database::set_custom_list_names`, which drops memberships of removed lists, unsent edits included, without queueing a push). Deleting a list never removes its anime from the list. Renaming lists stays on AniList. Frontend: `get_custom_lists` state in `useCustomListsState`, provided through `CustomListsContext`; a selected list replaces the status filter (`customListFilter`), hidden entries leave the status tabs and counts (still in All Anime and search), and the watchlist search is unchanged.
 - **Watch history**: scrobbles log their own row. `Manual`, `Step` and `Batch` changes that raise progress log one row per newly watched episode (`player_name = "Manual"`, no file) via `Database::record_manual_progress`; a decrease logs one correction row (`progress_from` = old progress, `episode_number` = new). `Add` never logs. Anything counting watched episodes (`watch_history_totals`, `list_stats`) filters `progress_from IS NULL`. The drawer flushes a pending ± step save when it closes instead of dropping it.
 - **Stats** (`get_stats` → `Database::list_stats`, reader only): list totals, backlog, ready-to-watch and the last 366 days of watched-episode events; the frontend buckets events by local day. Drive usage comes from `get_drive_summaries`. No AniList requests.
 

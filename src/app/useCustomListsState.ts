@@ -50,10 +50,18 @@ export function useCustomListsState(animeList: AnimeEntry[]) {
     [refresh]
   );
 
+  // Not optimistic: AniList must accept the list first (errors reach the caller)
+  const create = useCallback(async (name: string) => {
+    setState(await toraApi.createCustomList(name));
+  }, []);
+  const remove = useCallback(async (name: string) => {
+    setState(await toraApi.deleteCustomList(name));
+  }, []);
+
   const api = useMemo<CustomListsApi>(
     () => ({ names: state.names, membership: (id) => members.get(id), apply }),
     [state, members, apply]
   );
 
-  return { names: state.names, members, hiddenFromStatusIds, counts, api, refresh, clear };
+  return { names: state.names, members, hiddenFromStatusIds, counts, api, refresh, clear, create, remove };
 }

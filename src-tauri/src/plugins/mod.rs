@@ -299,6 +299,32 @@ pub trait TrackerPlugin: Send + Sync {
         media_id: i64,
         list_entry_id: Option<i64>,
     ) -> BoxFuture<'a, Result<(), TrackerError>>;
+
+    /// Add a custom anime list named `name` to the viewer's lists (a name that already exists is
+    /// left as is). Returns every custom list name in the viewer's order afterwards.
+    fn create_custom_list<'a>(
+        &'a self,
+        _token: &'a str,
+        _name: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<String>, TrackerError>> {
+        let name = self.descriptor().name;
+        Box::pin(async move {
+            Err(TrackerError::Api(format!("{} doesn't support creating custom lists.", name)))
+        })
+    }
+
+    /// Delete the viewer's custom anime list named `name` (a missing one counts as deleted); its
+    /// entries stay on the list. Returns every custom list name in the viewer's order afterwards.
+    fn delete_custom_list<'a>(
+        &'a self,
+        _token: &'a str,
+        _name: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<String>, TrackerError>> {
+        let name = self.descriptor().name;
+        Box::pin(async move {
+            Err(TrackerError::Api(format!("{} doesn't support deleting custom lists.", name)))
+        })
+    }
 }
 
 /// Stub plugin implementation for additional trackers in the plugin registry.

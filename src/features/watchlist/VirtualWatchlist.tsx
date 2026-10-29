@@ -1,6 +1,7 @@
 import React, {
   useCallback,
   useEffect,
+  useImperativeHandle,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -8,13 +9,16 @@ import React, {
 } from "react";
 import { createPortal } from "react-dom";
 import {
+  ArrowDown,
+  ArrowUp,
   Clock,
   Plus,
   Minus,
   Star,
+  User,
 } from "lucide-react";
 import { AnimeEntry } from "@/lib/types";
-import { formatCountdown } from "@/lib/format";
+import { formatCountdown, formatExactTime, formatRelativeTime } from "@/lib/format";
 import { getOptimizedCoverUrl } from "@/lib/covers";
 import { AnimeQuickMenu } from "@/components/AnimeQuickMenu";
 import { LIST_STATUSES } from "@/lib/status";
@@ -26,6 +30,8 @@ import { AiringDot } from "@/components/AiringDot";
 import { useToast } from "@/contexts/toast";
 import { useAnimeActions } from "@/contexts/animeActions";
 import { useScrollViewport, visibleRange } from "@/hooks/virtual";
+import { useNow } from "@/hooks/useNow";
+import type { SortDir, WatchlistSortKey } from "./sort";
 
 /** A titled section of the list (search results grouped by status) */
 export interface WatchlistGroup {
@@ -35,6 +41,19 @@ export interface WatchlistGroup {
 }
 
 const GROUP_HEADER_HEIGHT = 40;
+
+export type NavDirection = "left" | "right" | "up" | "down";
+
+/**
+ * Keyboard navigation over the rendered cards (driven by the global shortcuts). The selected card
+ * also takes keyboard focus, so the search box is left and arrows / Enter / Esc act on the list.
+ */
+export interface WatchlistNav {
+  /** Move the selection; false when there is no card in that direction */
+  move(dir: NavDirection): boolean;
+  /** Focus the selected card (or select the first one); false when the list is empty */
+  enter(): boolean;
+}
 
 /** One virtualized row: a group header, or up to `cols` cards starting at `start` in its group */
 type ListRow =
@@ -64,7 +83,26 @@ interface VirtualWatchlistProps {
   onSetSelectedAnimeIds: React.Dispatch<React.SetStateAction<number[]>>;
   quickMenuAnimeId: number | null;
   onSetQuickMenuAnimeId: (id: number | null) => void;
+  navRef?: React.Ref<WatchlistNav>;
+  /** Height of the sticky toolbar over the scroll container; scrolled-to cards stay below it */
+  stickyOffset?: number;
+  /** Table mode: column headers sort the list */
+  sortKey?: WatchlistSortKey;
+  sortDir?: SortDir;
+  onSort?: (key: WatchlistSortKey) => void;
 }
+
+/** Table columns that sort, by header label */
+const TABLE_SORT_COLUMNS: { label: string; key: WatchlistSortKey | null; className: string }[] = [
+  { label: "Anime Title", key: "title", className: "py-2.5 pl-4 pr-3" },
+  { label: "Type", key: "format", className: "py-2.5 px-3" },
+  { label: "Progress", key: "progress", className: "py-2.5 px-3" },
+  { label: "On Disk", key: "ready", className: "py-2.5 px-3" },
+  { label: "Score", key: "score", className: "py-2.5 px-3" },
+  { label: "Season", key: "season", className: "py-2.5 px-3" },
+  { label: "Updated", key: "updated", className: "py-2.5 px-3" },
+  { label: "Quick Actions", key: null, className: "py-2.5 px-4 text-right" },
+];
 
 export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
   items,
@@ -79,6 +117,11 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
   onSetSelectedAnimeIds,
   quickMenuAnimeId,
   onSetQuickMenuAnimeId,
+  navRef,
+  stickyOffset = 0,
+  sortKey,
+  sortDir,
+  onSort,
 }) => {
   const showToast = useToast();
   const { openAnime, stepEpisode } = useAnimeActions();
@@ -86,6 +129,8 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const menuWrapperRef = useRef<HTMLDivElement | null>(null);
   const lastClickedIdRef = useRef<number | null>(null);
+  // One shared tick for every "last updated" label
+  const now = useNow(60_000);
 
   const [menuAnchor, setMenuAnchor] = useState<{ x: number; y: number } | null>(
     null
@@ -348,18 +393,115 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
     );
     if (!row) return;
     handledFocusNonceRef.current = focusRequest.nonce;
+    // Table rows start below the column headers
+    const rowsEl = containerEl.querySelector("tbody") ?? containerEl;
     const listTop =
-      containerEl.getBoundingClientRect().top -
+      rowsEl.getBoundingClientRect().top -
       scrollEl.getBoundingClientRect().top +
       scrollEl.scrollTop;
+    // Centered in the part of the viewport below the sticky toolbar
     scrollEl.scrollTop = Math.max(
       0,
-      listTop + row.top - (scrollEl.clientHeight - row.height) / 2
+      listTop + row.top - stickyOffset - (scrollEl.clientHeight - stickyOffset - row.height) / 2
     );
     onSetSelectedAnimeIds([focusRequest.id]);
     lastClickedIdRef.current = focusRequest.id;
     onFocusHandled?.();
   }, [focusRequest, rows, containerWidth]);
+
+  // Card to focus once it is rendered (it may scroll into the virtualized window first)
+  const pendingFocusIdRef = useRef<number | null>(null);
+  const focusPendingCard = () => {
+    const id = pendingFocusIdRef.current;
+    if (id === null) return;
+    const el = containerRef.current?.querySelector<HTMLElement>(`[data-anime-id="${id}"]`);
+    if (el) {
+      el.focus({ preventScroll: true });
+      pendingFocusIdRef.current = null;
+    }
+  };
+  useEffect(() => {
+    // Deselected before it rendered (Esc, a click elsewhere): never steal focus later
+    if (pendingFocusIdRef.current !== null && !selectedSet.has(pendingFocusIdRef.current)) {
+      pendingFocusIdRef.current = null;
+    }
+    focusPendingCard();
+  });
+
+  const rowIndexOf = (id: number) =>
+    rows.findIndex((r) => r.kind === "items" && rowItems(r).some((a) => a.id === id));
+  const selectionAnchor = () =>
+    lastClickedIdRef.current !== null && selectedSet.has(lastClickedIdRef.current)
+      ? lastClickedIdRef.current
+      : selectedAnimeIds[selectedAnimeIds.length - 1] ?? null;
+
+  /** Select one card, scroll it just into view (below the sticky toolbar) and focus it */
+  const selectAndFocus = (targetId: number) => {
+    onSetSelectedAnimeIds([targetId]);
+    lastClickedIdRef.current = targetId;
+    pendingFocusIdRef.current = targetId;
+
+    const containerEl = containerRef.current;
+    const scrollEl = scrollContainerRef.current;
+    const idx = rowIndexOf(targetId);
+    if (containerEl && scrollEl && idx !== -1) {
+      const row = rows[idx];
+      // Moving into the first row of a search group also reveals its header
+      const prev = rows[idx - 1];
+      const rowTop = prev?.kind === "header" ? prev.top : row.top;
+      // Table rows start below the column headers
+      const rowsEl = containerEl.querySelector("tbody") ?? containerEl;
+      const listTop =
+        rowsEl.getBoundingClientRect().top -
+        scrollEl.getBoundingClientRect().top +
+        scrollEl.scrollTop;
+      const margin = 8;
+      // The sticky toolbar covers the top of the viewport
+      const top = listTop + rowTop - margin - stickyOffset;
+      const bottom = listTop + row.top + row.height + margin;
+      if (top < scrollEl.scrollTop) scrollEl.scrollTop = Math.max(0, top);
+      else if (bottom > scrollEl.scrollTop + scrollEl.clientHeight)
+        scrollEl.scrollTop = bottom - scrollEl.clientHeight;
+    }
+    focusPendingCard();
+  };
+
+  // Arrow keys: ←/→ one card in display order, ↑/↓ one row (group headers are skipped)
+  useImperativeHandle(navRef, () => ({
+    enter() {
+      if (items.length === 0) return false;
+      const anchorId = selectionAnchor();
+      selectAndFocus(anchorId !== null && rowIndexOf(anchorId) !== -1 ? anchorId : items[0].id);
+      return true;
+    },
+    move(dir) {
+      if (items.length === 0) return false;
+      const anchorId = selectionAnchor();
+      const rowIndex = rowIndexOf;
+
+      let targetId: number | null = null;
+      if (anchorId === null || rowIndex(anchorId) === -1) {
+        targetId = items[0].id;
+      } else if (dir === "left" || dir === "right") {
+        const idx = items.findIndex((a) => a.id === anchorId);
+        targetId = items[Math.max(0, Math.min(items.length - 1, idx + (dir === "right" ? 1 : -1)))].id;
+      } else {
+        const from = rowIndex(anchorId);
+        const col = rowItems(rows[from] as ListRow & { kind: "items" }).findIndex((a) => a.id === anchorId);
+        const step = dir === "down" ? 1 : -1;
+        for (let i = from + step; i >= 0 && i < rows.length; i += step) {
+          const r = rows[i];
+          if (r.kind !== "items") continue;
+          const cards = rowItems(r);
+          targetId = cards[Math.min(col, cards.length - 1)].id;
+          break;
+        }
+      }
+      if (targetId === null) return false;
+      selectAndFocus(targetId);
+      return true;
+    },
+  }));
 
   const activeQuickMenuAnime =
     quickMenuAnimeId !== null
@@ -424,13 +566,15 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
     return (
       <div
         key={anime.id}
+        data-anime-id={anime.id}
+        tabIndex={-1}
         style={{ height: layout.cardHeight }}
         onClick={(e) => handleItemClick(e, anime)}
         onDoubleClick={(e) => handleItemDoubleClick(e, anime)}
         onMouseDown={handleMiddleMouseDown}
         onAuxClick={(e) => handleAuxClick(e, anime)}
         onContextMenu={(e) => handleContextMenu(e, anime)}
-        className={`group relative rounded-2xl overflow-visible flex flex-col cursor-pointer transition-[color,background-color,border-color,box-shadow] shadow-sm hover:shadow-xl ${isSelected
+        className={`group relative rounded-2xl overflow-visible outline-none flex flex-col cursor-pointer transition-[color,background-color,border-color,box-shadow] shadow-sm hover:shadow-xl ${isSelected
           ? "bg-accent/10 border border-accent ring-2 ring-accent/40 shadow-lg shadow-accent/10"
           : "bg-bg-secondary border border-border-subtle hover:border-accent/70"
           }`}
@@ -445,21 +589,48 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
           />
           <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/15 to-transparent" />
 
-          {anime.sync_pending && (
-            <PendingSyncDot className="absolute top-2.5 right-2.5 ring-2 ring-black/60" />
-          )}
-
-          {/* Top Left: Airing Marker & Countdown */}
-          <div className="absolute top-2.5 left-2.5 flex items-center gap-1.5 max-w-[calc(100%-28px)]">
-            <AiringDot anime={anime} onCover />
-            {cd && anime.next_airing_episode && (
-              <span className="px-2 py-0.5 rounded-md bg-black/85 text-emerald-400 text-[10px] font-mono font-semibold flex items-center gap-1 truncate">
-                <Clock className="w-2.5 h-2.5 shrink-0" />
-                <span className="truncate">
-                  Ep {anime.next_airing_episode} in {cd}
+          <div className="absolute top-2.5 left-2.5 right-2.5 flex items-start justify-between gap-1.5">
+            {/* Top Left: Airing Marker & Countdown (truncates before the scores do) */}
+            <div className="flex items-center gap-1.5 min-w-0 h-5">
+              <AiringDot anime={anime} onCover />
+              {cd && anime.next_airing_episode && (
+                <span className="px-2 py-0.5 rounded-md bg-black/85 text-emerald-400 text-[10px] font-mono font-semibold flex items-center gap-1 truncate">
+                  <Clock className="w-2.5 h-2.5 shrink-0" />
+                  <span className="truncate">
+                    Ep {anime.next_airing_episode} in {cd}
+                  </span>
                 </span>
-              </span>
-            )}
+              )}
+            </div>
+
+            {/* Top Right: pending-sync dot, AniList average above the user's own score */}
+            <div className="flex items-start gap-1.5 shrink-0">
+              {anime.sync_pending && (
+                <PendingSyncDot className="mt-1.5 ring-2 ring-black/60" />
+              )}
+              {(anime.average_score || anime.user_score > 0) && (
+                <div className="flex flex-col items-end gap-1">
+                  {anime.average_score ? (
+                    <span
+                      title="AniList average score"
+                      className="px-1.5 py-0.5 rounded-md bg-black/75 text-amber-400 text-[10px] font-mono font-bold flex items-center gap-1"
+                    >
+                      <Star className="w-2.5 h-2.5 fill-amber-400" />
+                      {anime.average_score}%
+                    </span>
+                  ) : null}
+                  {anime.user_score > 0 && (
+                    <span
+                      title="Your score"
+                      className="px-1.5 py-0.5 rounded-md bg-accent/90 text-white text-[10px] font-mono font-bold flex items-center gap-1 shadow"
+                    >
+                      <User className="w-2.5 h-2.5" />
+                      {anime.user_score}
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Bottom Overlay: Progress, On-Disk Count & Stepper (-1 / +1) */}
@@ -508,13 +679,10 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
           >
             {titleOf(anime)}
           </h3>
-          <div className="flex items-center justify-between text-[11px] text-text-muted">
+          <div className="flex items-center justify-between gap-2 text-[11px] text-text-muted">
             <span className="truncate">{anime.studios[0] || anime.format}</span>
-            {anime.user_score > 0 && (
-              <span className="flex items-center gap-0.5 text-amber-400 font-mono font-semibold shrink-0">
-                <Star className="w-3 h-3 fill-amber-400" />
-                {anime.user_score}
-              </span>
+            {anime.updated_at > 0 && (
+              <UpdatedLabel updatedAt={anime.updated_at} now={now} style="short" />
             )}
           </div>
         </div>
@@ -528,13 +696,15 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
     return (
       <div
         key={anime.id}
+        data-anime-id={anime.id}
+        tabIndex={-1}
         style={{ height: layout.cardHeight }}
         onClick={(e) => handleItemClick(e, anime)}
         onDoubleClick={(e) => handleItemDoubleClick(e, anime)}
         onMouseDown={handleMiddleMouseDown}
         onAuxClick={(e) => handleAuxClick(e, anime)}
         onContextMenu={(e) => handleContextMenu(e, anime)}
-        className={`group flex gap-4 p-3.5 rounded-2xl cursor-pointer transition-[color,background-color,border-color,box-shadow] ${isSelected
+        className={`group flex gap-4 p-3.5 rounded-2xl outline-none cursor-pointer transition-[color,background-color,border-color,box-shadow] ${isSelected
           ? "bg-accent/10 border border-accent ring-2 ring-accent/30 shadow-md"
           : "bg-bg-secondary border border-border-subtle hover:border-accent/60"
           }`}
@@ -566,7 +736,16 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
                 {anime.format}
               </span>
             </div>
-            <p className="text-[11px] text-text-muted line-clamp-2 mt-1">
+            {(anime.studios[0] || anime.updated_at > 0) && (
+              <div className="flex items-center gap-1 min-w-0 mt-0.5 text-[11px] text-text-muted">
+                {anime.studios[0] && <span className="truncate">{anime.studios[0]}</span>}
+                {anime.studios[0] && anime.updated_at > 0 && <span aria-hidden="true">·</span>}
+                {anime.updated_at > 0 && (
+                  <UpdatedLabel updatedAt={anime.updated_at} now={now} icon />
+                )}
+              </div>
+            )}
+            <p className="text-[11px] text-text-muted line-clamp-1 mt-1">
               {anime.synopsis}
             </p>
           </div>
@@ -613,13 +792,15 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
     return (
       <tr
         key={anime.id}
+        data-anime-id={anime.id}
+        tabIndex={-1}
         style={{ height: layout.rowHeight }}
         onClick={(e) => handleItemClick(e, anime)}
         onDoubleClick={(e) => handleItemDoubleClick(e, anime)}
         onMouseDown={handleMiddleMouseDown}
         onAuxClick={(e) => handleAuxClick(e, anime)}
         onContextMenu={(e) => handleContextMenu(e, anime)}
-        className={`cursor-pointer transition-colors ${isSelected
+        className={`cursor-pointer transition-colors outline-none ${isSelected
           ? "bg-accent/15 hover:bg-accent/20 shadow-[inset_3px_0_0_0_rgb(var(--accent-primary))]"
           : "hover:bg-bg-tertiary/60"
           }`}
@@ -677,6 +858,13 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
         </td>
         <td className="py-2 px-3 text-[11px] text-text-secondary">
           {anime.season || ""} {anime.season_year || ""}
+        </td>
+        <td className="py-2 px-3 text-[11px] text-text-secondary whitespace-nowrap">
+          {anime.updated_at > 0 ? (
+            <UpdatedLabel updatedAt={anime.updated_at} now={now} />
+          ) : (
+            <span className="text-text-muted">-</span>
+          )}
         </td>
         <td
           className="py-2 px-4 text-right"
@@ -746,25 +934,41 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
       <table className="w-full text-left border-collapse text-xs">
         <thead className="bg-bg-tertiary text-text-muted uppercase text-[10px]">
           <tr>
-            <th className="py-2.5 pl-4 pr-3">Anime Title</th>
-            <th className="py-2.5 px-3">Type</th>
-            <th className="py-2.5 px-3">Progress</th>
-            <th className="py-2.5 px-3">On Disk</th>
-            <th className="py-2.5 px-3">Score</th>
-            <th className="py-2.5 px-3">Season</th>
-            <th className="py-2.5 px-4 text-right">Quick Actions</th>
+            {TABLE_SORT_COLUMNS.map(({ label, key, className }) => {
+              const active = key !== null && key === sortKey;
+              const SortIcon = sortDir === "asc" ? ArrowUp : ArrowDown;
+              return (
+                <th key={label} className={className} aria-sort={active ? (sortDir === "asc" ? "ascending" : "descending") : undefined}>
+                  {key && onSort ? (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onSort(key);
+                      }}
+                      className={`inline-flex items-center gap-1 uppercase transition hover:text-text-primary ${active ? "text-accent" : ""}`}
+                      title={active ? "Click to reverse the order" : `Sort by ${label.toLowerCase()}`}
+                    >
+                      {label}
+                      {active && <SortIcon className="w-3 h-3" />}
+                    </button>
+                  ) : (
+                    label
+                  )}
+                </th>
+              );
+            })}
           </tr>
         </thead>
         <tbody className="divide-y divide-border-subtle">
           {topSpacerHeight > 0 && (
             <tr style={{ height: topSpacerHeight }} aria-hidden="true">
-              <td colSpan={7} className="p-0 border-0" />
+              <td colSpan={8} className="p-0 border-0" />
             </tr>
           )}
           {visibleRows.map((row) =>
             row.kind === "header" ? (
               <tr key={rowKey(row)} style={{ height: row.height }} className="bg-bg-primary/40">
-                <td colSpan={7} className="px-4 pb-2 align-bottom">
+                <td colSpan={8} className="px-4 pb-2 align-bottom">
                   <GroupHeading group={row.group} />
                 </td>
               </tr>
@@ -774,7 +978,7 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
           )}
           {bottomSpacerHeight > 0 && (
             <tr style={{ height: bottomSpacerHeight }} aria-hidden="true">
-              <td colSpan={7} className="p-0 border-0" />
+              <td colSpan={8} className="p-0 border-0" />
             </tr>
           )}
         </tbody>
@@ -812,3 +1016,27 @@ function PendingSyncDot({ className = "" }: { className?: string }) {
   );
 }
 
+/**
+ * "3 days ago" for the list entry's last change, exact date and time on hover.
+ */
+function UpdatedLabel({
+  updatedAt,
+  now,
+  style = "long",
+  icon = false,
+}: {
+  updatedAt: number;
+  now: number;
+  style?: "short" | "long";
+  icon?: boolean;
+}) {
+  return (
+    <span
+      title={`Last updated ${formatExactTime(updatedAt)}`}
+      className="shrink-0 inline-flex items-center gap-1 whitespace-nowrap"
+    >
+      {icon && <Clock className="w-3 h-3" />}
+      {formatRelativeTime(updatedAt, now, style)}
+    </span>
+  );
+}

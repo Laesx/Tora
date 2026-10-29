@@ -445,9 +445,13 @@ fn snippet(text: &str) -> String {
 
 /// Viewer's custom anime list names in their order, from `MediaListCollection.user.mediaListOptions`.
 fn parse_custom_list_names(collection: &Value) -> Vec<String> {
+    list_names_at(collection.pointer("/user/mediaListOptions/animeList/customLists"))
+}
+
+/// Non-empty, deduplicated names of a `MediaListTypeOptions.customLists` array.
+fn list_names_at(value: Option<&Value>) -> Vec<String> {
     let mut seen = HashSet::new();
-    collection
-        .pointer("/user/mediaListOptions/animeList/customLists")
+    value
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
@@ -495,6 +499,34 @@ fn parse_list_membership(entry_node: &Value) -> Option<RemoteListMembership> {
         hidden_from_status_lists: hidden,
     })
 }
+
+/// The full `customLists` array to send to `UpdateUser` so `name` is added after the existing lists.
+/// `None` when a list with that name (ignoring case) already exists. AniList replaces the whole array,
+/// so `existing` must be the tracker's current names, never a cached copy.
+fn with_custom_list(existing: &[String], name: &str) -> Option<Vec<String>> {
+    let name = name.trim();
+    if existing.iter().any(|n| n.trim().eq_ignore_ascii_case(name)) {
+        return None;
+    }
+    let mut lists = existing.to_vec();
+    lists.push(name.to_string());
+    Some(lists)
+}
+
+/// The full `customLists` array without `name` (exact match). `None` when there is no such list.
+fn without_custom_list(existing: &[String], name: &str) -> Option<Vec<String>> {
+    let lists: Vec<String> = existing.iter().filter(|n| *n != name).cloned().collect();
+    (lists.len() != existing.len()).then_some(lists)
+}
+
+const VIEWER_CUSTOM_LISTS_QUERY: &str =
+    "query { Viewer { mediaListOptions { animeList { customLists } } } }";
+
+const UPDATE_CUSTOM_LISTS_MUTATION: &str = "mutation ($lists: [String]) {
+    UpdateUser(animeListOptions: { customLists: $lists }) {
+        mediaListOptions { animeList { customLists } }
+    }
+}";
 
 /// Extra `SaveMediaListEntry` variable declarations and arguments for the custom-list fields that are set.
 fn save_list_extra_args(update: &TrackerEntryUpdate) -> (String, String) {
@@ -1372,6 +1404,59 @@ impl TrackerPlugin for AniListPlugin {
             }
         })
     }
+
+    fn create_custom_list<'a>(
+        &'a self,
+        token: &'a str,
+        name: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<String>, TrackerError>> {
+        Box::pin(self.edit_custom_lists(token, |existing| with_custom_list(existing, name)))
+    }
+
+    fn delete_custom_list<'a>(
+        &'a self,
+        token: &'a str,
+        name: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<String>, TrackerError>> {
+        Box::pin(self.edit_custom_lists(token, |existing| without_custom_list(existing, name)))
+    }
+}
+
+impl AniListPlugin {
+    /// Read the viewer's current custom list names, apply `edit` and send the whole new array
+    /// (`edit` returns `None` when nothing changes). Fresh names, never a cached copy: AniList
+    /// replaces the array, so lists made elsewhere since the last pull must survive.
+    async fn edit_custom_lists(
+        &self,
+        token: &str,
+        edit: impl FnOnce(&[String]) -> Option<Vec<String>>,
+    ) -> Result<Vec<String>, TrackerError> {
+        let token = token.trim();
+        if token.is_empty() {
+            return Err(TrackerError::Unauthorized(
+                "AniList OAuth token is required to edit custom lists.".into(),
+            ));
+        }
+        let viewer = self
+            .graphql_request(VIEWER_CUSTOM_LISTS_QUERY, json!({}), Some(token))
+            .await?;
+        let existing =
+            list_names_at(viewer.pointer("/Viewer/mediaListOptions/animeList/customLists"));
+        let Some(lists) = edit(&existing) else {
+            return Ok(existing);
+        };
+        let data = self
+            .graphql_request(
+                UPDATE_CUSTOM_LISTS_MUTATION,
+                json!({ "lists": lists }),
+                Some(token),
+            )
+            .await?;
+        // An empty array back is ambiguous (deleted the last list / field missing): trust what was sent
+        let saved =
+            list_names_at(data.pointer("/UpdateUser/mediaListOptions/animeList/customLists"));
+        Ok(if saved.is_empty() { lists } else { saved })
+    }
 }
 
 #[cfg(test)]
@@ -1413,6 +1498,27 @@ mod tests {
             None
         );
         assert_eq!(parse_list_membership(&json!({ "customLists": null })), None);
+    }
+
+    #[test]
+    fn new_custom_list_is_appended_once() {
+        let existing = vec!["Favs".to_string(), "Rewatch".to_string()];
+        assert_eq!(
+            with_custom_list(&existing, "  Isekai "),
+            Some(vec!["Favs".into(), "Rewatch".into(), "Isekai".into()])
+        );
+        assert_eq!(with_custom_list(&existing, "favs"), None);
+        assert_eq!(with_custom_list(&[], "First"), Some(vec!["First".into()]));
+        let viewer = json!({ "Viewer": { "mediaListOptions": { "animeList": { "customLists": ["A", "", "A", "B"] } } } });
+        assert_eq!(
+            list_names_at(viewer.pointer("/Viewer/mediaListOptions/animeList/customLists")),
+            vec!["A", "B"]
+        );
+        assert!(UPDATE_CUSTOM_LISTS_MUTATION.contains("customLists: $lists"));
+
+        assert_eq!(without_custom_list(&existing, "Favs"), Some(vec!["Rewatch".into()]));
+        assert_eq!(without_custom_list(&existing, "Nope"), None);
+        assert_eq!(without_custom_list(&["Only".to_string()], "Only"), Some(vec![]));
     }
 
     #[test]

@@ -3,9 +3,17 @@ import { AnimeEntry, CustomListMember } from "@/lib/types";
 import { buildAnimeSearchIndex, searchAnime } from "@/lib/fuzzy";
 import { SEARCH_GROUP_ORDER, statusLabel, WATCHLIST_TABS } from "@/lib/status";
 import type { StepSnapshot } from "@/app/useEpisodeStepper";
+import { usePrefs } from "@/hooks/usePrefs";
 import type { WatchlistGroup } from "./VirtualWatchlist";
+import { defaultSortDir, isSortKey, SortDir, watchlistComparator, WatchlistSortKey } from "./sort";
 
-export type WatchlistSort = "updated" | "title" | "score" | "progress";
+interface WatchlistPrefs {
+  sortKey: WatchlistSortKey;
+  sortDir: SortDir;
+}
+
+const PREFS_KEY = "tora.watchlist.prefs";
+const DEFAULT_PREFS: WatchlistPrefs = { sortKey: "updated", sortDir: "desc" };
 
 interface WatchlistInputs {
   animeList: AnimeEntry[];
@@ -30,7 +38,10 @@ export function useWatchlist({
   // Selected AniList custom list; replaces the status filter while set
   const [customListFilter, setCustomListFilter] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
-  const [sortBy, setSortBy] = useState<WatchlistSort>("updated");
+  // Sort is a per-device view pref, like the Seasons sort
+  const [prefs, updatePrefs] = usePrefs<WatchlistPrefs>(PREFS_KEY, DEFAULT_PREFS, (p) =>
+    isSortKey(p.sortKey) && (p.sortDir === "asc" || p.sortDir === "desc") ? p : DEFAULT_PREFS
+  );
   // Scroll-to-and-select request (e.g. an anime picked in the command palette)
   const [focusRequest, setFocusRequest] = useState<{ id: number; nonce: number } | null>(null);
 
@@ -57,20 +68,23 @@ export function useWatchlist({
   const deferredSearchQuery = useDeferredValue(searchQuery);
   const isSearching = deferredSearchQuery.trim().length > 0;
 
-  const compareBySort = useMemo(() => {
-    return (a: AnimeEntry, b: AnimeEntry) => {
-      if (sortBy === "title") return titleOf(a).localeCompare(titleOf(b));
-      if (sortBy === "score") return b.user_score - a.user_score;
-      if (sortBy === "progress") {
-        const progA = stepSnapshots[a.id]?.initialProgress ?? a.user_progress;
-        const progB = stepSnapshots[b.id]?.initialProgress ?? b.user_progress;
-        return progB - progA;
-      }
-      const updA = stepSnapshots[a.id]?.initialUpdatedAt ?? a.updated_at;
-      const updB = stepSnapshots[b.id]?.initialUpdatedAt ?? b.updated_at;
-      return updB - updA;
-    };
-  }, [sortBy, stepSnapshots, titleOf]);
+  // A card with a pending +1 / -1 keeps its place: progress and updated time come from its snapshot
+  const compareBySort = useMemo(
+    () =>
+      watchlistComparator(prefs.sortKey, prefs.sortDir, (a) => ({
+        progress: stepSnapshots[a.id]?.initialProgress ?? a.user_progress,
+        updatedAt: stepSnapshots[a.id]?.initialUpdatedAt ?? a.updated_at,
+        title: titleOf(a),
+      })),
+    [prefs.sortKey, prefs.sortDir, stepSnapshots, titleOf]
+  );
+
+  /** Pick a sort; a new key starts in its natural direction, the same key flips direction */
+  const setSort = (key: WatchlistSortKey, dir?: SortDir) =>
+    updatePrefs({
+      sortKey: key,
+      sortDir: dir ?? (key === prefs.sortKey ? (prefs.sortDir === "asc" ? "desc" : "asc") : defaultSortDir(key)),
+    });
 
   // With a search: matches from every list, grouped by status (stepping keeps a card in its
   // original group), best match first and the sort dropdown as the tie-break
@@ -161,8 +175,9 @@ export function useWatchlist({
     setSearchQuery,
     deferredSearchQuery,
     isSearching,
-    sortBy,
-    setSortBy,
+    sortKey: prefs.sortKey,
+    sortDir: prefs.sortDir,
+    setSort,
     focusRequest,
     clearFocusRequest: () => setFocusRequest(null),
     statusCounts,
