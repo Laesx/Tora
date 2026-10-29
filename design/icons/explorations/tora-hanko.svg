@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Hanko: a cinnabar seal stamp of 虎 on washi paper -->
+  <defs>
+    <filter id="washi" x="0" y="0" width="100%" height="100%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.02 0.6" numOctaves="3" seed="7"/>
+      <feColorMatrix values="0 0 0 0 0.45  0 0 0 0 0.35  0 0 0 0 0.2  0 0 0 0.14 0"/>
+      <feComposite in2="SourceGraphic" operator="in"/>
+    </filter>
+    <filter id="ink" x="-5%" y="-5%" width="110%" height="110%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.045" numOctaves="3" seed="11" result="warp"/>
+      <feDisplacementMap in="SourceGraphic" in2="warp" scale="7" xChannelSelector="R" yChannelSelector="G" result="rough"/>
+      <feTurbulence type="fractalNoise" baseFrequency="0.7" numOctaves="1" seed="4" result="speck"/>
+      <feColorMatrix in="speck" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 16 -11.2" result="holes"/>
+      <feComposite in="rough" in2="holes" operator="out"/>
+    </filter>
+    <mask id="cut">
+      <rect width="512" height="512" fill="#fff"/>
+      <rect x="126" y="126" width="260" height="260" rx="10" fill="none" stroke="#000" stroke-width="7"/>
+      <g transform="translate(145.6 141) scale(2.3)" fill="none" stroke="#000" stroke-width="9" stroke-linecap="square" stroke-linejoin="miter">
+        <path d="M48 6V22M48 14H68M20 26H80L76 33M22 26V50Q22 76 8 94M34 40L72 37M46 30V48Q46 52 52 52H76L78 47M44 60Q44 82 28 94M56 60H68V84Q68 90 74 90H88V82"/>
+      </g>
+    </mask>
+  </defs>
+  <rect x="16" y="16" width="480" height="480" rx="108" fill="#f4ecdb"/>
+  <rect x="16" y="16" width="480" height="480" rx="108" fill="#fff" filter="url(#washi)"/>
+  <g transform="rotate(-4 256 256)" filter="url(#ink)">
+    <rect x="104" y="104" width="304" height="304" rx="20" fill="#c3272b" mask="url(#cut)"/>
+  </g>
+</svg>

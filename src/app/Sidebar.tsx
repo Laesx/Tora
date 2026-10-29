@@ -1,6 +1,7 @@
 import React from "react";
 import { ExternalLink, LogIn, LogOut, Search, Settings, User } from "lucide-react";
 import { AppSettings } from "@/lib/types";
+import toraMark from "@/assets/tora-mark.svg";
 import { NAV_ITEMS, NavTab } from "./nav";
 
 interface SidebarProps {
@@ -41,9 +42,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       {/* Brand */}
       <div className="flex items-center justify-between px-1">
         <div className="flex items-center gap-2.5">
-          <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center text-white font-black text-lg shadow-md">
-            虎
-          </div>
+          <img src={toraMark} alt="" className="w-9 h-9 shrink-0" draggable={false} />
           <div>
             <div className="font-extrabold text-sm tracking-tight text-text-primary flex items-center gap-1.5">
               TORA

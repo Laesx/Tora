@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Mark (transparent), bookmark: a list ribbon with tiger stripes closing in from both sides -->
+  <defs>
+    <linearGradient id="fur" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fbbf24"/>
+      <stop offset="1" stop-color="#ea580c"/>
+    </linearGradient>
+    <mask id="stripes" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
+      <rect width="512" height="512" fill="#fff"/>
+      <g id="side" fill="#000">
+        <path d="M100 136C148 136 178 142 200 154C176 158 148 162 100 174Z"/>
+        <path d="M100 226C154 224 190 230 216 244C186 248 152 252 100 266Z"/>
+        <path d="M100 318C146 316 176 322 196 334C172 338 146 342 100 354Z"/>
+      </g>
+      <use href="#side" transform="matrix(-1 0 0 1 512 0)"/>
+    </mask>
+  </defs>
+  <path d="M152 76H360Q380 76 380 96V432L256 352L132 432V96Q132 76 152 76Z" fill="url(#fur)" stroke="url(#fur)" stroke-width="28" stroke-linejoin="round" mask="url(#stripes)"/>
+</svg>

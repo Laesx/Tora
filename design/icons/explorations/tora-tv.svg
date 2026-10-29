@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Mark (transparent), TV: a retro set with tiger ears, the screen knocked out and cheek stripes left inside -->
+  <defs>
+    <linearGradient id="fur" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fbbf24"/>
+      <stop offset="1" stop-color="#ea580c"/>
+    </linearGradient>
+    <mask id="screen" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
+      <rect width="512" height="512" fill="#fff"/>
+      <rect x="128" y="212" width="256" height="166" rx="38" fill="#000"/>
+      <g id="cheek" fill="#fff">
+        <path d="M118 248C160 248 192 254 214 268C188 270 160 274 118 282Z"/>
+        <path d="M118 306C152 306 178 310 198 322C176 326 152 330 118 338Z"/>
+      </g>
+      <use href="#cheek" transform="matrix(-1 0 0 1 512 0)"/>
+    </mask>
+  </defs>
+  <g fill="url(#fur)" mask="url(#screen)">
+    <rect x="80" y="164" width="352" height="262" rx="72"/>
+    <path d="M112 200C100 150 108 102 134 90C160 80 200 116 226 170Z"/>
+    <path d="M400 200C412 150 404 102 378 90C352 80 312 116 286 170Z"/>
+  </g>
+</svg>

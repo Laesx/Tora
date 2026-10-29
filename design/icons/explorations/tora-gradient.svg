@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Modern gradient: the sidebar's 虎 badge as an app tile (amber → magenta → violet) -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fbbf24"/>
+      <stop offset="0.4" stop-color="#f97316"/>
+      <stop offset="0.75" stop-color="#db2777"/>
+      <stop offset="1" stop-color="#7c3aed"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.25" cy="0.2" r="0.6">
+      <stop offset="0" stop-color="#fff" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#4c0519" flood-opacity="0.45"/>
+    </filter>
+  </defs>
+  <rect x="16" y="16" width="480" height="480" rx="108" fill="url(#bg)"/>
+  <rect x="16" y="16" width="480" height="480" rx="108" fill="url(#glow)"/>
+  <g transform="translate(121.6 116) scale(2.8)" fill="none" stroke="#fff" stroke-width="8.5" stroke-linecap="round" stroke-linejoin="round" filter="url(#shadow)">
+    <path d="M48 6V22M48 14H68M20 26H80L76 33M22 26V50Q22 76 8 94M34 40L72 37M46 30V48Q46 52 52 52H76L78 47M44 60Q44 82 28 94M56 60H68V84Q68 90 74 90H88V82"/>
+  </g>
+</svg>

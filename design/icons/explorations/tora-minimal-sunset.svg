@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Minimalist, sunset: white striped play on the amber → magenta → violet brand gradient -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fbbf24"/>
+      <stop offset="0.4" stop-color="#f97316"/>
+      <stop offset="0.75" stop-color="#db2777"/>
+      <stop offset="1" stop-color="#7c3aed"/>
+    </linearGradient>
+    <mask id="stripes" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
+      <rect width="512" height="512" fill="#fff"/>
+      <g fill="#000">
+        <path d="M150 192C204 190 240 198 268 216C236 216 200 222 150 236Z"/>
+        <path d="M150 244C218 240 270 246 310 258C268 266 218 270 150 284Z"/>
+        <path d="M150 300C198 296 230 300 256 310C228 318 196 326 150 340Z"/>
+      </g>
+    </mask>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#4c0519" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+  <rect x="16" y="16" width="480" height="480" rx="108" fill="url(#bg)"/>
+  <g filter="url(#shadow)">
+    <g mask="url(#stripes)">
+      <polygon points="190,150 190,362 374,256" fill="#fff" stroke="#fff" stroke-width="40" stroke-linejoin="round"/>
+    </g>
+  </g>
+</svg>

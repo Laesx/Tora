@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Flat illustration: tiger face with the 王 forehead mark, on a jungle-green tile -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#14524d"/>
+      <stop offset="1" stop-color="#0a2e2b"/>
+    </linearGradient>
+    <g id="ear">
+      <path d="M132 206C112 150 116 102 142 94C170 88 200 114 222 136Z" fill="#f97316"/>
+      <path d="M146 182C136 148 140 120 154 116C170 116 186 130 196 142Z" fill="#ffe8cc"/>
+    </g>
+    <g id="half">
+      <ellipse cx="196" cy="214" rx="22" ry="11" transform="rotate(-12 196 214)" fill="#fff7ed"/>
+      <path d="M121 186C150 188 172 196 186 208C160 206 140 208 117 214Z" fill="#1c1917"/>
+      <path d="M108 230C134 232 150 238 160 248C142 248 126 250 104 256Z" fill="#1c1917"/>
+      <path d="M100 274C130 272 152 278 166 290C146 292 126 294 96 300Z" fill="#1c1917"/>
+      <path d="M166 252Q196 226 230 242Q208 268 166 252Z" fill="#facc15" stroke="#1c1917" stroke-width="6" stroke-linejoin="round"/>
+      <ellipse cx="203" cy="248" rx="5" ry="11" fill="#1c1917"/>
+      <circle cx="228" cy="326" r="3.5" fill="#1c1917" opacity="0.7"/>
+      <circle cx="216" cy="316" r="3.5" fill="#1c1917" opacity="0.7"/>
+      <circle cx="218" cy="338" r="3.5" fill="#1c1917" opacity="0.7"/>
+    </g>
+  </defs>
+  <rect x="16" y="16" width="480" height="480" rx="108" fill="url(#bg)"/>
+
+  <use href="#ear"/>
+  <use href="#ear" transform="matrix(-1 0 0 1 512 0)"/>
+
+  <!-- Head with cheek ruffs -->
+  <path d="M256 120C320 120 370 140 392 180C410 210 416 250 420 280L448 300L414 318L436 348L396 356C370 400 316 420 256 420C196 420 142 400 116 356L76 348L98 318L64 300L92 280C96 250 102 210 120 180C142 140 192 120 256 120Z" fill="#f97316"/>
+  <!-- White cheeks and chin -->
+  <path d="M116 300C150 296 190 304 206 330C214 345 236 350 256 352C276 350 298 345 306 330C322 304 362 296 396 300L414 318L436 348L396 356C370 400 316 420 256 420C196 420 142 400 116 356L76 348L98 318Z" fill="#fff7ed"/>
+  <!-- Muzzle -->
+  <path d="M256 268C226 268 196 290 186 320C176 352 200 380 232 378C244 377 252 372 256 366C260 372 268 377 280 378C312 380 336 352 326 320C316 290 286 268 256 268Z" fill="#fff7ed"/>
+
+  <use href="#half"/>
+  <use href="#half" transform="matrix(-1 0 0 1 512 0)"/>
+
+  <!-- 王 forehead mark -->
+  <g fill="#1c1917">
+    <rect x="228" y="148" width="56" height="11" rx="5.5"/>
+    <rect x="234" y="171" width="44" height="10" rx="5"/>
+    <rect x="222" y="194" width="68" height="11" rx="5.5"/>
+    <rect x="251" y="148" width="10" height="57" rx="5"/>
+  </g>
+  <!-- Nose and mouth -->
+  <path d="M230 294H282Q288 296 283 303L262 325Q256 331 250 325L229 303Q224 296 230 294Z" fill="#3b1d1a"/>
+  <path d="M256 328V342M256 342Q242 358 226 350M256 342Q270 358 286 350" fill="none" stroke="#3b1d1a" stroke-width="6" stroke-linecap="round"/>
+</svg>

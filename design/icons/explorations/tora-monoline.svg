@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Monoline: a tiger's eye inside an episode progress ring -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1f1f26"/>
+      <stop offset="1" stop-color="#111115"/>
+    </linearGradient>
+  </defs>
+  <rect x="16" y="16" width="480" height="480" rx="108" fill="url(#bg)"/>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="22">
+    <circle cx="256" cy="256" r="166" stroke="#34343c"/>
+    <circle cx="256" cy="256" r="166" stroke="#f59e0b" stroke-dasharray="782 1043" transform="rotate(-90 256 256)"/>
+    <path d="M146 256Q256 146 366 256Q256 366 146 256Z" stroke="#fafafa" stroke-width="20"/>
+  </g>
+  <path d="M256 212Q282 256 256 300Q230 256 256 212Z" fill="#f59e0b"/>
+</svg>

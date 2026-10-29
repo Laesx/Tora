@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Mark (transparent), eye: a tiger's eye with a slit pupil and four stripes reaching for it -->
+  <defs>
+    <linearGradient id="fur" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fbbf24"/>
+      <stop offset="1" stop-color="#ea580c"/>
+    </linearGradient>
+    <mask id="cuts" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
+      <rect width="512" height="512" fill="#fff"/>
+      <g fill="#000">
+        <path d="M256 168Q296 256 256 344Q216 256 256 168Z"/>
+        <path id="s" d="M156 150L180 146Q184 186 192 218Q172 192 156 150Z"/>
+        <use href="#s" transform="matrix(-1 0 0 1 512 0)"/>
+        <use href="#s" transform="matrix(1 0 0 -1 0 512)"/>
+        <use href="#s" transform="matrix(-1 0 0 -1 512 512)"/>
+      </g>
+    </mask>
+  </defs>
+  <path d="M40 256Q256 32 472 256Q256 480 40 256Z" fill="url(#fur)" stroke="url(#fur)" stroke-width="20" stroke-linejoin="round" mask="url(#cuts)"/>
+</svg>

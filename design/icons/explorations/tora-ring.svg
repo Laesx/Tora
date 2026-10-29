@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Mark (transparent), tail ring: a striped tiger tail curled into an episode progress ring -->
+  <defs>
+    <linearGradient id="fur" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fbbf24"/>
+      <stop offset="1" stop-color="#ea580c"/>
+    </linearGradient>
+    <mask id="stripes" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
+      <rect width="512" height="512" fill="#fff"/>
+      <g fill="#000">
+        <path id="s" d="M244 36L270 38Q264 72 256 100Q250 72 244 36Z"/>
+        <use href="#s" transform="rotate(42 256 256)"/>
+        <use href="#s" transform="rotate(92 256 256)"/>
+        <use href="#s" transform="rotate(142 256 256)"/>
+        <use href="#s" transform="rotate(192 256 256)"/>
+        <use href="#s" transform="rotate(240 256 256)"/>
+      </g>
+    </mask>
+  </defs>
+  <g mask="url(#stripes)">
+    <path d="M256 86A170 170 0 1 1 96.3 197.9" fill="none" stroke="url(#fur)" stroke-width="76" stroke-linecap="round"/>
+  </g>
+</svg>

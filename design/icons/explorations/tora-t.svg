@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Mark (transparent), monogram: a heavy T for Tora with tiger stripes cut in -->
+  <defs>
+    <linearGradient id="fur" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fbbf24"/>
+      <stop offset="1" stop-color="#ea580c"/>
+    </linearGradient>
+    <mask id="stripes" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
+      <rect width="512" height="512" fill="#fff"/>
+      <g fill="#000">
+        <path d="M134 74L166 74Q162 126 152 168Q142 126 134 74Z"/>
+        <path d="M378 74L346 74Q350 126 360 168Q370 126 378 74Z"/>
+        <path d="M180 246C222 246 250 252 272 266C246 268 222 272 180 284Z"/>
+        <path d="M332 330C290 330 262 336 240 350C266 352 290 356 332 368Z"/>
+      </g>
+    </mask>
+  </defs>
+  <g fill="url(#fur)" mask="url(#stripes)">
+    <rect x="84" y="88" width="344" height="112" rx="40"/>
+    <rect x="196" y="140" width="120" height="292" rx="40"/>
+  </g>
+</svg>

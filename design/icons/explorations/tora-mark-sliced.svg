@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Mark (transparent), sliced: the play is built from five tiger-stripe bands -->
+  <defs>
+    <linearGradient id="fur" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fbbf24"/>
+      <stop offset="1" stop-color="#ea580c"/>
+    </linearGradient>
+    <mask id="gaps" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
+      <rect width="512" height="512" fill="#fff"/>
+      <g fill="#000">
+        <path d="M140 188C240 190 330 196 420 201V205C330 202 240 202 140 206Z"/>
+        <path d="M140 230C240 233 330 238 420 243V247C330 245 240 246 140 250Z"/>
+        <path d="M140 272C240 271 330 268 420 265V269C330 274 240 280 140 290Z"/>
+        <path d="M140 316C240 314 330 310 420 306V310C330 316 240 322 140 332Z"/>
+      </g>
+    </mask>
+  </defs>
+  <g transform="translate(138 256) scale(1.547) translate(-190 -256)">
+    <g mask="url(#gaps)">
+      <polygon points="190,150 190,362 374,256" fill="url(#fur)" stroke="url(#fur)" stroke-width="40" stroke-linejoin="round"/>
+    </g>
+  </g>
+</svg>

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Mark (transparent), outline: monoline play with the three stripes growing in from its edge -->
+  <g transform="translate(138 256) scale(1.547) translate(-190 -256)" fill="#f97316">
+    <polygon points="190,150 190,362 374,256" fill="none" stroke="#f97316" stroke-width="22" stroke-linejoin="round"/>
+    <path d="M186 194C218 194 244 200 266 216C240 216 214 222 186 232Z"/>
+    <path d="M186 246C226 243 270 247 306 258C268 265 226 268 186 282Z"/>
+    <path d="M186 302C212 300 234 302 256 310C232 316 210 322 186 334Z"/>
+  </g>
+</svg>

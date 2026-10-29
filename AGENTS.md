@@ -134,6 +134,8 @@ Tora/
 │   │       ├── FilterEditor.tsx          # One query as condition rows or text (same string)
 │   │       ├── AnimePicker.tsx           # Fuzzy list-entry picker (fansub overrides, filter scope)
 │   │       └── TorrentSettings.tsx       # Settings → Torrents: app (detected / chosen), category, download folder, refresh, auto-download
+│   ├── assets/
+│   │   └── tora-mark.svg                 # Brand mark (sidebar); same art as the app icon (`design/icons/tora-mark.svg` → `src-tauri/icons`)
 │   └── styles/
 │       └── index.css                     # Tailwind CSS v4 stylesheets, custom theme variables & scrollbars
 └── src-tauri/                            # Tauri v2 Rust Backend & Native C++ Bindings

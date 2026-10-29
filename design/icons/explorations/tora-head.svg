@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Mark (transparent), head: tiger head silhouette, stripes, eyes and nose cut through -->
+  <defs>
+    <linearGradient id="fur" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fbbf24"/>
+      <stop offset="1" stop-color="#ea580c"/>
+    </linearGradient>
+    <mask id="cuts" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
+      <rect width="512" height="512" fill="#fff"/>
+      <g id="half" fill="#000">
+        <path d="M196 146L220 140Q218 176 226 202Q206 182 196 146Z"/>
+        <path d="M40 228C96 228 140 238 170 256C136 258 96 262 46 274Z"/>
+        <path d="M40 330C88 328 124 334 152 348C122 354 88 360 46 372Z"/>
+        <path d="M172 300Q202 274 236 294Q206 316 172 300Z"/>
+      </g>
+      <use href="#half" transform="matrix(-1 0 0 1 512 0)"/>
+      <path d="M244 124H268Q262 178 256 218Q250 178 244 124Z" fill="#000"/>
+      <path d="M234 362H278Q284 364 279 370L262 388Q256 394 250 388L233 370Q228 364 234 362Z" fill="#000"/>
+    </mask>
+  </defs>
+  <g fill="url(#fur)" mask="url(#cuts)">
+    <path d="M256 140C350 140 424 186 434 268L468 300L430 316C410 392 340 440 256 444C172 440 102 392 82 316L44 300L78 268C88 186 162 140 256 140Z
+             M110 214C96 160 100 104 124 88C146 76 196 110 226 146Z
+             M286 146C316 110 366 76 388 88C412 104 416 160 402 214Z"/>
+  </g>
+</svg>
