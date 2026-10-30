@@ -1,6 +1,6 @@
 [package]
 name = "tora"
-version = "0.2.0"
+version = "0.2.1"
 description = "Tora - Fast, modern anime library manager & tracker (Taiga clone)"
 authors = ["Tora Contributors"]
 edition = "2021"
