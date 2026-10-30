@@ -162,6 +162,7 @@ Tora/
     │   ├── anisthesia/                   # Upstream `erengy/anisthesia` C++20 source + `data/players.anisthesia`
     │   └── anime-relations/              # Upstream `erengy/anime-relations` (`anime-relations.txt`)
     └── src/
+        ├── data_migration.rs             # Moves data from the old `app.tora.anime` identifier's folders (runs in `run()` before the builder)
         ├── lib.rs                        # Tauri state (`AppState`), async commands, background monitor & media poll loop, WebView2 accelerator keys off (release)
         ├── discord.rs                    # Discord Rich Presence worker thread ("Watching <anime>", cover, episode, AniList + GitHub buttons)
         ├── main.rs                       # Tauri binary entrypoint
@@ -198,6 +199,10 @@ Tora/
 - **All** `@tauri::command` functions in `src-tauri/src/lib.rs` that touch SQLite, filesystem I/O, network requests, or Win32 window enumeration **must** be `async fn` and offload synchronous work via `tokio::task::spawn_blocking`.
 - On Windows, Tauri runs the Win32 message pump on the main thread; synchronous SQLite locks or Win32 `EnumWindows` / UI Automation calls on the main thread will freeze the UI.
 - In React (`src/app/useMediaPoll.ts`), background polling (`pollMediaRecognition`) must use an `inFlight` guard so asynchronous poll calls never stack up concurrently.
+
+### 1a. App Identifier & Data Folders
+- The identifier is `Tora` (`tauri.conf.json`); Tauri derives `%APPDATA%\Tora` (SQLite library, backups, cached relations, .torrent files, logs) and `%LOCALAPPDATA%\Tora` (WebView2 profile) from it. `%LOCALAPPDATA%\Tora` is also the NSIS per-user install folder, so the WebView2 profile sits next to `tora.exe`.
+- Before v0.3.0 the identifier was `app.tora.anime`. `data_migration::migrate_legacy_data_dirs` moves those folders' contents on startup, in `run()` before the builder (Tauri creates the main window, and its WebView2 profile, before `setup`). It never overwrites, and the database moves with its `-wal` / `-shm` files only when the new folder has none. Changing the identifier again needs the same kind of migration.
 
 ### 1b. Settings Must Never Silently Reset
 - `Database::get_settings` (`db/settings.rs`) lays the stored JSON over `AppSettings::default()` field by field: a missing or invalid field keeps only its own default. Unreadable JSON leaves the row untouched and returns defaults with `settings_recovered: true` (the frontend offers a restore). Still give every new `AppSettings` field a `#[serde(default…)]`.
@@ -247,7 +252,7 @@ When a filename or media player window title is parsed (`parse_filename` in `src
   - `update_wait_for_close` (auto only): when the countdown ends the update is held (`waiting_for_close`) and runs in `end_session` once the player closes or plays another file, emitting `playback-scrobbled` (the session is already gone).
   - The countdown is a pausable deadline: `update_due_at` (unix second the update fires) is set when it starts and only moves on pause / resume; while paused, `update_remaining_seconds` holds what's left. The UI (`components/UpdateCountdown.tsx`) ticks `update_due_at - now` from its own clock (`useNow`); the poll never drives the display.
   - `update_require_focus` (auto only): the deadline pauses on a poll where the player's process doesn't own the foreground window (`foreground_process_id`) and resumes at `now + remaining` once it does.
-  - A manual offer whose player closed stays as `player_closed` until updated, dismissed or replaced by a new file.
+  - Closing the player (or playing another file) ends the session in every mode; a manual offer that wasn't used is dropped with it.
   - Default delay: `recognition_delay_seconds` = 120 (saved settings keep their value).
 - **Discord Rich Presence** (`discord.rs`, `discord_presence_enabled`, default on): `poll_media_recognition` sends the matched, open session (or None) to `DiscordPresence` every poll; its worker thread owns the IPC pipe, skips unchanged presences, reconnects after 15 s. The anime's display data is cached per (id, title language). Never call Discord IPC from a command or the async runtime.
 - **Auto-Sync Progression**:
@@ -317,7 +322,7 @@ When a filename or media player window title is parsed (`parse_filename` in `src
 - **App**: `tauri-plugin-updater` reads `https://github.com/Laesx/Tora/releases/latest/download/latest.json` (drafts are invisible, so publishing the draft release ships the update). Bundles are signed: the public key is `plugins.updater.pubkey` in `tauri.conf.json`; the release workflow signs with the `TAURI_SIGNING_PRIVATE_KEY` / `_PASSWORD` secrets, and local `pnpm tauri build` needs the same env vars (`createUpdaterArtifacts` is on). The check, prompt, download and relaunch run in the frontend; startup checks are silent unless an update is found.
 - **Sidebar version**: a click checks for updates (app + relations, with "up to date" / error toasts). A dot shows while a found update was postponed or the running version's changelog is unseen (`tora.update.seenChangelog` in localStorage, initialized on first run); then a click opens the changelog, which offers the update when one is available.
 - **Changelog**: `get_changelog` reads the GitHub releases API with `Accept: application/vnd.github.html+json` and returns GitHub's rendered `body_html` (drafts / prereleases dropped). `ReleaseNotesHtml` routes link clicks to `open_external_url`; the webview never navigates.
-- **Anime relations**: the embedded `anime-relations.txt` is the fallback. `relations_db()` returns an `Arc` of the active database (swap with `install_relations`); never hold it across long work. A downloaded copy (`app_datanime-relations.txt`) is loaded in `setup` before the library monitor starts when its `last_modified` is newer than the embedded one. `update_relations` installs a download only if it has rules and a strictly newer `last_modified`, saves it atomically and emits `relations-updated`. New rules apply to later parses; nothing is rematched.
+- **Anime relations**: the embedded `anime-relations.txt` is the fallback. `relations_db()` returns an `Arc` of the active database (swap with `install_relations`); never hold it across long work. A downloaded copy (`app_data\anime-relations.txt`) is loaded in `setup` before the library monitor starts when its `last_modified` is newer than the embedded one. `update_relations` installs a download only if it has rules and a strictly newer `last_modified`, saves it atomically and emits `relations-updated`. New rules apply to later parses; nothing is rematched.
 - **Startup toggle**: `AppSettings.check_updates_on_startup` (default on) gates both startup checks; manual checks always work.
 
 ### 9. Torrents (`src-tauri/src/torrents/`)

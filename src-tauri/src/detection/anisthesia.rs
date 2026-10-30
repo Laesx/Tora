@@ -49,9 +49,6 @@ pub struct DetectedMediaSession {
     /// the player closes or switches to another file.
     #[serde(default)]
     pub waiting_for_close: bool,
-    /// The player closed while an update was still offered (manual mode); kept until updated or dismissed.
-    #[serde(default)]
-    pub player_closed: bool,
 }
 
 /// How a matched playback session turns into a list update (`AppSettings` update fields).
@@ -73,7 +70,6 @@ impl DetectedMediaSession {
         self.update_remaining_seconds = None;
         self.awaiting_confirmation = false;
         self.waiting_for_close = false;
-        self.player_closed = false;
     }
 
     /// The detected episode is at or below the list progress (rewatch): never counts down or updates.
@@ -91,7 +87,6 @@ impl DetectedMediaSession {
     /// required) pauses it into `update_remaining_seconds`, and regaining focus moves the deadline to
     /// `now + remaining`. It only changes on those transitions, so the UI can tick from its own clock.
     pub fn advance_update(&mut self, policy: &UpdatePolicy, player_focused: bool, now: i64) -> bool {
-        self.player_closed = false;
         if self.auto_synced || self.is_already_seen() || policy.manual {
             self.update_due_at = None;
             self.update_remaining_seconds = None;
@@ -541,7 +536,6 @@ mod tests {
             update_remaining_seconds: None,
             awaiting_confirmation: false,
             waiting_for_close: false,
-            player_closed: false,
         }
     }
 

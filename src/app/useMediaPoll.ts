@@ -48,7 +48,6 @@ export function useMediaPoll(handlers: {
           prev.auto_synced === session.auto_synced &&
           prev.awaiting_confirmation === session.awaiting_confirmation &&
           prev.waiting_for_close === session.waiting_for_close &&
-          prev.player_closed === session.player_closed &&
           prev.update_due_at === session.update_due_at &&
           prev.update_remaining_seconds === session.update_remaining_seconds;
         if (!unchanged) setSession(session);

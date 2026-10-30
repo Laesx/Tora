@@ -253,8 +253,6 @@ export interface DetectedMediaSession {
   awaiting_confirmation: boolean;
   /** Auto mode, waiting for the player to close: the countdown finished, the update is held */
   waiting_for_close: boolean;
-  /** The player closed while the update was still offered */
-  player_closed: boolean;
 }
 
 export interface FilenameTestResult {

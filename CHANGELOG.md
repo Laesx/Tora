@@ -3,7 +3,7 @@
 ## v0.3.0
 
 > [!WARNING]
-> **Still on v0.1.0? Download this version manually.** v0.1.0 has no auto-update, so it will never tell you about new releases. Install the setup below over your current copy: your list, library folders and settings are kept. From v0.2.0 on, Tora updates itself.
+> **Still on v0.1.0? Download this version manually.** v0.1.0 has no auto-update. Install the setup below, settings are kept. From v0.2.0 on, Tora updates itself.
 
 Everything new since v0.1.0:
 
@@ -12,7 +12,7 @@ Everything new since v0.1.0:
 - **Select all / Deselect all** buttons for the supported media players.
 
 ### Playback and list updates
-- **Update mode**: *Automatic* (as before: count down, then update your list) or *Manual* (Now Playing offers an **Update to episode N** button instead). If you close the player before clicking it, the button stays until you use or dismiss it.
+- **Update mode**: *Automatic* (as before: count down, then update your list) or *Manual* (Now Playing offers an **Update to episode N** button while the episode is playing).
 - New Automatic options:
   - **Wait for the media player to close**: update once you close the player or move to another file.
   - **Media player must be in focus**: the countdown only runs while the player is the active window.
@@ -39,6 +39,7 @@ Everything new since v0.1.0:
 - Better fuzzy search in the watchlist and Quick Jump.
 
 ### General
+- Tora's data now lives in `%APPDATA%\Tora` (it was `%APPDATA%\app.tora.anime`). The first launch moves everything over by itself.
 - **F11** toggles fullscreen.
 - The app no longer behaves like a web browser: no browser right-click menu (except in text fields), and no Ctrl+J downloads panel, Ctrl+F find, Ctrl+P print, reload or back/forward navigation.
 

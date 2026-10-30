@@ -4689,6 +4689,7 @@ version = "0.3.0"
 dependencies = [
  "cc",
  "chrono",
+ "dirs",
  "discord-rich-presence",
  "once_cell",
  "quick-xml 0.37.5",

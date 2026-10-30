@@ -315,7 +315,6 @@ export const NowPlayingHero: React.FC<NowPlayingHeroProps> = ({
               <span className="px-2.5 py-1 rounded-lg bg-accent text-white text-[11px] font-bold flex items-center gap-1.5">
                 <Play className="w-3 h-3 fill-current" />
                 {session.player_name}
-                {session.player_closed && " (closed)"}
               </span>
               {statusChip}
               {entry && STATUS_INFO[entry.user_status] && (

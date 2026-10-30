@@ -32,6 +32,8 @@ chrono = { version = "0.4", features = ["serde"] }
 quick-xml = "0.37"
 urlencoding = "2.1"
 discord-rich-presence = "1.1"
+# Same folders Tauri resolves app data from (legacy identifier migration)
+dirs = "7"
 
 [target.'cfg(windows)'.dependencies]
 # Same versions Tauri's WebView2 runtime uses (browser accelerator keys are switched off in setup)

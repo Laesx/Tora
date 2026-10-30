@@ -1,3 +1,4 @@
+pub mod data_migration;
 pub mod db;
 pub mod detection;
 pub mod discord;
@@ -643,42 +644,25 @@ async fn run_scrobble(state: &AppState, pending: PendingScrobble) -> Result<bool
     Ok(true)
 }
 
-/// A session is over (player closed or another file started). An update held for the player to close
-/// runs now (`playback-scrobbled` tells the frontend); an update still offered in manual mode stays
-/// visible as "player closed" until it is used or dismissed. Returns the session to report.
-async fn end_session(
-    app: &tauri::AppHandle,
-    state: &AppState,
-    ended: Option<DetectedMediaSession>,
-) -> Result<Option<DetectedMediaSession>, String> {
-    let Some(mut session) = ended.filter(|s| !s.auto_synced) else {
-        return Ok(None);
+/// A session is over (player closed or another file started): it is gone in every mode. Only an
+/// update held for the player to close still runs (`playback-scrobbled` tells the frontend); an
+/// update offered in manual mode is dropped with the session.
+async fn end_session(app: &tauri::AppHandle, state: &AppState, ended: Option<DetectedMediaSession>) {
+    let Some(mut session) = ended.filter(|s| s.waiting_for_close && !s.auto_synced) else {
+        return;
     };
-    if session.waiting_for_close {
-        if let Some(pending) = PendingScrobble::of(&session) {
-            match run_scrobble(state, pending).await {
-                Ok(true) => {
-                    session.auto_synced = true;
-                    session.waiting_for_close = false;
-                    session.player_closed = true;
-                    let _ = app.emit("playback-scrobbled", &session);
-                }
-                Ok(false) => {}
-                Err(e) => eprintln!("[scrobble] {}", e),
-            }
+    let Some(pending) = PendingScrobble::of(&session) else {
+        return;
+    };
+    match run_scrobble(state, pending).await {
+        Ok(true) => {
+            session.auto_synced = true;
+            session.waiting_for_close = false;
+            let _ = app.emit("playback-scrobbled", &session);
         }
-        return Ok(None);
+        Ok(false) => {}
+        Err(e) => eprintln!("[scrobble] {}", e),
     }
-    if session.awaiting_confirmation && !session.is_already_seen() {
-        session.player_closed = true;
-        let mut guard = state.active_session.lock().map_err(|e| e.to_string())?;
-        // Unless something else became current meanwhile
-        if guard.is_none() {
-            *guard = Some(session);
-        }
-        return Ok(guard.clone());
-    }
-    Ok(None)
 }
 
 #[tauri::command]
@@ -694,7 +678,7 @@ async fn poll_media_recognition(
 
     // Discord shows a matched episode while its player is open; anything else clears it
     let presence = match session.as_ref() {
-        Ok(Some(s)) if settings.discord_presence_enabled && !s.player_closed => {
+        Ok(Some(s)) if settings.discord_presence_enabled => {
             discord_presence_for(&state, s, &settings.title_language).await
         }
         _ => None,
@@ -772,7 +756,8 @@ async fn poll_session(
         detected_candidate
     else {
         let ended = state.active_session.lock().map_err(|e| e.to_string())?.take();
-        return end_session(app, state, ended).await;
+        end_session(app, state, ended).await;
+        return Ok(None);
     };
 
     let is_same_session = |s: &DetectedMediaSession| {
@@ -791,12 +776,7 @@ async fn poll_session(
 
     let Some((snapshot_matched_id, mut session_parsed)) = continuing else {
         // New playback session detected; the previous one may still owe its held update
-        // (an offered manual update is dropped with the session it belongs to).
-        if replaced.as_ref().is_some_and(|s| s.waiting_for_close) {
-            if let Err(e) = end_session(app, state, replaced).await {
-                eprintln!("[scrobble] {}", e);
-            }
-        }
+        end_session(app, state, replaced).await;
 
         let db = state.db.clone();
         let (parsed, matched, generation) = tokio::task::spawn_blocking(move || {
@@ -843,7 +823,6 @@ async fn poll_session(
             update_remaining_seconds: None,
             awaiting_confirmation: false,
             waiting_for_close: false,
-            player_closed: false,
         };
         // Start the countdown now (or, in manual mode, offer the update right away)
         if new_session.matched_anime_id.is_some() {
@@ -940,7 +919,7 @@ async fn poll_session(
     Ok(current)
 }
 
-/// Manual mode's "Update" button (also used on a session whose player already closed).
+/// Manual mode's "Update" button.
 #[tauri::command]
 async fn confirm_playback_update(
     state: State<'_, AppState>,
@@ -1709,6 +1688,10 @@ fn disable_browser_accelerator_keys(app: &tauri::App) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let context = tauri::generate_context!();
+    // Before the builder: Tauri creates the main window (and its WebView2 profile) before `setup`
+    data_migration::migrate_legacy_data_dirs(&context.config().identifier);
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -1873,6 +1856,6 @@ pub fn run() {
             sign_out_tracker,
             start_anilist_oauth,
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running Tora application");
 }
