@@ -166,7 +166,7 @@ Tora/
     │   └── anime-relations/              # Upstream `erengy/anime-relations` (`anime-relations.txt`)
     └── src/
         ├── data_migration.rs             # Moves data from the old `app.tora.anime` identifier's folders (runs in `run()` before the builder)
-        ├── logging.rs                    # `tauri-plugin-log` setup (`%APPDATA%\Tora\logs	ora.log`, rotated), panic hook, log tail
+        ├── logging.rs                    # `tauri-plugin-log` setup (`%APPDATA%\Tora\logs\tora.log`, rotated), panic hook, log tail
         ├── lib.rs                        # Tauri state (`AppState`), async commands, background monitor & media poll loop, WebView2 accelerator keys off (release)
         ├── discord.rs                    # Discord Rich Presence worker thread ("Watching <anime>", cover, episode, AniList + GitHub buttons)
         ├── main.rs                       # Tauri binary entrypoint
