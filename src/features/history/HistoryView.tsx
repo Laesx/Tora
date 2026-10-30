@@ -1,5 +1,17 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, Download, History, Loader2, RefreshCw, Search, Undo2, X } from "lucide-react";
+import {
+  ArrowLeft,
+  CalendarDays,
+  ChevronLeft,
+  ChevronRight,
+  Download,
+  History,
+  Loader2,
+  RefreshCw,
+  Search,
+  Undo2,
+  X,
+} from "lucide-react";
 import { AnimeEntry, HistoryRow, HistorySource, MANUAL_HISTORY_PLAYER, TimelineEpisode } from "@/lib/types";
 import { getOptimizedCoverUrl } from "@/lib/covers";
 import { toraApi } from "@/lib/api";
@@ -8,12 +20,18 @@ import { AiringDot } from "@/components/AiringDot";
 import { useAnimeActions } from "@/contexts/animeActions";
 import { importProgress, useAniListHistory } from "@/contexts/anilistHistory";
 import { plural } from "@/lib/format";
+import { PeriodPicker } from "./PeriodPicker";
+import { HistoryPeriod, HistoryRequest, periodBounds, periodIsFuture, periodLabel, shiftPeriod } from "./period";
+import { TimelineDay, episodesLabel, splitWatchThroughs, watchThroughLabel } from "./timeline";
 
 import { log } from "@/lib/log";
 interface HistoryViewProps {
   animeList: AnimeEntry[];
   /** Changes whenever a new history row may exist (scrobble / list update) */
   refreshKey: unknown;
+  /** Show a period (from Stats): applied whenever its nonce changes */
+  request: HistoryRequest | null;
+  onRequestHandled: () => void;
 }
 
 const PAGE_SIZE = 100;
@@ -97,7 +115,7 @@ const AniListBadge: React.FC = () => (
  * load from the backend by cursor, and the title search covers the whole history. Clicking a title
  * shows that anime's episode timeline.
  */
-export const HistoryView: React.FC<HistoryViewProps> = ({ animeList, refreshKey }) => {
+export const HistoryView: React.FC<HistoryViewProps> = ({ animeList, refreshKey, request, onRequestHandled }) => {
   const { openAnime } = useAnimeActions();
   const titleOf = useAnimeTitle();
   const anilist = useAniListHistory();
@@ -107,10 +125,13 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ animeList, refreshKey 
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState("");
   const [search, setSearch] = useState("");
-  const [sourceChoice, setSource] = useState<HistorySource>("all");
+  const [sourceChoice, setSource] = useState<HistorySource>(request?.source ?? "all");
   const source: HistorySource = showSources ? sourceChoice : "local";
   const [animeFilter, setAnimeFilter] = useState<{ id: number; title: string } | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [period, setPeriod] = useState<HistoryPeriod | null>(request?.period ?? null);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
   // Pages past the first were loaded: background updates leave them alone instead of resetting
   const pagedRef = useRef(false);
   // Only the newest request may write rows
@@ -121,14 +142,33 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ animeList, refreshKey 
     return () => clearTimeout(t);
   }, [filter]);
 
+  const clearSearch = () => {
+    setFilter("");
+    setSearch("");
+  };
+
+  // Stats asked for a period: show it on its own (no title search, no anime timeline)
+  useEffect(() => {
+    if (!request) return;
+    setPeriod(request.period);
+    setSource(request.source);
+    clearSearch();
+    setAnimeFilter(null);
+    setPickerOpen(false);
+    onRequestHandled();
+  }, [request?.nonce]);
+
   const load = useCallback(
     async (append: HistoryRow | null) => {
       const request = ++requestRef.current;
       setLoading(true);
       try {
+        const [from, to] = period ? periodBounds(period) : [null, null];
         const page = await toraApi.listHistory({
           source,
           search: search || null,
+          from,
+          to,
           before: append?.cursor ?? null,
           limit: PAGE_SIZE,
         });
@@ -142,7 +182,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ animeList, refreshKey 
         if (request === requestRef.current) setLoading(false);
       }
     },
-    [source, search]
+    [source, search, period]
   );
 
   useEffect(() => {
@@ -212,12 +252,94 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ animeList, refreshKey 
             <div className="relative">
               <Search className="w-3.5 h-3.5 text-text-muted absolute left-3 top-1/2 -translate-y-1/2" />
               <input
+                ref={searchInputRef}
                 type="text"
                 value={filter}
                 onChange={(e) => setFilter(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape" && filter) {
+                    e.stopPropagation();
+                    clearSearch();
+                  }
+                }}
                 placeholder="Filter by title..."
-                className="pl-8 pr-3 py-1.5 rounded-xl bg-bg-secondary border border-border-subtle text-xs text-text-primary focus:outline-none focus:border-accent w-52"
+                className="pl-8 pr-7 py-1.5 rounded-xl bg-bg-secondary border border-border-subtle text-xs text-text-primary focus:outline-none focus:border-accent w-52"
               />
+              {filter && (
+                <button
+                  onClick={() => {
+                    clearSearch();
+                    searchInputRef.current?.focus();
+                  }}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 rounded text-text-muted hover:text-text-primary"
+                  title="Clear search (Esc)"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+          )}
+          {!animeFilter && (
+            <div className="relative">
+              {period ? (
+                <div className="flex items-center bg-bg-secondary rounded-xl border border-border-subtle">
+                  <button
+                    onClick={() => setPeriod(shiftPeriod(period, -1))}
+                    title="Previous"
+                    className="p-1.5 rounded-l-xl hover:bg-bg-tertiary text-text-secondary hover:text-text-primary transition"
+                  >
+                    <ChevronLeft className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    // The picker closes on outside mousedown: let this click toggle it instead
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={() => setPickerOpen((o) => !o)}
+                    title="Pick another period"
+                    className="flex items-center gap-1.5 px-1.5 py-1.5 text-xs font-semibold text-text-primary hover:text-accent transition"
+                  >
+                    <CalendarDays className="w-3.5 h-3.5 text-accent" />
+                    <span className="tabular-nums whitespace-nowrap">{periodLabel(period)}</span>
+                  </button>
+                  <button
+                    onClick={() => setPeriod(shiftPeriod(period, 1))}
+                    disabled={periodIsFuture(shiftPeriod(period, 1))}
+                    title="Next"
+                    className="p-1.5 hover:bg-bg-tertiary text-text-secondary hover:text-text-primary disabled:opacity-30 disabled:hover:bg-transparent transition"
+                  >
+                    <ChevronRight className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    onClick={() => setPeriod(null)}
+                    title="Back to all time"
+                    className="p-1.5 rounded-r-xl hover:bg-bg-tertiary text-text-muted hover:text-text-primary transition"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={() => setPickerOpen((o) => !o)}
+                  title="Show a month, season or year"
+                  className="p-2 rounded-xl bg-bg-secondary border border-border-subtle hover:bg-bg-tertiary text-text-secondary hover:text-text-primary transition"
+                >
+                  <CalendarDays className="w-3.5 h-3.5" />
+                </button>
+              )}
+              {pickerOpen && (
+                <PeriodPicker
+                  period={period}
+                  source={source}
+                  search={search}
+                  refreshKey={[refreshKey, anilist.version]}
+                  onSelect={setPeriod}
+                  onClear={() => {
+                    setPeriod(null);
+                    setPickerOpen(false);
+                  }}
+                  onClose={() => setPickerOpen(false)}
+                />
+              )}
             </div>
           )}
           {showSources && !animeFilter && (
@@ -263,6 +385,8 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ animeList, refreshKey 
               ? "Loading..."
               : search
                 ? "No entries match the filter."
+                : period
+                  ? `Nothing watched in ${periodLabel(period)}.`
                 : source === "anilist"
                   ? anilist.hasData
                     ? "Every episode in your AniList history was also logged by Tora."
@@ -374,10 +498,49 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ animeList, refreshKey 
   );
 };
 
-const SOURCE_LABEL: Record<TimelineEpisode["source"], string> = {
-  player: "",
-  manual: "Manual update",
-  anilist: "AniList",
+const LocalBadge: React.FC = () => (
+  <span className="px-1.5 py-px rounded-md bg-bg-tertiary text-text-secondary text-[9px] font-bold uppercase tracking-wide">
+    Local
+  </span>
+);
+
+const shortDate = (ts: number) =>
+  new Date(ts * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+
+/** One day's episodes from one source: Ep · source · date · time (a span when they differ). */
+const TimelineDayRow: React.FC<{ row: TimelineDay }> = ({ row }) => {
+  const times = row.episodes.map((e) => e.timestamp_unix);
+  const first = Math.min(...times);
+  const last = Math.max(...times);
+  const batch = row.episodes.some((e) => e.batch);
+  const detail = row.episodes
+    .map((e) => `Ep ${e.episode} · ${e.batch ? "≈ " : ""}${timeLabel(e.timestamp_unix)}`)
+    .join("\n");
+  return (
+    <div
+      className="flex items-center gap-3 px-2 py-1 rounded-lg hover:bg-bg-tertiary"
+      title={batch ? `${detail}\n≈ AniList merged these into one activity: its time, not each episode's` : detail}
+    >
+      <span className="w-32 shrink-0 text-xs font-mono font-semibold text-accent truncate">{episodesLabel(row.episodes)}</span>
+      <span className="flex-1 min-w-0 flex items-center gap-1.5 text-[11px] font-mono text-text-muted truncate">
+        {row.source === "anilist" ? (
+          <AniListBadge />
+        ) : (
+          <>
+            <LocalBadge />
+            <span className="truncate">{row.sourceLabel}</span>
+          </>
+        )}
+      </span>
+      <span className="w-32 shrink-0 text-[11px] text-text-secondary">
+        {new Date(row.day * 1000).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}
+      </span>
+      <span className="w-36 shrink-0 text-right text-[10px] font-mono text-text-muted">
+        {batch ? "≈ " : ""}
+        {first === last ? timeLabel(first) : `${timeLabel(first)} – ${timeLabel(last)}`}
+      </span>
+    </div>
+  );
 };
 
 /** One anime's watched episodes, oldest first, with when each was logged and where. */
@@ -402,15 +565,13 @@ const AnimeTimeline: React.FC<{
     };
   }, [animeId, ...refreshKey]);
 
-  const groups = useMemo(() => groupByDay(episodes ?? [], (e) => e.timestamp_unix), [episodes]);
+  const passes = useMemo(() => splitWatchThroughs(episodes ?? []), [episodes]);
   const summary = useMemo(() => {
     if (!episodes?.length) return null;
-    const distinct = new Set(episodes.map((e) => e.episode)).size;
     return {
       first: episodes[0].timestamp_unix,
       last: episodes[episodes.length - 1].timestamp_unix,
-      distinct,
-      repeats: episodes.length - distinct,
+      distinct: new Set(episodes.map((e) => e.episode)).size,
     };
   }, [episodes]);
 
@@ -435,7 +596,7 @@ const AnimeTimeline: React.FC<{
           <div className="text-sm font-bold text-text-primary truncate">{title}</div>
           <div className="text-[11px] text-text-muted">
             {summary
-              ? `${plural(summary.distinct, "episode")}${summary.repeats > 0 ? ` · ${plural(summary.repeats, "rewatched episode")}` : ""} · ${new Date(summary.first * 1000).toLocaleDateString()} – ${new Date(summary.last * 1000).toLocaleDateString()}`
+              ? `${plural(summary.distinct, "episode")}${passes.length > 1 ? ` · watched ${passes.length} times` : ""} · ${shortDate(summary.first)} – ${shortDate(summary.last)}`
               : episodes
                 ? "No watched episodes logged"
                 : "Loading..."}
@@ -450,27 +611,23 @@ const AnimeTimeline: React.FC<{
         </button>
       </div>
 
-      {groups.map((g) => (
-        <section key={g.label} className="bg-bg-secondary border border-border-subtle rounded-2xl p-4 space-y-0.5">
-          <h2 className="text-xs font-bold text-text-secondary pb-1">
-            {g.label}
-            <span className="ml-2 font-medium text-text-muted">{plural(g.items.length, "episode")}</span>
+      {passes.map((pass) => (
+        <section key={pass.index} className="bg-bg-secondary border border-border-subtle rounded-2xl p-3">
+          <h2 className="text-xs font-bold text-text-secondary px-2 pb-1">
+            {watchThroughLabel(pass.index)}
+            <span className="ml-2 font-medium text-text-muted">
+              {plural(pass.episodes.length, "episode")} · {shortDate(pass.episodes[0].timestamp_unix)} –{" "}
+              {shortDate(pass.episodes[pass.episodes.length - 1].timestamp_unix)}
+            </span>
           </h2>
-          {g.items.map((e, i) => (
-            <div key={`${e.timestamp_unix}-${e.episode}-${i}`} className="flex items-center gap-3 px-2 py-1.5 rounded-lg hover:bg-bg-tertiary">
-              <span className="w-16 text-xs font-mono font-semibold text-accent shrink-0">Ep {e.episode}</span>
-              <span className="flex-1 min-w-0 text-[11px] text-text-muted font-mono truncate flex items-center gap-1.5">
-                {e.source === "anilist" && <AniListBadge />}
-                {SOURCE_LABEL[e.source] && e.source !== "anilist" ? SOURCE_LABEL[e.source] : e.source === "player" ? e.player_name : null}
-                {e.rewatch && <span className="text-text-secondary">Rewatch</span>}
-              </span>
-              <span
-                className="text-[10px] font-mono text-text-muted shrink-0"
-                title={e.batch ? "AniList merged several episodes into one activity: this is the activity's time" : undefined}
-              >
-                {e.batch ? "≈ " : ""}
-                {timeLabel(e.timestamp_unix)}
-              </span>
+          {pass.months.map((m) => (
+            <div key={m.label}>
+              <h3 className="px-2 pt-2 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-text-muted">
+                {m.label}
+              </h3>
+              {m.days.map((row) => (
+                <TimelineDayRow key={`${row.day}-${row.sourceLabel}`} row={row} />
+              ))}
             </div>
           ))}
         </section>

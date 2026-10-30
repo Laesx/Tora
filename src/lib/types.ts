@@ -477,8 +477,18 @@ export interface HistoryQuery {
   source: HistorySource;
   search?: string | null;
   media_id?: number | null;
+  /** Only rows at or after this unix second (the History period) */
+  from?: number | null;
+  /** Only rows before this unix second */
+  to?: number | null;
   before?: HistoryCursor | null;
   limit: number;
+}
+
+/** Watched episodes in one local calendar month ("YYYY-MM") */
+export interface MonthCount {
+  month: string;
+  episodes: number;
 }
 
 /**

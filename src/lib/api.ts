@@ -42,6 +42,8 @@ import {
   AniListHistoryStatus,
   HistoryQuery,
   HistoryRow,
+  HistorySource,
+  MonthCount,
   TimelineEpisode,
 } from "./types";
 import { errorText, log } from "./log";
@@ -214,6 +216,10 @@ export const toraApi = {
 
   /** One page of History (newest first; pass the last row's `cursor` as `before` for the next) */
   listHistory: (query: HistoryQuery) => invoke<HistoryRow[]>("list_history", { query }),
+
+  /** Watched episodes per local month (History period picker), same source and search as the list */
+  getHistoryMonthCounts: (source: HistorySource, search: string | null) =>
+    invoke<MonthCount[]>("get_history_month_counts", { source, search }),
 
   getHistoryTimeline: (mediaId: number) => invoke<TimelineEpisode[]>("get_history_timeline", { mediaId }),
 

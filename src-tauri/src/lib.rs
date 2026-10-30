@@ -11,8 +11,8 @@ pub mod updates;
 
 use crate::db::{
     AniListHistoryStatus, AnimeEntry, AppSettings, BatchAnimeUpdatePatch, CachedSeason,
-    CustomListChange, CustomListsState, Database, HistoryQuery, HistoryRow, LibraryFolder, ListStats,
-    LocalEpisodeFile, SettingsBackupInfo, TimelineEpisode, WatchHistoryEntry,
+    CustomListChange, CustomListsState, Database, HistoryQuery, HistoryRow, HistorySource, LibraryFolder,
+    ListStats, LocalEpisodeFile, MonthCount, SettingsBackupInfo, TimelineEpisode, WatchHistoryEntry,
 };
 use crate::detection::anisthesia::{
     detect_active_media_player, foreground_process_id, DetectedMediaSession, UpdatePolicy,
@@ -1055,6 +1055,19 @@ async fn list_history(state: State<'_, AppState>, query: HistoryQuery) -> Result
         .map_err(|e| e.to_string())?
 }
 
+/// Watched episodes per local month for the History period picker (same source / search as the list).
+#[tauri::command]
+async fn get_history_month_counts(
+    state: State<'_, AppState>,
+    source: HistorySource,
+    search: Option<String>,
+) -> Result<Vec<MonthCount>, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || db.history_month_counts(source, search.as_deref()))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// Every watched episode of one anime with its time and source (History's per-anime view).
 #[tauri::command]
 async fn get_history_timeline(
@@ -1960,6 +1973,7 @@ pub fn run() {
             link_detected_episode_to_anime,
             get_watch_history,
             list_history,
+            get_history_month_counts,
             get_history_timeline,
             get_anilist_history_status,
             start_anilist_history_import,

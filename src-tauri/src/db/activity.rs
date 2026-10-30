@@ -161,8 +161,20 @@ pub struct HistoryQuery {
     pub search: Option<String>,
     /// Only this anime.
     pub media_id: Option<i64>,
+    /// Only rows at or after this unix second (the History period).
+    pub from: Option<i64>,
+    /// Only rows before this unix second.
+    pub to: Option<i64>,
     pub before: Option<HistoryCursor>,
     pub limit: u32,
+}
+
+/// Watched episodes in one local calendar month (the History period picker).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MonthCount {
+    /// "YYYY-MM", local time.
+    pub month: String,
+    pub episodes: u32,
 }
 
 /// One History row: a local `watch_history` row (`kind` "local") or an AniList activity reduced to its
@@ -210,6 +222,25 @@ fn like_pattern(search: Option<&str>) -> Option<String> {
         .replace('%', "\\%")
         .replace('_', "\\_");
     Some(format!("%{}%", escaped))
+}
+
+/// `:q` title-search filters (`NULL` = no search) over every title, so rows match whatever title
+/// language they show: local rows by their logged title or the list entry's titles, AniList rows by the
+/// imported media's titles or the list entry's. Returns (local `h.`, AniList `a.`).
+fn search_filters() -> (String, String) {
+    let titles = |table: &str, id: &str| {
+        format!(
+            "SELECT {id} FROM {table}
+             WHERE title_romaji LIKE :q ESCAPE '\\' OR title_english LIKE :q ESCAPE '\\'
+                OR title_native LIKE :q ESCAPE '\\'"
+        )
+    };
+    let list = titles("anime_entries", "id");
+    let media = titles("anilist_activity_media", "media_id");
+    (
+        format!("(:q IS NULL OR h.anime_title LIKE :q ESCAPE '\\' OR h.anime_id IN ({list}))"),
+        format!("(:q IS NULL OR a.media_id IN ({media}) OR a.media_id IN ({list}))"),
+    )
 }
 
 /// Imported AniList-only episodes and the oldest one's time (Stats "logged episodes").
@@ -379,10 +410,7 @@ impl Database {
             kind: u8::MAX,
             id: i64::MAX,
         });
-        // List titles in every language match too (the row shows the chosen title language)
-        let list_titles = "SELECT id FROM anime_entries
-             WHERE title_romaji LIKE :q ESCAPE '\\' OR title_english LIKE :q ESCAPE '\\'
-                OR title_native LIKE :q ESCAPE '\\'";
+        let (local_search, remote_search) = search_filters();
         let local = format!(
             "SELECT * FROM (
                SELECT 0 AS kind, h.id, h.anime_id, h.anime_title, h.episode_number AS ep_from,
@@ -391,8 +419,9 @@ impl Database {
                       NULL AS cover
                FROM watch_history h
                WHERE (h.timestamp_unix < :ts OR (h.timestamp_unix = :ts AND (0 < :kind OR (0 = :kind AND h.id < :id))))
+                 AND h.timestamp_unix >= :from AND h.timestamp_unix < :to
                  AND (:mid IS NULL OR h.anime_id = :mid)
-                 AND (:q IS NULL OR h.anime_title LIKE :q ESCAPE '\\' OR h.anime_id IN ({list_titles}))
+                 AND ({local_search})
                ORDER BY h.timestamp_unix DESC, h.id DESC LIMIT :limit)"
         );
         let only = |agg: &str| {
@@ -408,12 +437,9 @@ impl Database {
                       a.status LIKE 'rewatched%' AS rewatch, m.cover
                FROM anilist_activities a LEFT JOIN anilist_activity_media m ON m.media_id = a.media_id
                WHERE (a.created_at < :ts OR (a.created_at = :ts AND (1 < :kind OR (1 = :kind AND a.id < :id))))
+                 AND a.created_at >= :from AND a.created_at < :to
                  AND (:mid IS NULL OR a.media_id = :mid)
-                 AND (:q IS NULL OR a.media_id IN (
-                       SELECT media_id FROM anilist_activity_media
-                       WHERE title_romaji LIKE :q ESCAPE '\\' OR title_english LIKE :q ESCAPE '\\'
-                          OR title_native LIKE :q ESCAPE '\\')
-                      OR a.media_id IN ({list_titles}))
+                 AND ({remote_search})
                  AND EXISTS (SELECT 1 FROM anilist_activity_episodes e WHERE e.activity_id = a.id AND {ANILIST_ONLY})
                ORDER BY a.created_at DESC, a.id DESC LIMIT :limit)",
             only("MIN(e.episode)"),
@@ -434,6 +460,8 @@ impl Database {
                     ":kind": before.kind,
                     ":id": before.id,
                     ":mid": query.media_id,
+                    ":from": query.from.unwrap_or(i64::MIN),
+                    ":to": query.to.unwrap_or(i64::MAX),
                     ":q": pattern,
                     ":limit": limit,
                 },
@@ -460,6 +488,46 @@ impl Database {
                     })
                 },
             )
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
+    }
+
+    /// Watched episodes per local calendar month (oldest first) for the History period picker, with the
+    /// same source and title search as [`Self::list_history`]; corrections don't count. Months are
+    /// bucketed by SQLite's `localtime`, the OS timezone the webview uses too.
+    pub fn history_month_counts(
+        &self,
+        source: HistorySource,
+        search: Option<&str>,
+    ) -> Result<Vec<MonthCount>, String> {
+        let conn = self.reader()?;
+        let (local_search, remote_search) = search_filters();
+        let local = format!(
+            "SELECT strftime('%Y-%m', h.timestamp_unix, 'unixepoch', 'localtime') AS m, COUNT(*) AS n
+               FROM watch_history h
+              WHERE h.progress_from IS NULL AND {local_search}
+              GROUP BY m"
+        );
+        let remote = format!(
+            "SELECT strftime('%Y-%m', e.created_at, 'unixepoch', 'localtime') AS m, COUNT(*) AS n
+               FROM anilist_activity_episodes e JOIN anilist_activities a ON a.id = e.activity_id
+              WHERE {ANILIST_ONLY} AND {remote_search}
+              GROUP BY m"
+        );
+        let union = match source {
+            HistorySource::Local => local,
+            HistorySource::Anilist => remote,
+            HistorySource::All => format!("{local} UNION ALL {remote}"),
+        };
+        let sql = format!("SELECT m, SUM(n) FROM ({union}) GROUP BY m ORDER BY m");
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(named_params! { ":q": like_pattern(search) }, |r| {
+                Ok(MonthCount {
+                    month: r.get(0)?,
+                    episodes: r.get(1)?,
+                })
+            })
             .map_err(|e| e.to_string())?;
         rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
     }
@@ -603,6 +671,60 @@ mod tests {
         // ...but a correction row is not a watched episode
         db.record_manual_progress(&[(2, "Remote 2".into(), 2, 1)]).unwrap();
         assert_eq!(db.list_history(&query(HistorySource::Anilist)).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn periods_bound_pages_and_months_count_episodes() {
+        // Mid-month noon UTC, so the local month is the same in every timezone
+        const MAR: i64 = 1_742_040_000; // 2025-03-15
+        const APR: i64 = 1_744_718_400; // 2025-04-15
+        const DAY: i64 = 86_400;
+        let db = seeded();
+        db.store_anilist_activities(
+            &[
+                activity(300, 2, Some((3, 4)), MAR),
+                activity(301, 2, Some((5, 5)), MAR + 60),
+                activity(302, 2, Some((6, 6)), APR),
+            ],
+            None,
+        )
+        .unwrap();
+        let march = |source, before| HistoryQuery {
+            from: Some(MAR - 5 * DAY),
+            to: Some(APR - 5 * DAY),
+            before,
+            limit: 1,
+            ..query(source)
+        };
+        let mut seen = vec![];
+        let mut before = None;
+        while let Some(row) = db.list_history(&march(HistorySource::All, before)).unwrap().first() {
+            seen.push(row.id);
+            before = Some(row.cursor);
+        }
+        assert_eq!(seen, vec![301, 300]);
+        assert!(db.list_history(&march(HistorySource::Local, None)).unwrap().is_empty());
+
+        let count = |source, search: Option<&str>, month: &str| {
+            db.history_month_counts(source, search)
+                .unwrap()
+                .into_iter()
+                .find(|m| m.month == month)
+                .map_or(0, |m| m.episodes)
+        };
+        let this_month = chrono::Local::now().format("%Y-%m").to_string();
+        assert_eq!(count(HistorySource::All, None, "2025-03"), 3);
+        assert_eq!(count(HistorySource::Anilist, None, "2025-04"), 1);
+        assert_eq!(count(HistorySource::Local, None, "2025-03"), 0);
+        assert_eq!(count(HistorySource::Local, None, &this_month), 2);
+        assert_eq!(count(HistorySource::All, Some("remote 2"), "2025-03"), 3);
+        assert_eq!(count(HistorySource::All, Some("alpha"), "2025-03"), 0);
+
+        // A local row for episode 5 takes it out of March (local wins), and corrections never count
+        db.record_manual_progress(&[(2, "Remote 2".into(), 4, 5)]).unwrap();
+        db.record_manual_progress(&[(2, "Remote 2".into(), 5, 4)]).unwrap();
+        assert_eq!(count(HistorySource::All, None, "2025-03"), 2);
+        assert_eq!(count(HistorySource::All, None, &this_month), 3);
     }
 
     #[test]

@@ -45,6 +45,7 @@ import { NowPlayingView } from "@/features/nowplaying/NowPlayingView";
 import { HistoryView } from "@/features/history/HistoryView";
 import { StatsView } from "@/features/stats/StatsView";
 import { SeasonRequest, SeasonsView } from "@/features/seasons/SeasonsView";
+import type { HistoryRequest } from "@/features/history/period";
 import { ScheduleView } from "@/features/schedule/ScheduleView";
 import { SearchView } from "@/features/search/SearchView";
 import type { SettingsSection } from "@/features/settings/SettingsView";
@@ -85,6 +86,7 @@ export const App: React.FC = () => {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsRequest, setSettingsRequest] = useState<{ section: SettingsSection; nonce: number } | null>(null);
   const [seasonRequest, setSeasonRequest] = useState<SeasonRequest | null>(null);
+  const [historyRequest, setHistoryRequest] = useState<HistoryRequest | null>(null);
   const [scoreFormat, setScoreFormat] = useState<ScoreFormat>(DEFAULT_SCORE_FORMAT);
   const [globalSearchQuery, setGlobalSearchQuery] = useState("");
   const [globalSearchRequest, setGlobalSearchRequest] = useState(0);
@@ -601,13 +603,24 @@ export const App: React.FC = () => {
                           />
                         )}
 
-                        {activeTab === "history" && <HistoryView animeList={animeList} refreshKey={statsKey} />}
+                        {activeTab === "history" && (
+                          <HistoryView
+                            animeList={animeList}
+                            refreshKey={statsKey}
+                            request={historyRequest}
+                            onRequestHandled={() => setHistoryRequest(null)}
+                          />
+                        )}
 
                         {activeTab === "stats" && (
                           <StatsView
                             animeList={animeList}
                             refreshKey={statsKey}
                             onOpenStatus={(status) => showInWatchlist(() => watchlist.showStatus(status))}
+                            onOpenHistory={(period, source) => {
+                              setHistoryRequest({ period, source, nonce: Date.now() });
+                              setActiveTab("history");
+                            }}
                           />
                         )}
                       </ErrorBoundary>

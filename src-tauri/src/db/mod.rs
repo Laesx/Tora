@@ -16,7 +16,7 @@ mod settings;
 
 pub use activity::{
     AniListHistoryState, AniListHistoryStatus, HistoryCursor, HistoryQuery, HistoryRow, HistorySource,
-    ImportStatus, TimelineEpisode,
+    ImportStatus, MonthCount, TimelineEpisode,
 };
 pub use settings::{
     SettingsBackupInfo, TORRENT_BOARD_OPTIONS_KEY, TORRENT_FANSUBS_KEY, TORRENT_FEEDS_KEY,

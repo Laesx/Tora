@@ -29,6 +29,7 @@ import { useScoreFormat } from "@/contexts/scoreFormat";
 import { formatMeanScore } from "@/lib/scores";
 import { useAniListHistory } from "@/contexts/anilistHistory";
 import { usePrefs } from "@/hooks/usePrefs";
+import type { HistoryPeriod } from "@/features/history/period";
 
 interface StatsViewProps {
   animeList: AnimeEntry[];
@@ -36,7 +37,11 @@ interface StatsViewProps {
   refreshKey: unknown;
   /** Open the watchlist on one status */
   onOpenStatus: (status: string) => void;
+  /** Show a day / month in History, listing what the chart counted (`all` when AniList is included) */
+  onOpenHistory: (period: HistoryPeriod, source: "all" | "local") => void;
 }
+
+type MonthBar = { year: number; month: number; label: string; title: string; count: number; minutes: number };
 
 // Segment order of the status bar = the order its colors were validated in (adjacent pairs)
 const STATUS_SEGMENTS = ["CURRENT", "REPEATING", "COMPLETED", "PAUSED", "DROPPED", "PLANNING"].map((id) => ({
@@ -100,10 +105,12 @@ function computeActivity(events: WatchEvent[]) {
   }
 
   // Last 12 calendar months, oldest first
-  const months: { label: string; title: string; count: number; minutes: number }[] = [];
+  const months: MonthBar[] = [];
   for (let i = 11; i >= 0; i--) {
     const m = new Date(today.getFullYear(), today.getMonth() - i, 1);
     months.push({
+      year: m.getFullYear(),
+      month: m.getMonth(),
       label: m.toLocaleDateString(undefined, { month: "short" }),
       title: m.toLocaleDateString(undefined, { month: "long", year: "numeric" }),
       count: 0,
@@ -177,6 +184,7 @@ export const StatsView: React.FC<StatsViewProps> = ({
   animeList,
   refreshKey,
   onOpenStatus,
+  onOpenHistory,
 }) => {
   const { openAnime } = useAnimeActions();
   const titleOf = useAnimeTitle();
@@ -189,6 +197,7 @@ export const StatsView: React.FC<StatsViewProps> = ({
   const includeAnilist = prefs.includeAnilist && anilist.hasData;
   // Imported activity only matters while it is included
   const anilistVersion = includeAnilist ? anilist.version : 0;
+  const openHistory = (period: HistoryPeriod) => onOpenHistory(period, includeAnilist ? "all" : "local");
 
   useEffect(() => {
     let cancelled = false;
@@ -298,7 +307,12 @@ export const StatsView: React.FC<StatsViewProps> = ({
           </div>
         ) : (
           <div className="space-y-5">
-            <Heatmap perDay={activity.perDay} />
+            <Heatmap
+              perDay={activity.perDay}
+              onOpenDay={(d) =>
+                openHistory({ unit: "day", year: d.getFullYear(), month: d.getMonth(), day: d.getDate() })
+              }
+            />
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
               <MiniStat icon={<Flame className="w-4 h-4" />} value={`${activity.current} d`} label="Current streak" />
               <MiniStat icon={<Trophy className="w-4 h-4" />} value={`${activity.longest} d`} label="Longest streak (1 year)" />
@@ -310,7 +324,10 @@ export const StatsView: React.FC<StatsViewProps> = ({
                 <h3 className="text-[11px] font-semibold uppercase tracking-wider text-text-muted mb-2">
                   Episodes per month
                 </h3>
-                <MonthBars months={activity.months} />
+                <MonthBars
+                  months={activity.months}
+                  onOpenMonth={(m) => openHistory({ unit: "month", year: m.year, month: m.month })}
+                />
               </div>
               <div>
                 <h3 className="text-[11px] font-semibold uppercase tracking-wider text-text-muted mb-2">
@@ -525,8 +542,11 @@ const StatusBar: React.FC<{
   );
 };
 
-/** 53-week day heatmap (accent opacity = episodes that day). */
-const Heatmap: React.FC<{ perDay: Map<string, number> }> = ({ perDay }) => {
+/** 53-week day heatmap (accent opacity = episodes that day); a click shows that day in History. */
+const Heatmap: React.FC<{ perDay: Map<string, number>; onOpenDay: (date: Date) => void }> = ({
+  perDay,
+  onOpenDay,
+}) => {
   const [hover, setHover] = useState<{ date: Date; count: number; x: number; y: number } | null>(null);
   const { cells, monthLabels } = useMemo(() => heatmapCells(perDay), [perDay]);
   const max = useMemo(() => Math.max(0, ...cells.map((c) => c.count)), [cells]);
@@ -573,8 +593,9 @@ const Heatmap: React.FC<{ perDay: Map<string, number> }> = ({ perDay }) => {
                 width={CELL}
                 height={CELL}
                 rx={2}
-                className={level === 0 ? "fill-bg-tertiary" : "fill-accent"}
+                className={`cursor-pointer ${level === 0 ? "fill-bg-tertiary" : "fill-accent"}`}
                 fillOpacity={level === 0 ? 1 : HEAT_OPACITY[level]}
+                onClick={() => onOpenDay(c.date)}
                 onMouseEnter={() => setHover({ date: c.date, count: c.count, x: x + CELL / 2, y })}
               />
             );
@@ -592,6 +613,7 @@ const Heatmap: React.FC<{ perDay: Map<string, number> }> = ({ perDay }) => {
           <span className="text-text-muted">
             {hover.date.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}
           </span>
+          <span className="block text-[10px] text-text-muted">Click to see in History</span>
         </div>
       )}
       <div className="flex items-center justify-end gap-1 mt-2 text-[10px] text-text-muted">
@@ -609,9 +631,11 @@ const Heatmap: React.FC<{ perDay: Map<string, number> }> = ({ perDay }) => {
   );
 };
 
-/** Episodes per calendar month (single series, accent bars with rounded tops on a shared baseline). */
-const MonthBars: React.FC<{ months: { label: string; title: string; count: number; minutes: number }[] }> = ({
+/** Episodes per calendar month (single series, accent bars with rounded tops on a shared baseline); a
+ * click shows that month in History. */
+const MonthBars: React.FC<{ months: MonthBar[]; onOpenMonth: (month: MonthBar) => void }> = ({
   months,
+  onOpenMonth,
 }) => {
   const [hover, setHover] = useState<number | null>(null);
   const max = Math.max(1, ...months.map((m) => m.count));
@@ -621,8 +645,9 @@ const MonthBars: React.FC<{ months: { label: string; title: string; count: numbe
         {months.map((m, i) => (
           <div
             key={m.title}
-            className="relative flex-1 h-full flex items-end justify-center"
+            className="relative flex-1 h-full flex items-end justify-center cursor-pointer"
             onMouseEnter={() => setHover(i)}
+            onClick={() => onOpenMonth(m)}
           >
             {hover === i && (
               <div className="absolute bottom-full mb-1 left-1/2 -translate-x-1/2 px-2 py-1 rounded-lg bg-bg-elevated border border-border-subtle text-[11px] text-text-primary whitespace-nowrap shadow-lg z-10 pointer-events-none">
@@ -630,6 +655,7 @@ const MonthBars: React.FC<{ months: { label: string; title: string; count: numbe
                 <span className="text-text-muted">
                   · {formatHours(m.minutes)} · {m.title}
                 </span>
+                <span className="block text-[10px] text-text-muted">Click to see in History</span>
               </div>
             )}
             <div
