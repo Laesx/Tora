@@ -11,9 +11,12 @@ import { createPortal } from "react-dom";
 import {
   ArrowDown,
   ArrowUp,
+  Check,
   Clock,
+  Columns3,
   Plus,
   Minus,
+  RotateCcw,
   Star,
   User,
 } from "lucide-react";
@@ -24,14 +27,16 @@ import { AnimeQuickMenu } from "@/components/AnimeQuickMenu";
 import { LIST_STATUSES } from "@/lib/status";
 import { displayTitle, useAnimeTitle } from "@/contexts/titles";
 import { playLocalEpisode } from "@/lib/anime";
-import { episodeBar, episodeTotalLabel, formatEpisodeRanges } from "@/lib/episodes";
+import { episodeBar, episodeTotalLabel } from "@/lib/episodes";
 import { EpisodeProgressBar, ReadyBadge } from "@/components/EpisodeProgressBar";
 import { AiringDot } from "@/components/AiringDot";
+import { FloatingQuickMenu } from "@/components/FloatingQuickMenu";
 import { useToast } from "@/contexts/toast";
 import { useAnimeActions } from "@/contexts/animeActions";
 import { useScrollViewport, visibleRange } from "@/hooks/virtual";
 import { useNow } from "@/hooks/useNow";
 import type { SortDir, WatchlistSortKey } from "./sort";
+import { TABLE_COLUMNS, TableColumn, TableColumnId, clampColumnWidth, useTableColumns } from "./tableColumns";
 
 /** A titled section of the list (search results grouped by status) */
 export interface WatchlistGroup {
@@ -92,18 +97,6 @@ interface VirtualWatchlistProps {
   onSort?: (key: WatchlistSortKey) => void;
 }
 
-/** Table columns that sort, by header label */
-const TABLE_SORT_COLUMNS: { label: string; key: WatchlistSortKey | null; className: string }[] = [
-  { label: "Anime Title", key: "title", className: "py-2.5 pl-4 pr-3" },
-  { label: "Type", key: "format", className: "py-2.5 px-3" },
-  { label: "Progress", key: "progress", className: "py-2.5 px-3" },
-  { label: "On Disk", key: "ready", className: "py-2.5 px-3" },
-  { label: "Score", key: "score", className: "py-2.5 px-3" },
-  { label: "Season", key: "season", className: "py-2.5 px-3" },
-  { label: "Updated", key: "updated", className: "py-2.5 px-3" },
-  { label: "Quick Actions", key: null, className: "py-2.5 px-4 text-right" },
-];
-
 export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
   items,
   groups,
@@ -145,6 +138,12 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
     scrollTop,
     viewportHeight,
   } = useScrollViewport(containerRef, scrollContainerRef);
+
+  // Table mode: fixed column widths (resizable / hideable per device)
+  const tableColumns = useTableColumns();
+  const [dragWidth, setDragWidth] = useState<{ id: TableColumnId; width: number } | null>(null);
+  const [columnMenuAnchor, setColumnMenuAnchor] = useState<{ x: number; y: number } | null>(null);
+  const closeColumnMenu = useCallback(() => setColumnMenuAnchor(null), []);
 
   const selectedSet = useMemo(
     () => new Set(selectedAnimeIds),
@@ -787,6 +786,113 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
     );
   };
 
+  // Every cell stays on one line and clips: a row is always exactly `layout.rowHeight` tall
+  const CELL = "py-2 overflow-hidden whitespace-nowrap align-middle";
+
+  const renderTableCell = (column: TableColumn, anime: AnimeEntry, bar: ReturnType<typeof episodeBar>, isSelected: boolean) => {
+    const cls = `${CELL} ${column.className}`;
+    switch (column.id) {
+      case "title":
+        return (
+          <td key={column.id} className={cls}>
+            <div className="flex items-center gap-3 min-w-0">
+              <span className="relative shrink-0">
+                <img
+                  src={getOptimizedCoverUrl(anime.cover_image, "medium")}
+                  alt={titleOf(anime)}
+                  loading="lazy"
+                  decoding="async"
+                  className="w-7 h-10 object-cover rounded"
+                />
+                <AiringDot anime={anime} size="sm" onCover className="absolute -top-0.5 -left-0.5" />
+              </span>
+              <div className="min-w-0 flex-1">
+                <div
+                  className={`font-semibold truncate ${isSelected ? "text-accent" : "text-text-primary"}`}
+                  title={titleOf(anime)}
+                >
+                  {anime.sync_pending && (
+                    <PendingSyncDot className="inline-block mr-1.5 align-middle" />
+                  )}
+                  {titleOf(anime)}
+                </div>
+                <div className="text-[10px] text-text-muted truncate">
+                  {anime.studios.join(", ")}
+                  {anime.user_started_at ? ` • Started ${anime.user_started_at}` : ""}
+                </div>
+              </div>
+            </div>
+          </td>
+        );
+      case "format":
+        return (
+          <td key={column.id} className={`${cls} font-mono text-[11px] text-text-secondary truncate`}>
+            {anime.format}
+          </td>
+        );
+      case "progress":
+        return (
+          <td key={column.id} className={cls}>
+            <div className="flex items-center justify-between gap-2 text-[11px] font-mono mb-1 min-w-0">
+              <span className="truncate">
+                {anime.user_progress} / {episodeTotalLabel(anime)}
+              </span>
+              <ReadyBadge bar={bar} progress={anime.user_progress} className="py-0 shrink-0" />
+            </div>
+            <EpisodeProgressBar bar={bar} className="w-full h-2.5 rounded-full" />
+          </td>
+        );
+      case "score":
+        return (
+          <td key={column.id} className={`${cls} font-mono font-bold text-amber-400`}>
+            {anime.user_score > 0 ? anime.user_score : "-"}
+          </td>
+        );
+      case "season": {
+        const season = [anime.season, anime.season_year].filter(Boolean).join(" ");
+        return (
+          <td key={column.id} className={`${cls} text-[11px] text-text-secondary truncate`} title={season || undefined}>
+            {season}
+          </td>
+        );
+      }
+      case "updated":
+        return (
+          <td key={column.id} className={`${cls} text-[11px] text-text-secondary truncate`}>
+            {anime.updated_at > 0 ? (
+              <UpdatedLabel updatedAt={anime.updated_at} now={now} />
+            ) : (
+              <span className="text-text-muted">-</span>
+            )}
+          </td>
+        );
+      case "actions":
+        return (
+          <td
+            key={column.id}
+            className={cls}
+            onClick={(e) => e.stopPropagation()}
+            onDoubleClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-end gap-1">
+              <button
+                onClick={() => stepEpisode(anime, -1)}
+                className="p-1.5 rounded bg-bg-primary hover:bg-bg-tertiary border border-border-subtle text-text-secondary"
+              >
+                <Minus className="w-3 h-3" />
+              </button>
+              <button
+                onClick={() => stepEpisode(anime, 1)}
+                className="px-2 py-1 rounded bg-accent hover:bg-accent-hover text-white font-mono font-bold text-[11px]"
+              >
+                +1
+              </button>
+            </div>
+          </td>
+        );
+    }
+  };
+
   const renderTableRow = (anime: AnimeEntry) => {
     const bar = episodeBar(anime);
     const isSelected = selectedSet.has(anime.id);
@@ -802,92 +908,13 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
         onMouseDown={handleMiddleMouseDown}
         onAuxClick={(e) => handleAuxClick(e, anime)}
         onContextMenu={(e) => handleContextMenu(e, anime)}
+        // Separator and selection marker are shadows: borders would add height the row model doesn't know
         className={`cursor-pointer transition-colors outline-none ${isSelected
-          ? "bg-accent/15 hover:bg-accent/20 shadow-[inset_3px_0_0_0_rgb(var(--accent-primary))]"
-          : "hover:bg-bg-tertiary/60"
+          ? "bg-accent/15 hover:bg-accent/20 shadow-[inset_3px_0_0_0_rgb(var(--accent-primary)),inset_0_-1px_0_0_rgb(var(--border-subtle))]"
+          : "hover:bg-bg-tertiary/60 shadow-[inset_0_-1px_0_0_rgb(var(--border-subtle))]"
           }`}
       >
-        <td className="py-2 pl-4 pr-3 flex items-center gap-3">
-          <span className="relative shrink-0">
-            <img
-              src={getOptimizedCoverUrl(anime.cover_image, "medium")}
-              alt={titleOf(anime)}
-              loading="lazy"
-              decoding="async"
-              className="w-7 h-10 object-cover rounded"
-            />
-            <AiringDot anime={anime} size="sm" onCover className="absolute -top-0.5 -left-0.5" />
-          </span>
-          <div className="min-w-0">
-            <div
-              className={`font-semibold truncate max-w-md ${isSelected ? "text-accent" : "text-text-primary"
-                }`}
-            >
-              {anime.sync_pending && (
-                <PendingSyncDot className="inline-block mr-1.5 align-middle" />
-              )}
-              {titleOf(anime)}
-            </div>
-            <div className="text-[10px] text-text-muted truncate max-w-md">
-              {anime.studios.join(", ")}
-              {anime.user_started_at ? ` • Started ${anime.user_started_at}` : ""}
-            </div>
-          </div>
-        </td>
-        <td className="py-2 px-3 font-mono text-[11px] text-text-secondary">
-          {anime.format}
-        </td>
-        <td className="py-2 px-3 w-44">
-          <div className="flex items-center justify-between gap-2 text-[11px] font-mono mb-1">
-            <span>
-              {anime.user_progress} / {episodeTotalLabel(anime)}
-            </span>
-            <ReadyBadge bar={bar} progress={anime.user_progress} className="py-0" />
-          </div>
-          <EpisodeProgressBar bar={bar} className="w-full h-2.5 rounded-full" />
-        </td>
-        <td className="py-2 px-3 font-mono text-[11px]">
-          {anime.local_episode_count > 0 ? (
-            <span className="text-text-secondary font-semibold">
-              {formatEpisodeRanges(anime.available_episodes)} on disk
-            </span>
-          ) : (
-            <span className="text-text-muted">-</span>
-          )}
-        </td>
-        <td className="py-2 px-3 font-mono font-bold text-amber-400">
-          {anime.user_score > 0 ? anime.user_score : "-"}
-        </td>
-        <td className="py-2 px-3 text-[11px] text-text-secondary">
-          {anime.season || ""} {anime.season_year || ""}
-        </td>
-        <td className="py-2 px-3 text-[11px] text-text-secondary whitespace-nowrap">
-          {anime.updated_at > 0 ? (
-            <UpdatedLabel updatedAt={anime.updated_at} now={now} />
-          ) : (
-            <span className="text-text-muted">-</span>
-          )}
-        </td>
-        <td
-          className="py-2 px-4 text-right"
-          onClick={(e) => e.stopPropagation()}
-          onDoubleClick={(e) => e.stopPropagation()}
-        >
-          <div className="flex items-center justify-end gap-1">
-            <button
-              onClick={() => stepEpisode(anime, -1)}
-              className="p-1.5 rounded bg-bg-primary hover:bg-bg-tertiary border border-border-subtle text-text-secondary"
-            >
-              <Minus className="w-3 h-3" />
-            </button>
-            <button
-              onClick={() => stepEpisode(anime, 1)}
-              className="px-2 py-1 rounded bg-accent hover:bg-accent-hover text-white font-mono font-bold text-[11px]"
-            >
-              +1
-            </button>
-          </div>
-        </td>
+        {tableColumns.columns.map((column) => renderTableCell(column, anime, bar, isSelected))}
       </tr>
     );
   };
@@ -895,7 +922,7 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
   if (viewMode === "grid" || viewMode === "compact") {
     const renderCard = viewMode === "grid" ? renderGridCard : renderCompactCard;
     return (
-      <div ref={containerRef} className="w-full">
+      <div ref={containerRef} className="w-full [overflow-anchor:none]">
         {topSpacerHeight > 0 && <div style={{ height: topSpacerHeight }} />}
         {visibleRows.map((row) =>
           row.kind === "header" ? (
@@ -928,49 +955,130 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
   }
 
   // "table" mode (Taiga Classic Dense Table View)
+  const colSpan = tableColumns.columns.length;
+  const widthOf = (column: TableColumn) =>
+    dragWidth?.id === column.id ? dragWidth.width : tableColumns.widthOf(column);
+  // Below this width the table scrolls sideways instead of squeezing the title column
+  const tableMinWidth = tableColumns.columns.reduce(
+    (sum, c) => sum + (widthOf(c) ?? c.minWidth),
+    0
+  );
+
+  /** Drag a header's right edge; the width is saved once the pointer is released */
+  const startResize = (e: React.PointerEvent<HTMLSpanElement>, column: TableColumn) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const handle = e.currentTarget;
+    handle.setPointerCapture(e.pointerId);
+    const startX = e.clientX;
+    const startWidth = tableColumns.widthOf(column) ?? column.minWidth;
+    let width = startWidth;
+    const onMove = (ev: PointerEvent) => {
+      width = clampColumnWidth(column, startWidth + ev.clientX - startX);
+      setDragWidth({ id: column.id, width });
+    };
+    const onUp = () => {
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", onUp);
+      handle.removeEventListener("pointercancel", onUp);
+      setDragWidth(null);
+      if (width !== startWidth) tableColumns.setWidth(column, width);
+    };
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onUp);
+    handle.addEventListener("pointercancel", onUp);
+  };
+
+  const openColumnMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setColumnMenuAnchor({ x: e.clientX, y: e.clientY });
+  };
+
   return (
     <div
       ref={containerRef}
-      className="bg-bg-secondary border border-border-subtle rounded-2xl overflow-hidden"
+      className="bg-bg-secondary border border-border-subtle rounded-2xl overflow-x-auto overflow-y-hidden [overflow-anchor:none]"
     >
-      <table className="w-full text-left border-collapse text-xs">
-        <thead className="bg-bg-tertiary text-text-muted uppercase text-[10px]">
+      <table
+        className="w-full table-fixed text-left border-collapse text-xs"
+        style={{ minWidth: tableMinWidth }}
+      >
+        <colgroup>
+          {tableColumns.columns.map((column) => {
+            const width = widthOf(column);
+            return <col key={column.id} style={width === null ? undefined : { width }} />;
+          })}
+        </colgroup>
+        <thead className="bg-bg-tertiary text-text-muted uppercase text-[10px]" onContextMenu={openColumnMenu}>
           <tr>
-            {TABLE_SORT_COLUMNS.map(({ label, key, className }) => {
+            {tableColumns.columns.map((column) => {
+              const { id, label, sortKey: key } = column;
               const active = key !== null && key === sortKey;
               const SortIcon = sortDir === "asc" ? ArrowUp : ArrowDown;
               return (
-                <th key={label} className={className} aria-sort={active ? (sortDir === "asc" ? "ascending" : "descending") : undefined}>
-                  {key && onSort ? (
-                    <button
-                      onClick={(e) => {
+                <th
+                  key={id}
+                  className={`relative py-2.5 whitespace-nowrap overflow-hidden ${column.className}`}
+                  aria-sort={active ? (sortDir === "asc" ? "ascending" : "descending") : undefined}
+                >
+                  <span className="inline-flex items-center gap-1 max-w-full">
+                    {key && onSort ? (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onSort(key);
+                        }}
+                        className={`inline-flex items-center gap-1 min-w-0 uppercase transition hover:text-text-primary ${active ? "text-accent" : ""}`}
+                        title={active ? "Click to reverse the order" : `Sort by ${label.toLowerCase()}`}
+                      >
+                        <span className="truncate">{label}</span>
+                        {active && <SortIcon className="w-3 h-3 shrink-0" />}
+                      </button>
+                    ) : (
+                      <span className="truncate">{label}</span>
+                    )}
+                    {id === "actions" && (
+                      <button
+                        onClick={openColumnMenu}
+                        className={`p-0.5 rounded hover:text-text-primary hover:bg-bg-secondary transition ${tableColumns.isCustomized ? "text-accent" : ""}`}
+                        title="Show or hide columns (or right-click the header)"
+                        aria-label="Columns"
+                      >
+                        <Columns3 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </span>
+                  {column.resizable && (
+                    <span
+                      role="separator"
+                      aria-orientation="vertical"
+                      title="Drag to resize (double-click to reset)"
+                      onPointerDown={(e) => startResize(e, column)}
+                      onClick={(e) => e.stopPropagation()}
+                      onDoubleClick={(e) => {
                         e.stopPropagation();
-                        onSort(key);
+                        tableColumns.setWidth(column, null);
                       }}
-                      className={`inline-flex items-center gap-1 uppercase transition hover:text-text-primary ${active ? "text-accent" : ""}`}
-                      title={active ? "Click to reverse the order" : `Sort by ${label.toLowerCase()}`}
-                    >
-                      {label}
-                      {active && <SortIcon className="w-3 h-3" />}
-                    </button>
-                  ) : (
-                    label
+                      className="absolute top-0 right-0 h-full w-1.5 cursor-col-resize touch-none hover:bg-accent/50 transition-colors"
+                    />
                   )}
                 </th>
               );
             })}
           </tr>
         </thead>
-        <tbody className="divide-y divide-border-subtle">
+        <tbody>
           {topSpacerHeight > 0 && (
             <tr style={{ height: topSpacerHeight }} aria-hidden="true">
-              <td colSpan={8} className="p-0 border-0" />
+              <td colSpan={colSpan} className="p-0 border-0" />
             </tr>
           )}
           {visibleRows.map((row) =>
             row.kind === "header" ? (
               <tr key={rowKey(row)} style={{ height: row.height }} className="bg-bg-primary/40">
-                <td colSpan={8} className="px-4 pb-2 align-bottom">
+                <td colSpan={colSpan} className="px-4 pb-2 align-bottom overflow-hidden whitespace-nowrap">
                   <GroupHeading group={row.group} />
                 </td>
               </tr>
@@ -980,11 +1088,50 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
           )}
           {bottomSpacerHeight > 0 && (
             <tr style={{ height: bottomSpacerHeight }} aria-hidden="true">
-              <td colSpan={8} className="p-0 border-0" />
+              <td colSpan={colSpan} className="p-0 border-0" />
             </tr>
           )}
         </tbody>
       </table>
+      {columnMenuAnchor && (
+        <FloatingQuickMenu anchor={columnMenuAnchor} onClose={closeColumnMenu}>
+          <div className="w-52 rounded-xl bg-bg-secondary/95 backdrop-blur-md border border-accent/40 shadow-2xl py-1.5 text-xs select-none">
+            <div className="px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-text-muted">
+              Columns
+            </div>
+            {TABLE_COLUMNS.map((column) => {
+              const shown = !tableColumns.hidden.includes(column.id);
+              return (
+                <button
+                  key={column.id}
+                  disabled={!column.hideable}
+                  onClick={() => tableColumns.toggleHidden(column)}
+                  className="w-full flex items-center gap-2 px-3 py-1.5 text-left text-text-secondary hover:bg-bg-tertiary hover:text-text-primary disabled:opacity-50 disabled:pointer-events-none transition"
+                >
+                  <span
+                    className={`w-3.5 h-3.5 rounded border flex items-center justify-center shrink-0 ${shown ? "bg-accent border-accent text-white" : "border-border-subtle"}`}
+                  >
+                    {shown && <Check className="w-2.5 h-2.5" />}
+                  </span>
+                  {column.label}
+                </button>
+              );
+            })}
+            <div className="my-1 border-t border-border-subtle" />
+            <button
+              disabled={!tableColumns.isCustomized}
+              onClick={() => {
+                tableColumns.reset();
+                closeColumnMenu();
+              }}
+              className="w-full flex items-center gap-2 px-3 py-1.5 text-left text-text-secondary hover:bg-bg-tertiary hover:text-text-primary disabled:opacity-50 disabled:pointer-events-none transition"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              Reset columns
+            </button>
+          </div>
+        </FloatingQuickMenu>
+      )}
       {contextMenuPortal}
     </div>
   );

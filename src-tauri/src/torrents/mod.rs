@@ -259,8 +259,9 @@ fn build_from_sources(
         focus_anime_id,
         hidden_statuses: &options.hidden_statuses,
     });
-    eprintln!(
-        "[torrents] board: {} releases, {} distinct titles ({} fuzzy hits), {} cards in {} ms",
+    log::info!(
+        target: "torrents",
+        "board: {} releases, {} distinct titles ({} fuzzy hits), {} cards in {} ms",
         releases.len(),
         board.match_stats.titles,
         board.match_stats.fuzzy_hits,
@@ -447,6 +448,17 @@ pub async fn download_releases(
     }
     bound.sort();
     bound.dedup();
+    for r in results.iter().filter(|r| !r.ok) {
+        log::warn!(target: "torrents", "download {} failed: {}", r.key, r.message);
+    }
+    log::info!(
+        target: "torrents",
+        "sent {}/{} releases to {} ({})",
+        results.iter().filter(|r| r.ok).count(),
+        results.len(),
+        if app.label.is_empty() { "the default handler" } else { app.label.as_str() },
+        app.source
+    );
     Ok(DownloadSummary { results, app, bound_anime_ids: bound })
 }
 

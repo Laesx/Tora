@@ -66,6 +66,7 @@ Tora/
 │   │   ├── ShortcutsModal.tsx            # Keyboard shortcuts sheet (?, sidebar keyboard button, palette command)
 │   │   ├── useCtrlHint.ts                # Ctrl held alone ~400 ms → sidebar shows Ctrl+1–9 badges
 │   │   ├── Toast.tsx                     # `useToastState` (stable `showToast`) + toast view
+│   │   ├── ErrorBoundary.tsx             # Render errors show a panel (Try again / Reload) and are logged; wraps the root and each tab
 │   │   ├── useBrowserGuards.ts           # No native right-click menu (except text fields), Ctrl+J/F/P/R… panels, Alt+←/→ or mouse back/forward
 │   │   ├── useAppUpdater.ts              # App updates (`plugin-updater` check / install / relaunch), sidebar version dot (`tora.update.seenChangelog`)
 │   │   ├── UpdatePromptModal.tsx         # "New version available" prompt (release notes, Later, Update & restart)
@@ -88,7 +89,8 @@ Tora/
 │   │   ├── useNow.ts                     # Unix-seconds tick for relative labels ("3 days ago")
 │   │   └── usePrefs.ts                   # Per-device view prefs in localStorage (guarded, laid over defaults)
 │   ├── lib/                              # Plain helpers, no React state
-│   │   ├── api.ts                        # Typed Tauri invoke wrappers (`toraApi`)
+│   │   ├── api.ts                        # Typed Tauri invoke wrappers (`toraApi`); every failure is logged (command name only)
+│   │   ├── log.ts                        # `log.error/warn/info/debug(scope, msg, cause?)`, `logError`, global error / rejection logging
 │   │   ├── types.ts                      # Shared TypeScript interfaces mirroring Rust database and detection models
 │   │   ├── theme.ts                      # Theme presets, accent swatches, `applyThemeToDocument`, progress-strip color
 │   │   ├── format.ts                     # Bytes, countdowns, "last synced", `plural`
@@ -114,6 +116,7 @@ Tora/
 │   │   │   ├── useWatchlist.ts           # Filter state, sort prefs (`tora.watchlist.prefs`), `searchIndex`, status counts, search groups, `filteredAnime`, `focusAnime`
 │   │   │   ├── sort.ts                   # `SORT_OPTIONS` (grouped keys, natural direction, unknown values last) + `watchlistComparator`
 │   │   │   ├── VirtualWatchlist.tsx      # Viewport-windowed virtual grid/list for Grid, Compact & Table modes (row model with optional status group headers, scroll-to-anime, arrow-key `navRef`, last-updated labels)
+│   │   │   ├── tableColumns.ts           # Table columns (`TABLE_COLUMNS`), per-device widths / hidden columns (`useTableColumns`, `tora.watchlist.columns`)
 │   │   │   ├── CustomListsChip.tsx       # Single "Lists ▾" chip at the end of the status ribbon (filterable popover of custom lists, "New list…" row, per-list delete)
 │   │   │   ├── NewCustomListModal.tsx    # Name prompt for creating an AniList custom list
 │   │   │   └── DeleteCustomListModal.tsx # Confirmation before deleting an AniList custom list
@@ -163,6 +166,7 @@ Tora/
     │   └── anime-relations/              # Upstream `erengy/anime-relations` (`anime-relations.txt`)
     └── src/
         ├── data_migration.rs             # Moves data from the old `app.tora.anime` identifier's folders (runs in `run()` before the builder)
+        ├── logging.rs                    # `tauri-plugin-log` setup (`%APPDATA%\Tora\logs	ora.log`, rotated), panic hook, log tail
         ├── lib.rs                        # Tauri state (`AppState`), async commands, background monitor & media poll loop, WebView2 accelerator keys off (release)
         ├── discord.rs                    # Discord Rich Presence worker thread ("Watching <anime>", cover, episode, AniList + GitHub buttons)
         ├── main.rs                       # Tauri binary entrypoint
@@ -291,6 +295,8 @@ When a filename or media player window title is parsed (`parse_filename` in `src
 - **Title language**: `AppSettings.title_language` (`romaji` | `english` | `native`, serde default `romaji`; missing titles fall back to Romaji). Show titles with `useAnimeTitle()` (or `displayTitle` in plain helpers), never `title_romaji` directly. Torrent search queries always use `title_romaji`.
 - **DOM Virtualization**:
   - Large lists (`VirtualWatchlist.tsx` for the Anime Watchlist across `"grid"`, `"compact"`, and `"table"` modes, and the Indexed Local Episodes table in `LibraryManagerView.tsx`) must remain virtualized so WebView2 only mounts visible rows (+ overscan) and releases decoded cover image bitmaps for off-screen rows.
+  - Every virtualized row must be exactly the height the row model says: no wrapping text, no borders (separators are inset shadows), and the list element carries `[overflow-anchor:none]`. Otherwise Chromium scroll anchoring and the re-measure in `useScrollViewport` feed each other and the page locks up.
+  - Table mode uses `table-fixed` with a `<colgroup>` from `useTableColumns` (`tableColumns.ts`): column widths never depend on the mounted rows. Header edges resize (double-click resets), the header's right-click / Columns button shows or hides columns; Title takes the remaining width and, like Quick Actions, can't be hidden. Widths and hidden columns are per-device prefs (`tora.watchlist.columns`), not `AppSettings`.
   - `VirtualWatchlist` virtualizes a row model (optional group header rows + rows of `cols` cards with prefix-sum offsets, `visibleRange` binary search for the first visible row); search results grouped by status go through the same path. Lists scrolling inside `<main>` measure with `useScrollViewport` (`src/hooks/virtual.ts`).
 - **Search (`src/lib/fuzzy.ts`)**:
   - The watchlist search and the command palette both use `searchAnime` over the one `searchIndex` built in `useWatchlist` (`buildAnimeSearchIndex`, rebuilt only when `animeList` changes). Don't add another filter path: an anime picked in the palette must always appear in the watchlist results for the same text.
@@ -300,6 +306,13 @@ When a filename or media player window title is parsed (`parse_filename` in `src
   - **Never** use AniList `/cover/extraLarge/` URLs (up to 6 MB RGBA per decoded bitmap) in lists, cards, or grids.
   - Use `getOptimizedCoverUrl(url, "medium")` (230x325, ~299 KB) for small thumbnails (`w-7` to `w-24`, table rows, compact cards, search selectors).
   - Use `getOptimizedCoverUrl(url, "large")` (460x650, ~1.19 MB) for poster cards and the detail drawer.
+
+### 7b. Logging & Crash Reporting
+- **Rust**: use the `log` macros with a short subsystem target (`log::warn!(target: "sync", …)`: `app`, `sync`, `anilist`, `playback`, `scrobble`, `library`, `matcher`, `torrents`, `relations`, `settings`, `discord`, `webview`), never `println!` / `eprintln!` (exception: `data_migration`, which runs before the logger exists, and benchmark output in tests). `logging::plugin` is registered first in `run()`: a file in `%APPDATA%\Tora\logs` (`tora.log`, 5 MB, last 5 kept) plus stdout in debug builds; `Debug` level in debug builds, `Info` in release, dependencies at `Warn`. A panic hook logs panics with their location.
+- **Frontend**: `log` from `src/lib/log.ts` writes to the same file (`@tauri-apps/plugin-log`, `log:default` capability) and to the console in dev; no bare `console.*`. `toraApi` logs every failed command (rate-limited per command); uncaught errors and unhandled rejections are logged from `main.tsx`; `ErrorBoundary` wraps the root and the tab content (keyed by tab) so a render error never leaves an empty window.
+- **Levels**: `error` = a bug or lost work, `warn` = a failed operation that the user may notice (sync, network, file), `info` = one line per meaningful event (startup, pull summary, scan, session start/end, scrobble, downloads), `debug` = detail (each AniList request, watcher batches).
+- **Never log** the AniList token, GraphQL variables, request bodies, notes or file contents; titles and paths are fine. Hot paths (the 2.5 s recognition poll, per-file matching, per-release evaluation) log only state changes, never every pass.
+- Settings → Diagnostics → Logs shows the folder, opens it and copies the last 200 lines (`get_recent_logs`).
 
 ### 8. Tracker Sync Service (`src-tauri/src/sync/mod.rs`)
 - **Single entry point**: Every user-state mutation (`update_anime_entry`, `batch_update_anime_entries`, `add_or_upsert_anime`, `delete_anime_entry` / `batch_delete_anime_entries`, scrobbling) and every pull (startup, manual "Sync from AniList" button, post-OAuth) goes through `TrackerSyncService`. **Never** call `TrackerPlugin::save_list_entry` / `delete_list_entry` / `fetch_user_list` or write user fields directly from commands.

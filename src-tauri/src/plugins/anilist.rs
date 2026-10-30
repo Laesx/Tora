@@ -306,11 +306,30 @@ impl AniListPlugin {
             req = req.bearer_auth(tok.trim());
         }
 
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| TrackerError::Network(format!("AniList network error: {}", e)))?;
+        let started = std::time::Instant::now();
+        let resp = req.send().await.map_err(|e| {
+            log::warn!(target: "anilist", "{}: network error: {}", operation_name(query), e);
+            TrackerError::Network(format!("AniList network error: {}", e))
+        })?;
         let status = resp.status();
+        // Never logs variables (notes, custom lists) or the token
+        if status.is_success() {
+            log::debug!(
+                target: "anilist",
+                "{}: {} in {}ms",
+                operation_name(query),
+                status.as_u16(),
+                started.elapsed().as_millis()
+            );
+        } else {
+            log::warn!(
+                target: "anilist",
+                "{}: HTTP {} in {}ms",
+                operation_name(query),
+                status.as_u16(),
+                started.elapsed().as_millis()
+            );
+        }
         let retry_after = resp
             .headers()
             .get(reqwest::header::RETRY_AFTER)
@@ -348,6 +367,13 @@ impl AniListPlugin {
         }
         Ok(id)
     }
+}
+
+/// "query MediaListCollection" / "mutation" etc.: the GraphQL document up to its variables or body.
+fn operation_name(query: &str) -> &str {
+    let head = query.trim_start();
+    let end = head.find(|c: char| c == '(' || c == '{').unwrap_or(head.len()).min(60);
+    head.get(..end).unwrap_or(head).trim_end()
 }
 
 /// Map an AniList HTTP response (status + raw body) to either the GraphQL `data` object or a typed error.

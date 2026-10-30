@@ -91,8 +91,9 @@ pub fn load_cached_relations(app_data: &Path) {
     }
     let db = RelationsDatabase::parse(&contents);
     if is_newer(&db, &embedded) {
-        eprintln!(
-            "[relations] using downloaded anime-relations ({}, {} rules)",
+        log::info!(
+            target: "relations",
+            "using downloaded anime-relations ({}, {} rules)",
             db.last_modified, db.rule_count
         );
         install_relations(db);
@@ -122,8 +123,9 @@ pub async fn update_relations(app_data: PathBuf) -> Result<Option<String>, Strin
             return Ok(None);
         }
         let date = db.last_modified.clone();
-        eprintln!(
-            "[relations] updated anime-relations {} -> {} ({} rules)",
+        log::info!(
+            target: "relations",
+            "updated anime-relations {} -> {} ({} rules)",
             current, date, db.rule_count
         );
         install_relations(db);
@@ -135,7 +137,7 @@ pub async fn update_relations(app_data: PathBuf) -> Result<Option<String>, Strin
             std::fs::rename(&tmp, app_data.join(RELATIONS_FILE))
         };
         if let Err(e) = persist() {
-            eprintln!("[relations] could not save the downloaded file: {}", e);
+            log::warn!(target: "relations", "could not save the downloaded file: {}", e);
         }
         Ok(Some(date))
     })

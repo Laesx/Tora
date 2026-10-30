@@ -43,6 +43,8 @@ import { ScheduleView } from "@/features/schedule/ScheduleView";
 import { SearchView } from "@/features/search/SearchView";
 import type { SettingsSection } from "@/features/settings/SettingsView";
 import { SettingsModal } from "@/features/settings/SettingsModal";
+import { log } from "@/lib/log";
+import { ErrorBoundary } from "@/app/ErrorBoundary";
 
 export const App: React.FC = () => {
   const mainScrollRef = useRef<HTMLElement | null>(null);
@@ -168,7 +170,7 @@ export const App: React.FC = () => {
         })
         .catch(() => { });
     } catch (e) {
-      console.error("Failed to initialize Tora:", e);
+      log.error("app", "Failed to initialize Tora", e);
     }
   };
 
@@ -499,82 +501,85 @@ export const App: React.FC = () => {
                     if (list.selectedAnimeIds.length > 0) list.setSelectedAnimeIds([]);
                   }}
                 >
-                  {activeTab === "watchlist" && (
-                    <WatchlistView
-                      watchlist={watchlist}
-                      animeList={animeList}
-                      customListNames={customLists.names}
-                      customListCounts={customLists.counts}
-                      onCreateCustomList={customLists.create}
-                      onDeleteCustomList={customLists.remove}
-                      viewMode={settings?.view_mode || "grid"}
-                      onViewModeChange={settings ? setViewMode : undefined}
-                      isSignedIn={isSignedIn}
-                      isSyncing={sync.isSyncing}
-                      lastSyncedAt={sync.lastSyncedAt}
-                      onSync={handleSyncFromAnilist}
-                      scrollContainerRef={mainScrollRef}
-                      selectedAnimeIds={list.selectedAnimeIds}
-                      onSetSelectedAnimeIds={list.setSelectedAnimeIds}
-                      quickMenuAnimeId={list.quickMenuAnimeId}
-                      onSetQuickMenuAnimeId={list.setQuickMenuAnimeId}
-                      searchInputRef={watchlistSearchRef}
-                      navRef={watchlistNavRef}
-                    />
-                  )}
+                  {/* One crashing tab shows its error; the sidebar and other tabs keep working */}
+                  <ErrorBoundary key={activeTab} scope={`tab:${activeTab}`}>
+                    {activeTab === "watchlist" && (
+                      <WatchlistView
+                        watchlist={watchlist}
+                        animeList={animeList}
+                        customListNames={customLists.names}
+                        customListCounts={customLists.counts}
+                        onCreateCustomList={customLists.create}
+                        onDeleteCustomList={customLists.remove}
+                        viewMode={settings?.view_mode || "grid"}
+                        onViewModeChange={settings ? setViewMode : undefined}
+                        isSignedIn={isSignedIn}
+                        isSyncing={sync.isSyncing}
+                        lastSyncedAt={sync.lastSyncedAt}
+                        onSync={handleSyncFromAnilist}
+                        scrollContainerRef={mainScrollRef}
+                        selectedAnimeIds={list.selectedAnimeIds}
+                        onSetSelectedAnimeIds={list.setSelectedAnimeIds}
+                        quickMenuAnimeId={list.quickMenuAnimeId}
+                        onSetQuickMenuAnimeId={list.setQuickMenuAnimeId}
+                        searchInputRef={watchlistSearchRef}
+                        navRef={watchlistNavRef}
+                      />
+                    )}
 
-                  {activeTab === "torrents" && (
-                    <TorrentsView
-                      animeList={animeList}
-                      searchRequest={torrentSearch}
-                      onRefreshAnimeList={list.refresh}
-                      onOpenSettings={() => openSettings("torrents")}
-                    />
-                  )}
+                    {activeTab === "torrents" && (
+                      <TorrentsView
+                        animeList={animeList}
+                        searchRequest={torrentSearch}
+                        onRefreshAnimeList={list.refresh}
+                        onOpenSettings={() => openSettings("torrents")}
+                      />
+                    )}
 
-                  {activeTab === "seasons" && (
-                    <SeasonsView
-                      animeList={animeList}
-                      scrollContainerRef={mainScrollRef}
-                      keyboardEnabled={!selectedAnime && !cmdOpen && !signOutModalOpen && !shortcutsOpen && !settingsOpen}
-                      onGlobalSearch={openGlobalSearch}
-                      seasonRequest={seasonRequest}
-                      onSeasonRequestHandled={() => setSeasonRequest(null)}
-                    />
-                  )}
+                    {activeTab === "seasons" && (
+                      <SeasonsView
+                        animeList={animeList}
+                        scrollContainerRef={mainScrollRef}
+                        keyboardEnabled={!selectedAnime && !cmdOpen && !signOutModalOpen && !shortcutsOpen && !settingsOpen}
+                        onGlobalSearch={openGlobalSearch}
+                        seasonRequest={seasonRequest}
+                        onSeasonRequestHandled={() => setSeasonRequest(null)}
+                      />
+                    )}
 
-                  {activeTab === "schedule" && <ScheduleView animeList={animeList} />}
+                    {activeTab === "schedule" && <ScheduleView animeList={animeList} />}
 
-                  {activeTab === "search" && (
-                    <SearchView animeList={animeList} initialQuery={globalSearchQuery} searchRequestId={globalSearchRequest} />
-                  )}
+                    {activeTab === "search" && (
+                      <SearchView animeList={animeList} initialQuery={globalSearchQuery} searchRequestId={globalSearchRequest} />
+                    )}
 
-                  {activeTab === "nowplaying" && settings && (
-                    <NowPlayingView
-                      activeSession={activeSession}
-                      animeList={animeList}
-                      settings={settings}
-                      onUpdateSettings={handleUpdateSettings}
-                      onLinkDetectedEpisode={async (animeId, aliasTitle) => {
-                        const updated = await toraApi.linkDetectedEpisodeToAnime(animeId, aliasTitle);
-                        if (updated) setActiveSession(updated);
-                        await list.refresh();
-                      }}
-                      onConfirmUpdate={() => void confirmPlaybackUpdate()}
-                      onDismissSession={dismissSession}
-                      onOpenSeason={openSeason}
-                    />
-                  )}
+                    {activeTab === "nowplaying" && settings && (
+                      <NowPlayingView
+                        activeSession={activeSession}
+                        animeList={animeList}
+                        settings={settings}
+                        onUpdateSettings={handleUpdateSettings}
+                        onLinkDetectedEpisode={async (animeId, aliasTitle) => {
+                          const updated = await toraApi.linkDetectedEpisodeToAnime(animeId, aliasTitle);
+                          if (updated) setActiveSession(updated);
+                          await list.refresh();
+                        }}
+                        onConfirmUpdate={() => void confirmPlaybackUpdate()}
+                        onDismissSession={dismissSession}
+                        onOpenSeason={openSeason}
+                      />
+                    )}
 
-                  {activeTab === "history" && <HistoryView animeList={animeList} refreshKey={statsKey} />}
+                    {activeTab === "history" && <HistoryView animeList={animeList} refreshKey={statsKey} />}
 
-                  {activeTab === "stats" && (
-                    <StatsView
-                      animeList={animeList}
-                      refreshKey={statsKey}
-                      onOpenStatus={(status) => showInWatchlist(() => watchlist.showStatus(status))}
-                    />
-                  )}
+                    {activeTab === "stats" && (
+                      <StatsView
+                        animeList={animeList}
+                        refreshKey={statsKey}
+                        onOpenStatus={(status) => showInWatchlist(() => watchlist.showStatus(status))}
+                      />
+                    )}
+                  </ErrorBoundary>
                 </main>
               </div>
 

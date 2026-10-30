@@ -1234,8 +1234,9 @@ impl Database {
             tx.commit().map_err(|e| e.to_string())?;
         }
 
-        eprintln!(
-            "[matcher] rematch: {} files, {} updated in {}ms",
+        log::info!(
+            target: "matcher",
+            "rematch: {} files, {} updated in {}ms",
             episodes.len(),
             updates.len(),
             start.elapsed().as_millis()
@@ -1700,8 +1701,21 @@ impl LibraryMonitorHandle {
                         while let Ok(more) = rx.try_recv() {
                             batch.extend(more);
                         }
-                        if let Ok(Some(summary)) = db.handle_directory_change_events(&batch) {
-                            on_change(summary);
+                        match db.handle_directory_change_events(&batch) {
+                            Ok(Some(summary)) => {
+                                log::debug!(
+                                    target: "library",
+                                    "watcher: {} events, {} parsed, {} removed, {} entries changed in {}ms",
+                                    batch.len(),
+                                    summary.newly_parsed,
+                                    summary.removed_files,
+                                    summary.changed_anime_ids.len(),
+                                    summary.elapsed_ms
+                                );
+                                on_change(summary);
+                            }
+                            Ok(None) => {}
+                            Err(e) => log::warn!(target: "library", "watcher batch of {} events failed: {}", batch.len(), e),
                         }
                     }
                 });

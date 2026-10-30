@@ -7,6 +7,7 @@ import { useAnimeTitle } from "@/contexts/titles";
 import { AiringDot } from "@/components/AiringDot";
 import { useAnimeActions } from "@/contexts/animeActions";
 
+import { log } from "@/lib/log";
 interface HistoryViewProps {
   animeList: AnimeEntry[];
   /** Changes whenever a new history row may exist (scrobble / list update) */
@@ -56,7 +57,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ animeList, refreshKey 
       setRows((prev) => (offset === 0 ? page : [...prev, ...page]));
       setHasMore(page.length === limit);
     } catch (e) {
-      console.error(e);
+      log.error("history", "Loading watch history failed", e);
     } finally {
       setLoading(false);
     }

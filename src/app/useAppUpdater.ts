@@ -4,6 +4,7 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { check, Update } from "@tauri-apps/plugin-updater";
 import type { ToastType } from "@/contexts/toast";
 import { toraApi } from "@/lib/api";
+import { log, logError } from "@/lib/log";
 
 /** The version whose changelog the user last opened (a different running version = unseen changelog) */
 const SEEN_CHANGELOG_KEY = "tora.update.seenChangelog";
@@ -59,7 +60,7 @@ export function useAppUpdater(
         if (seen === null) writeSeenChangelog(v);
         else setUnseenChangelog(seen !== v);
       })
-      .catch(console.error);
+      .catch(logError("updater", "Reading the app version failed"));
   }, []);
 
   /** Manual checks also refresh anime relations and report "up to date" / errors; silent ones only prompt. */
@@ -70,10 +71,11 @@ export function useAppUpdater(
       setChecking(true);
       try {
         // A newer relations file announces itself through the `relations-updated` event.
-        const relations = manual ? toraApi.checkRelationsUpdate().catch(console.error) : null;
+        const relations = manual ? toraApi.checkRelationsUpdate().catch(logError("updater", "Relations update check failed")) : null;
         const update = await check();
         await relations;
         if (update) {
+          log.info("updater", `Update ${update.version} available`);
           setAvailable(update);
           setPromptOpen(true);
         } else if (manual) {
@@ -81,7 +83,7 @@ export function useAppUpdater(
           showToast(`Tora v${current} is up to date`, "success");
         }
       } catch (e) {
-        console.error("Update check failed:", e);
+        log.error("updater", "Update check failed", e);
         if (manual) showToast(`Couldn't check for updates: ${String(e)}`, "error");
       } finally {
         checkingRef.current = false;
@@ -119,7 +121,7 @@ export function useAppUpdater(
       });
       await relaunch();
     } catch (e) {
-      console.error("Update install failed:", e);
+      log.error("updater", "Update install failed", e);
       setProgress(null);
       showToast(`Update failed: ${String(e)}`, "error");
     }

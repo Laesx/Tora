@@ -17,6 +17,7 @@ import { AiringDot } from "@/components/AiringDot";
 import { useAnimeTitle } from "@/contexts/titles";
 import { useToast } from "@/contexts/toast";
 import { useAnimeActions } from "@/contexts/animeActions";
+import { log } from "@/lib/log";
 
 interface NowPlayingDashboardProps {
   animeList: AnimeEntry[];
@@ -52,7 +53,7 @@ export const NowPlayingDashboard: React.FC<NowPlayingDashboardProps> = ({
     toraApi
       .getWatchStats()
       .then((s) => !cancelled && setStats(s))
-      .catch((e) => console.error("Failed to load watch stats:", e));
+      .catch((e) => log.error("nowplaying", "Failed to load watch stats", e));
     return () => {
       cancelled = true;
     };

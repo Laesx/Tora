@@ -78,7 +78,7 @@ impl DiscordPresence {
             .name("discord-presence".into())
             .spawn(move || run_worker(rx))
         {
-            eprintln!("[discord] failed to start the presence thread: {}", e);
+            log::warn!(target: "discord", "failed to start the presence thread: {}", e);
         }
         Self {
             tx,
@@ -211,12 +211,12 @@ fn run_worker(rx: mpsc::Receiver<Option<PresenceInfo>>) {
         match result {
             Ok((_, reply)) => {
                 if reply["evt"] == "ERROR" {
-                    eprintln!("[discord] activity rejected: {}", reply["data"]);
+                    log::warn!(target: "discord", "activity rejected: {}", reply["data"]);
                 }
                 shown = wanted.clone();
             }
             Err(e) => {
-                eprintln!("[discord] presence update failed: {}", e);
+                log::warn!(target: "discord", "presence update failed: {}", e);
                 let _ = c.close();
                 client = None;
                 shown = None;

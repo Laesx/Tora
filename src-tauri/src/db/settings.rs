@@ -84,7 +84,7 @@ pub(crate) fn settings_from_json(json: &str) -> Option<AppSettings> {
         let Some(slot) = merged.get_mut(&key) else { continue };
         let previous = std::mem::replace(slot, value);
         if serde_json::from_value::<AppSettings>(Value::Object(merged.clone())).is_err() {
-            eprintln!("[settings] stored field `{}` is invalid; using its default", key);
+            log::warn!(target: "settings", "stored field `{}` is invalid; using its default", key);
             merged.insert(key, previous);
         }
     }
@@ -191,7 +191,7 @@ impl Database {
     /// so the frontend can offer a backup restore.
     fn settings_or_recovered(&self, json: &str) -> AppSettings {
         settings_from_json(json).unwrap_or_else(|| {
-            eprintln!("[settings] stored settings are not valid JSON; using defaults until restored");
+            log::warn!(target: "settings", "stored settings are not valid JSON; using defaults until restored");
             AppSettings {
                 settings_recovered: true,
                 ..AppSettings::default()
@@ -228,7 +228,7 @@ impl Database {
         Ok(raw.and_then(|json| match serde_json::from_str(&json) {
             Ok(v) => Some(v),
             Err(e) => {
-                eprintln!("[settings] stored `{}` is unreadable: {}", key, e);
+                log::warn!(target: "settings", "stored `{}` is unreadable: {}", key, e);
                 None
             }
         }))

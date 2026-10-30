@@ -3,6 +3,7 @@ import { ArchiveRestore, History, Save } from "lucide-react";
 import { AppSettings, SettingsBackupInfo } from "@/lib/types";
 import { toraApi } from "@/lib/api";
 import { useToast } from "@/contexts/toast";
+import { logError } from "@/lib/log";
 
 /** Settings → About: rolling settings snapshots in `app_data\backups` with restore. */
 export const SettingsBackupsPanel: React.FC<{
@@ -14,7 +15,7 @@ export const SettingsBackupsPanel: React.FC<{
   const [confirm, setConfirm] = useState<string | null>(null);
 
   useEffect(() => {
-    toraApi.listSettingsBackups().then(setBackups).catch(console.error);
+    toraApi.listSettingsBackups().then(setBackups).catch(logError("settings", "Loading settings backups failed"));
   }, []);
 
   const backupNow = async () => {

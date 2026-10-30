@@ -3302,8 +3302,9 @@ impl Database {
                 (generation, index)
             }
         };
-        eprintln!(
-            "[matcher] built index: {} titles, {} norms in {}ms",
+        log::info!(
+            target: "matcher",
+            "built index: {} titles, {} norms in {}ms",
             index.by_id.len(),
             index.norms_by_season.values().map(Vec::len).sum::<usize>(),
             start.elapsed().as_millis()

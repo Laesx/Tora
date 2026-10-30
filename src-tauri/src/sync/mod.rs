@@ -113,6 +113,7 @@ impl RateLimiter {
         match op().await {
             Err(TrackerError::RateLimited { retry_after_secs }) => {
                 let wait = retry_after_secs.clamp(1, MAX_RETRY_AFTER_SECS);
+                log::warn!(target: "anilist", "rate limited, retrying in {}s", wait);
                 tokio::time::sleep(Duration::from_secs(wait)).await;
                 self.wait_turn().await;
                 op().await
@@ -614,6 +615,15 @@ impl TrackerSyncService {
         err: &TrackerError,
         operation: &str,
     ) {
+        log::warn!(
+            target: "sync",
+            "{} of {:?} (anime {:?}, media {:?}) failed: {}",
+            operation,
+            title,
+            anime_id,
+            media_id,
+            err
+        );
         self.emit(
             EVENT_SYNC_ERROR,
             json!({
@@ -1171,6 +1181,12 @@ impl TrackerSyncService {
             .await?;
 
         if outcome.account_switched {
+            log::info!(
+                target: "sync",
+                "signed in as a different AniList account ({:?} -> {}): local list reset",
+                outcome.previous_user_id,
+                profile.user_id
+            );
             if let Ok(mut last) = self.last_synced_at.lock() {
                 *last = None;
             }
@@ -1295,6 +1311,7 @@ impl TrackerSyncService {
                 auth_reported,
             }) => {
                 let message = error.to_string();
+                log::warn!(target: "sync", "pull({}) failed: {}", reason, message);
                 self.emit(
                     EVENT_SYNC_FAILED,
                     json!({ "reason": reason, "message": message }),
@@ -1423,8 +1440,9 @@ impl TrackerSyncService {
                 {
                     Ok(mut part) => details.append(&mut part),
                     Err(e) => {
-                        eprintln!(
-                            "[sync] fetching details for {} new entries failed: {}",
+                        log::warn!(
+                            target: "sync",
+                            "fetching details for {} new entries failed: {}",
                             stats.new_ids.len(),
                             e
                         );
@@ -1440,7 +1458,7 @@ impl TrackerSyncService {
                     .await
                 {
                     Ok(n) => details_written = n,
-                    Err(e) => eprintln!("[sync] writing details for new entries failed: {}", e),
+                    Err(e) => log::warn!(target: "sync", "writing details for new entries failed: {}", e),
                 }
             }
         }
@@ -1460,8 +1478,9 @@ impl TrackerSyncService {
         self.sync_active_session(&changed);
         self.unmatch_active_session(&stats.removed_ids);
 
-        eprintln!(
-            "[sync] pull({}): flush-del {}ms ({}/{}) · flush-push {}ms ({}/{}) · fetch {}ms ({} entries) · merge {}ms (+{} ~{} -{}, {} kept, {} rematch) · details {}ms ({}/{}) · delta {}ms ({}) · total {}ms",
+        log::info!(
+            target: "sync",
+            "pull({}): flush-del {}ms ({}/{}) · flush-push {}ms ({}/{}) · fetch {}ms ({} entries) · merge {}ms (+{} ~{} -{}, {} kept, {} rematch) · details {}ms ({}/{}) · delta {}ms ({}) · total {}ms",
             reason,
             flush_del_ms,
             deletions.succeeded,
@@ -1517,8 +1536,9 @@ impl TrackerSyncService {
                 tokio::task::spawn_blocking(move || db.match_unmatched_episodes_for_ids(&targets)).await;
             match result {
                 Ok(Ok(matched)) => {
-                    eprintln!(
-                        "[sync] matched {} local files for {} entries in {}ms",
+                    log::info!(
+                        target: "sync",
+                        "matched {} local files for {} entries in {}ms",
                         matched,
                         count,
                         started.elapsed().as_millis()
@@ -1536,8 +1556,8 @@ impl TrackerSyncService {
                         );
                     }
                 }
-                Ok(Err(e)) => eprintln!("[sync] matching local files after sync failed: {}", e),
-                Err(e) => eprintln!("[sync] matching task panicked: {}", e),
+                Ok(Err(e)) => log::warn!(target: "sync", "matching local files after sync failed: {}", e),
+                Err(e) => log::error!(target: "sync", "matching task panicked: {}", e),
             }
         });
     }
@@ -1658,8 +1678,9 @@ impl TrackerSyncService {
             }
             page += 1;
         }
-        eprintln!(
-            "[seasons] fetched {} {}: {} media in {} page(s), {}ms",
+        log::info!(
+            target: "seasons",
+            "fetched {} {}: {} media in {} page(s), {}ms",
             season,
             year,
             items.len(),
@@ -1789,8 +1810,9 @@ impl TrackerSyncService {
             page += 1;
         }
         items.sort_by_key(|it| it.airing_at);
-        eprintln!(
-            "[schedule] fetched {}..{}: {} airings in {} page(s), {}ms",
+        log::info!(
+            target: "schedule",
+            "fetched {}..{}: {} airings in {} page(s), {}ms",
             from,
             to,
             items.len(),

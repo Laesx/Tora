@@ -13,6 +13,7 @@ import {
   TrackerSyncFailedEvent,
   TrackerSyncStartedEvent,
 } from "@/lib/types";
+import { log } from "@/lib/log";
 
 /** Handlers for every backend event; always called with the latest render's closures */
 export interface AppEventHandlers {
@@ -68,7 +69,7 @@ export function useAppEvents(handlers: AppEventHandlers) {
           if (disposed) r.value();
           else unlisteners.push(r.value);
         } else {
-          console.error("Failed to register Tauri listener:", r.reason);
+          log.error("events", "Failed to register Tauri listener", r.reason);
         }
       }
       if (!disposed) ref.current.ready();

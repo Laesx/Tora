@@ -574,7 +574,7 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
         <div
           ref={gridRef}
           // Dim only if the switch takes a moment (uncached season); cached ones swap instantly
-          className={`relative ${switching ? "opacity-50 pointer-events-none transition-opacity delay-200" : ""}`}
+          className={`relative [overflow-anchor:none] ${switching ? "opacity-50 pointer-events-none transition-opacity delay-200" : ""}`}
           style={{ height: result ? rows.totalHeight : 0 }}
         >
           {result &&

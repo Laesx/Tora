@@ -521,6 +521,8 @@ export interface AppInfo {
   data_dir: string;
   db_path: string;
   db_size_bytes: number;
+  /** Folder of tora.log and its rotated copies */
+  log_dir: string;
 }
 
 export interface TrackerPluginDescriptor {

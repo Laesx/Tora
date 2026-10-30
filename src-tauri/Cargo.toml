@@ -34,6 +34,8 @@ urlencoding = "2.1"
 discord-rich-presence = "1.1"
 # Same folders Tauri resolves app data from (legacy identifier migration)
 dirs = "7"
+log = "0.4"
+tauri-plugin-log = "2"
 
 [target.'cfg(windows)'.dependencies]
 # Same versions Tauri's WebView2 runtime uses (browser accelerator keys are switched off in setup)

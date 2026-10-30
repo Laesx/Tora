@@ -3,6 +3,7 @@ pub mod db;
 pub mod detection;
 pub mod discord;
 pub mod library;
+pub mod logging;
 pub mod plugins;
 pub mod sync;
 pub mod torrents;
@@ -329,17 +330,35 @@ async fn get_drive_summaries(state: State<'_, AppState>) -> Result<Vec<DriveStor
 #[tauri::command]
 async fn scan_library(state: State<'_, AppState>) -> Result<ScanSummary, String> {
     let db = state.db.clone();
-    tokio::task::spawn_blocking(move || db.scan_all_library_folders())
+    let summary = tokio::task::spawn_blocking(move || db.scan_all_library_folders())
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())??;
+    log_scan("full scan", &summary);
+    Ok(summary)
+}
+
+fn log_scan(kind: &str, s: &ScanSummary) {
+    log::info!(
+        target: "library",
+        "{}: {} folders, {} files ({} parsed, {} removed, {} matched) in {}ms",
+        kind,
+        s.folders_scanned,
+        s.total_files_indexed,
+        s.newly_parsed,
+        s.removed_files,
+        s.matched_files,
+        s.elapsed_ms
+    );
 }
 
 #[tauri::command]
 async fn quick_scan_library(state: State<'_, AppState>) -> Result<ScanSummary, String> {
     let db = state.db.clone();
-    tokio::task::spawn_blocking(move || db.quick_scan_library_folders())
+    let summary = tokio::task::spawn_blocking(move || db.quick_scan_library_folders())
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())??;
+    log_scan("quick scan", &summary);
+    Ok(summary)
 }
 
 #[tauri::command]
@@ -616,11 +635,12 @@ async fn run_scrobble(state: &AppState, pending: PendingScrobble) -> Result<bool
     let history_id = tokio::task::spawn_blocking(move || {
         let entry = db.get_anime_entry_by_id(anime_id)?;
         if episode <= entry.user_progress {
+            log::debug!(target: "scrobble", "{} episode {} already watched, skipped", title, episode);
             return Ok::<_, String>(None);
         }
         let history = db
             .record_watch_history(Some(anime_id), &title, episode, &player, &file, false)
-            .map_err(|e| eprintln!("[scrobble] failed to record watch history: {}", e))
+            .map_err(|e| log::warn!(target: "scrobble", "failed to record watch history: {}", e))
             .ok();
         Ok(Some(history))
     })
@@ -641,6 +661,7 @@ async fn run_scrobble(state: &AppState, pending: PendingScrobble) -> Result<bool
         .apply_local_update_with_history(change, history_id)
         .await
         .map_err(|e| format!("failed to update anime {}: {}", anime_id, e))?;
+    log::info!(target: "scrobble", "anime {} updated to episode {}", anime_id, episode);
     Ok(true)
 }
 
@@ -648,6 +669,9 @@ async fn run_scrobble(state: &AppState, pending: PendingScrobble) -> Result<bool
 /// update held for the player to close still runs (`playback-scrobbled` tells the frontend); an
 /// update offered in manual mode is dropped with the session.
 async fn end_session(app: &tauri::AppHandle, state: &AppState, ended: Option<DetectedMediaSession>) {
+    if let Some(s) = &ended {
+        log::info!(target: "playback", "session ended: {:?} in {}", s.cleaned_media_title, s.player_name);
+    }
     let Some(mut session) = ended.filter(|s| s.waiting_for_close && !s.auto_synced) else {
         return;
     };
@@ -661,7 +685,7 @@ async fn end_session(app: &tauri::AppHandle, state: &AppState, ended: Option<Det
             let _ = app.emit("playback-scrobbled", &session);
         }
         Ok(false) => {}
-        Err(e) => eprintln!("[scrobble] {}", e),
+        Err(e) => log::warn!(target: "scrobble", "update failed: {}", e),
     }
 }
 
@@ -830,6 +854,23 @@ async fn poll_session(
             new_session.advance_update(&policy, focused, now);
         }
 
+        match new_session.matched_anime_id {
+            Some(id) => log::info!(
+                target: "playback",
+                "session started: {:?} in {} -> anime {} episode {:?}",
+                new_session.cleaned_media_title,
+                new_session.player_name,
+                id,
+                new_session.parsed.episode_number
+            ),
+            None => log::info!(
+                target: "playback",
+                "session started: {:?} in {} -> no match (title {:?})",
+                new_session.cleaned_media_title,
+                new_session.player_name,
+                new_session.parsed.anime_title
+            ),
+        }
         *state.active_session.lock().map_err(|e| e.to_string())? = Some(new_session.clone());
         return Ok(Some(new_session));
     };
@@ -879,6 +920,7 @@ async fn poll_session(
                 existing.matched_current_progress = Some(prog);
                 existing.matched_total_episodes = total;
                 existing.restart_countdown(now);
+                log::info!(target: "playback", "{:?} now matches anime {}", existing.cleaned_media_title, id);
             }
         }
 
@@ -912,7 +954,7 @@ async fn poll_session(
         return Ok(Some(session_now));
     };
     if let Err(e) = run_scrobble(state, pending).await {
-        eprintln!("[scrobble] {}", e);
+        log::warn!(target: "scrobble", "update failed: {}", e);
     }
 
     let current = state.active_session.lock().map_err(|e| e.to_string())?.clone();
@@ -1039,12 +1081,15 @@ struct AppInfo {
     db_path: String,
     /// Database file plus its WAL.
     db_size_bytes: u64,
+    /// Folder of `tora.log` and its rotated copies.
+    log_dir: String,
 }
 
 /// Where Tora keeps its data (Settings → About).
 #[tauri::command]
 async fn get_app_info(app: tauri::AppHandle) -> Result<AppInfo, String> {
     let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let log_dir = logging::log_dir(&app.config().identifier);
     tokio::task::spawn_blocking(move || {
         let db_path = data_dir.join("tora_library.db");
         let size = |p: std::path::PathBuf| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
@@ -1052,10 +1097,20 @@ async fn get_app_info(app: tauri::AppHandle) -> Result<AppInfo, String> {
             data_dir: data_dir.to_string_lossy().into_owned(),
             db_path: db_path.to_string_lossy().into_owned(),
             db_size_bytes: size(db_path.clone()) + size(data_dir.join("tora_library.db-wal")),
+            log_dir: log_dir.to_string_lossy().into_owned(),
         })
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// The last `lines` lines of the log file (Settings → Diagnostics, "Copy recent log").
+#[tauri::command]
+async fn get_recent_logs(app: tauri::AppHandle, lines: usize) -> Result<String, String> {
+    let dir = logging::log_dir(&app.config().identifier);
+    tokio::task::spawn_blocking(move || logging::tail(&dir, lines.min(5000)))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// Tags, studios, rankings etc. of one media. Served from `media_metadata`; fetched once if missing.
@@ -1286,7 +1341,7 @@ fn ensure_library_folder(db: &Database, monitor: &LibraryMonitorHandle, folder: 
             let _ = db.quick_scan_library_folders();
             monitor.reload();
         }
-        Err(e) => eprintln!("[torrents] couldn't add the download folder to the library: {}", e),
+        Err(e) => log::warn!(target: "torrents", "couldn't add the download folder to the library: {}", e),
     }
 }
 
@@ -1678,21 +1733,25 @@ fn disable_browser_accelerator_keys(app: &tauri::App) {
             }
         };
         if let Err(e) = apply() {
-            eprintln!("[webview] failed to disable browser accelerator keys: {}", e);
+            log::warn!(target: "webview", "failed to disable browser accelerator keys: {}", e);
         }
     });
     if let Err(e) = result {
-        eprintln!("[webview] with_webview failed: {}", e);
+        log::warn!(target: "webview", "with_webview failed: {}", e);
     }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let context = tauri::generate_context!();
+    let log_dir = logging::log_dir(&context.config().identifier);
+    logging::install_panic_hook();
     // Before the builder: Tauri creates the main window (and its WebView2 profile) before `setup`
     data_migration::migrate_legacy_data_dirs(&context.config().identifier);
 
     tauri::Builder::default()
+        // First, so every other plugin and `setup` can log
+        .plugin(logging::plugin(log_dir))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -1702,11 +1761,18 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .unwrap_or_else(|_| std::path::PathBuf::from("."));
+            log::info!(
+                target: "app",
+                "Tora {} starting ({} build), data in {}",
+                app.package_info().version,
+                if cfg!(debug_assertions) { "debug" } else { "release" },
+                app_data.display()
+            );
             let db_path = app_data.join("tora_library.db");
             let db = Arc::new(Database::open(&db_path).expect("Failed to initialize Tora SQLite DB"));
             // Snapshot the settings as they were at startup (a known-good restore point).
             if let Err(e) = db.backup_settings_if_changed(None) {
-                eprintln!("[settings] startup backup failed: {}", e);
+                log::warn!(target: "settings", "startup backup failed: {}", e);
             }
             // A newer anime-relations downloaded on a previous run, before anything parses filenames.
             updates::load_cached_relations(&app_data);
@@ -1780,7 +1846,7 @@ pub fn run() {
                 let relations_handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     if let Err(e) = run_relations_update(&relations_handle).await {
-                        eprintln!("[relations] startup update check failed: {}", e);
+                        log::warn!(target: "relations", "startup update check failed: {}", e);
                     }
                 });
             }
@@ -1827,6 +1893,7 @@ pub fn run() {
             get_watch_stats,
             get_stats,
             get_app_info,
+            get_recent_logs,
             check_relations_update,
             get_relations_info,
             get_changelog,

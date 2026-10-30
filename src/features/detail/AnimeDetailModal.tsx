@@ -35,6 +35,7 @@ import { seasonName } from "@/lib/seasons";
 import { AiringDot } from "@/components/AiringDot";
 import { useToast } from "@/contexts/toast";
 import { useAnimeActions } from "@/contexts/animeActions";
+import { log } from "@/lib/log";
 
 interface AnimeDetailModalProps {
   anime: AnimeEntry;
@@ -145,7 +146,7 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
       .then((m) => {
         if (!cancelled) setStudioRefs(m?.metadata.studios.filter((s) => s.is_animation_studio) ?? []);
       })
-      .catch((e) => console.error("Failed to load media metadata:", e));
+      .catch((e) => log.error("detail", "Failed to load media metadata", e));
     return () => {
       cancelled = true;
     };
@@ -165,7 +166,7 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
       const files = await toraApi.getLocalEpisodes(animeId);
       setLocalFiles(files);
     } catch (e) {
-      console.error("Failed to load local episodes for anime:", e);
+      log.error("detail", "Failed to load local episodes for anime", e);
     }
   };
 

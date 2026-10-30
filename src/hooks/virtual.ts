@@ -38,6 +38,10 @@ const FALLBACK: ScrollViewport = { width: 1080, top: 0, scrollTop: 0, viewportHe
  * Measures a virtualized list that scrolls inside `scrollRef` (e.g. `<main>`). Re-measured after
  * every render (content above the list can move it without resizing it; unchanged values bail
  * out), when either element resizes, and on scroll (rAF-throttled).
+ *
+ * Give the list element `[overflow-anchor:none]`: Chromium's scroll anchoring would otherwise move
+ * `scrollTop` whenever the spacers change, and that scroll re-renders the window again (a loop).
+ * Every row must also be exactly the height the row model says (no wrapping, no borders).
  */
 export function useScrollViewport(
   listRef: RefObject<HTMLElement | null>,

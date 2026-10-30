@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke, InvokeArgs } from "@tauri-apps/api/core";
 import {
   AiringScheduleResult,
   AnimeEntry,
@@ -40,6 +40,27 @@ import {
   WatchHistoryEntry,
   WatchStats,
 } from "./types";
+import { errorText, log } from "./log";
+
+/** The last failure logged per command, so a repeating poll failure is logged once a minute */
+const lastFailure = new Map<string, { text: string; at: number }>();
+
+/**
+ * Every command goes through here. Failures are logged with the command name only (never the
+ * arguments: tokens, notes) and rethrown unchanged.
+ */
+function invoke<T>(cmd: string, args?: InvokeArgs): Promise<T> {
+  return tauriInvoke<T>(cmd, args).catch((e: unknown) => {
+    const text = errorText(e);
+    const now = Date.now();
+    const last = lastFailure.get(cmd);
+    if (!last || last.text !== text || now - last.at > 60_000) {
+      lastFailure.set(cmd, { text, at: now });
+      log.warn("api", `${cmd} failed`, e);
+    }
+    throw e;
+  });
+}
 
 export const toraApi = {
   getAnimeList: () => invoke<AnimeEntry[]>("get_anime_list"),
@@ -184,6 +205,9 @@ export const toraApi = {
   getStats: () => invoke<ListStats>("get_stats"),
 
   getAppInfo: () => invoke<AppInfo>("get_app_info"),
+
+  /** The last `lines` lines of tora.log */
+  getRecentLogs: (lines: number) => invoke<string>("get_recent_logs", { lines }),
 
   /** Download anime-relations from GitHub; the new `last_modified` when it was newer (also emits `relations-updated`). */
   checkRelationsUpdate: () => invoke<string | null>("check_relations_update"),

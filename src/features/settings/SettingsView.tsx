@@ -15,6 +15,7 @@ import {
   FlaskConical,
   RefreshCw,
   ScrollText,
+  Copy,
 } from "lucide-react";
 import {
   AnimeEntry,
@@ -32,6 +33,7 @@ import { AnitomyParserPanel } from "./AnitomyParserPanel";
 import { TorrentSettingsSection } from "@/features/torrents/TorrentSettings";
 import { SettingsBackupsPanel } from "./SettingsBackups";
 import { useToast } from "@/contexts/toast";
+import { logError } from "@/lib/log";
 
 export type SettingsSection =
   | "appearance"
@@ -111,7 +113,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   }, [sectionRequest]);
 
   useEffect(() => {
-    toraApi.getTrackerPlugins().then(setPlugins).catch(console.error);
+    toraApi.getTrackerPlugins().then(setPlugins).catch(logError("settings", "Loading tracker plugins failed"));
   }, []);
 
   const handleSelectTheme = async (themeId: string, defaultAccent?: string) => {
@@ -511,6 +513,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
         {section === "diagnostics" && (
           <>
+            <LogsPanel />
             <AnitomyParserPanel />
           </>
         )}
@@ -533,6 +536,57 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   );
 };
 
+/** Settings → Diagnostics: where the log file is, open it, copy its end for a bug report. */
+const LogsPanel: React.FC = () => {
+  const showToast = useToast();
+  const [info, setInfo] = useState<AppInfo | null>(null);
+
+  useEffect(() => {
+    toraApi.getAppInfo().then(setInfo).catch(logError("settings", "Loading app info failed"));
+  }, []);
+
+  const copyRecent = async () => {
+    try {
+      const text = await toraApi.getRecentLogs(200);
+      await navigator.clipboard.writeText(text);
+      showToast("Copied the last 200 log lines", "success");
+    } catch (e) {
+      showToast(String(e), "error");
+    }
+  };
+
+  return (
+    <div className="bg-bg-secondary border border-border-subtle rounded-2xl p-5 space-y-3">
+      <h3 className="text-sm font-bold text-text-primary">Logs</h3>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-[11px] text-text-muted">Log folder (tora.log, last 5 kept, 5 MB each)</div>
+          <div className="text-xs font-mono text-text-primary break-all">{info?.log_dir ?? "..."}</div>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            onClick={copyRecent}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-bg-tertiary hover:bg-bg-elevated border border-border-subtle text-text-primary text-xs font-semibold transition"
+          >
+            <Copy className="w-3.5 h-3.5" />
+            Copy recent log
+          </button>
+          <button
+            onClick={() =>
+              info && toraApi.revealInExplorer(info.log_dir).catch((e) => showToast(String(e), "error"))
+            }
+            disabled={!info}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-bg-tertiary hover:bg-bg-elevated border border-border-subtle text-text-primary text-xs font-semibold transition disabled:opacity-50"
+          >
+            <FolderOpen className="w-3.5 h-3.5" />
+            Open log folder
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const AboutSection: React.FC<{
   settings: AppSettings;
   onUpdateSettings: (next: AppSettings) => Promise<void>;
@@ -547,12 +601,13 @@ const AboutSection: React.FC<{
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [relations, setRelations] = useState<RelationsInfo | null>(null);
 
-  const loadRelations = () => toraApi.getRelationsInfo().then(setRelations).catch(console.error);
+  const loadRelations = () =>
+    toraApi.getRelationsInfo().then(setRelations).catch(logError("settings", "Loading relations info failed"));
 
   useEffect(() => {
-    getVersion().then(setVersion).catch(console.error);
-    getTauriVersion().then(setTauriVersion).catch(console.error);
-    toraApi.getAppInfo().then(setInfo).catch(console.error);
+    getVersion().then(setVersion).catch(logError("settings", "Reading the app version failed"));
+    getTauriVersion().then(setTauriVersion).catch(logError("settings", "Reading the Tauri version failed"));
+    toraApi.getAppInfo().then(setInfo).catch(logError("settings", "Loading app info failed"));
     void loadRelations();
   }, []);
 

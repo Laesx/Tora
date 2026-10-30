@@ -3,6 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { AnimeEntry } from "@/lib/types";
 import type { NavDirection } from "@/features/watchlist/VirtualWatchlist";
 import { NAV_ITEMS, NavTab, SETTINGS_SHORTCUT_DIGIT } from "./nav";
+import { log } from "@/lib/log";
 
 interface ShortcutState {
   onWatchlist: boolean;
@@ -68,7 +69,7 @@ async function toggleFullscreen() {
   try {
     await win.setFullscreen(!(await win.isFullscreen()));
   } catch (err) {
-    console.error("Fullscreen toggle failed:", err);
+    log.error("shortcuts", "Fullscreen toggle failed", err);
   }
 }
 

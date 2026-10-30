@@ -2,6 +2,7 @@ import { useCallback, useMemo, useState } from "react";
 import { AnimeEntry, CustomListChange, CustomListMember, CustomListsState } from "@/lib/types";
 import { toraApi } from "@/lib/api";
 import { applyCustomListChangeLocally, CustomListsApi, EMPTY_CUSTOM_LISTS } from "@/contexts/customLists";
+import { log } from "@/lib/log";
 
 /**
  * AniList custom lists, kept beside the list (never in AnimeEntry, so search and matching don't
@@ -14,7 +15,7 @@ export function useCustomListsState(animeList: AnimeEntry[]) {
     toraApi
       .getCustomLists()
       .then(setState)
-      .catch((e) => console.error("Failed to load custom lists:", e));
+      .catch((e) => log.error("custom-lists", "Failed to load custom lists", e));
   }, []);
 
   const clear = useCallback(() => setState(EMPTY_CUSTOM_LISTS), []);

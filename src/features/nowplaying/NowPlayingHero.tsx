@@ -45,6 +45,7 @@ import { AiringDot } from "@/components/AiringDot";
 import { useToast } from "@/contexts/toast";
 import { useAnimeActions } from "@/contexts/animeActions";
 import { UpdateCountdown } from "@/components/UpdateCountdown";
+import { log } from "@/lib/log";
 
 interface NowPlayingHeroProps {
   session: DetectedMediaSession;
@@ -98,7 +99,7 @@ export const NowPlayingHero: React.FC<NowPlayingHeroProps> = ({
     toraApi
       .getMediaMetadata(mediaId)
       .then((m) => !cancelled && setMedia(m))
-      .catch((e) => console.error("Failed to load media metadata:", e));
+      .catch((e) => log.error("nowplaying", "Failed to load media metadata", e));
     return () => {
       cancelled = true;
     };
