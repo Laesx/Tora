@@ -27,6 +27,8 @@ import { AiringDot } from "@/components/AiringDot";
 import { useAnimeActions } from "@/contexts/animeActions";
 import { useScoreFormat } from "@/contexts/scoreFormat";
 import { formatMeanScore } from "@/lib/scores";
+import { useAniListHistory } from "@/contexts/anilistHistory";
+import { usePrefs } from "@/hooks/usePrefs";
 
 interface StatsViewProps {
   animeList: AnimeEntry[];
@@ -166,7 +168,11 @@ function heatLevel(count: number, max: number): number {
 }
 const HEAT_OPACITY = [0, 0.3, 0.5, 0.75, 1];
 
-/** Your list, watch activity and backlog. Everything is local: list + history + library, no AniList calls. */
+/**
+ * Your list, watch activity and backlog. Everything is local: list + history + library, no AniList calls.
+ * With "Include AniList history" (per device, off by default) the activity also counts imported AniList
+ * episodes Tora didn't log itself.
+ */
 export const StatsView: React.FC<StatsViewProps> = ({
   animeList,
   refreshKey,
@@ -178,10 +184,15 @@ export const StatsView: React.FC<StatsViewProps> = ({
   const [stats, setStats] = useState<ListStats | null>(null);
   const [drives, setDrives] = useState<DriveStorageSummary[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const anilist = useAniListHistory();
+  const [prefs, updatePrefs] = usePrefs("tora.stats.prefs", { includeAnilist: false });
+  const includeAnilist = prefs.includeAnilist && anilist.hasData;
+  // Imported activity only matters while it is included
+  const anilistVersion = includeAnilist ? anilist.version : 0;
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([toraApi.getStats(), toraApi.getDriveSummaries()])
+    Promise.all([toraApi.getStats(includeAnilist), toraApi.getDriveSummaries()])
       .then(([s, d]) => {
         if (cancelled) return;
         setStats(s);
@@ -192,7 +203,7 @@ export const StatsView: React.FC<StatsViewProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [refreshKey]);
+  }, [refreshKey, includeAnilist, anilistVersion]);
 
   const byId = useMemo(() => new Map(animeList.map((a) => [a.id, a])), [animeList]);
   const activity = useMemo(() => computeActivity(stats?.watch_events ?? []), [stats]);
@@ -216,10 +227,26 @@ export const StatsView: React.FC<StatsViewProps> = ({
 
   return (
     <div className="p-6 space-y-5 max-w-6xl mx-auto">
-      <h1 className="text-xl font-bold text-text-primary flex items-center gap-2.5">
-        <BarChart3 className="w-6 h-6 text-accent" />
-        Stats
-      </h1>
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <h1 className="text-xl font-bold text-text-primary flex items-center gap-2.5">
+          <BarChart3 className="w-6 h-6 text-accent" />
+          Stats
+        </h1>
+        {anilist.hasData && (
+          <label
+            className="flex items-center gap-2 text-xs text-text-secondary cursor-pointer"
+            title="Count imported AniList episodes that Tora didn't log itself in the activity charts"
+          >
+            <input
+              type="checkbox"
+              checked={prefs.includeAnilist}
+              onChange={(e) => updatePrefs({ includeAnilist: e.target.checked })}
+              className="rounded accent-accent w-4 h-4 cursor-pointer"
+            />
+            Include AniList history
+          </label>
+        )}
+      </div>
 
       {/* ---- Overview */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3">

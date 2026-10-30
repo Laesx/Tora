@@ -1,6 +1,7 @@
 use crate::db::AnimeEntry;
 use crate::plugins::{
-    AiringScheduleItem, AiringSchedulePage, BoxFuture, MediaMetadata, MediaRanking, MediaTag,
+    ActivityMedia, ActivityPage, ActivityPageQuery, AiringScheduleItem, AiringSchedulePage,
+    BoxFuture, MediaMetadata, MediaRanking, MediaTag, RemoteListActivity, ACTIVITY_PAGE_SIZE,
     RemoteEntryState, RemoteListMembership, RemoteListSnapshot, SeasonPage, SeasonalAnime, StudioRef,
     TrackerEntryUpdate, TrackerError, TrackerPlugin, TrackerPluginDescriptor, TrackerUserProfile,
     MEDIA_DETAILS_CHUNK,
@@ -1448,6 +1449,77 @@ impl TrackerPlugin for AniListPlugin {
         })
     }
 
+    fn fetch_list_activities<'a>(
+        &'a self,
+        token: &'a str,
+        query: &'a ActivityPageQuery,
+    ) -> BoxFuture<'a, Result<ActivityPage, TrackerError>> {
+        Box::pin(async move {
+            // AniList rejects a null `createdAt_*` ("Illegal operator and value combination"), so only
+            // bounds that are set become arguments
+            let mut args = String::new();
+            let mut vars = json!({ "userId": query.user_id });
+            if let Some(before) = query.created_before {
+                args.push_str(", createdAt_lesser: $before");
+                vars["before"] = json!(before);
+            }
+            if let Some(after) = query.created_after {
+                args.push_str(", createdAt_greater: $after");
+                vars["after"] = json!(after);
+            }
+            let declared = format!(
+                "$userId: Int{}{}",
+                if query.created_before.is_some() { ", $before: Int" } else { "" },
+                if query.created_after.is_some() { ", $after: Int" } else { "" },
+            );
+            let sort = if query.oldest_first { "ID" } else { "ID_DESC" };
+            let per_page = query.per_page.clamp(1, ACTIVITY_PAGE_SIZE);
+            let gql = format!(
+                r#"
+                query ListActivities({declared}) {{
+                    Page(perPage: {per_page}) {{
+                        pageInfo {{
+                            hasNextPage
+                        }}
+                        activities(userId: $userId, type: ANIME_LIST, sort: [{sort}]{args}) {{
+                            ... on ListActivity {{
+                                id
+                                status
+                                progress
+                                createdAt
+                                media {{
+                                    id
+                                    title {{ romaji english native }}
+                                    coverImage {{ medium }}
+                                    format
+                                    episodes
+                                }}
+                            }}
+                        }}
+                    }}
+                }}
+                "#
+            );
+            let token = Some(token).filter(|t| !t.trim().is_empty());
+            let data = self.graphql_request(&gql, vars, token).await?;
+            let page_obj = data.get("Page");
+            let has_next_page = page_obj
+                .and_then(|p| p.get("pageInfo"))
+                .and_then(|p| p.get("hasNextPage"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let items = page_obj
+                .and_then(|p| p.get("activities"))
+                .and_then(|m| m.as_array())
+                .map(|arr| arr.iter().filter_map(parse_list_activity).collect())
+                .unwrap_or_default();
+            Ok(ActivityPage {
+                items,
+                has_next_page,
+            })
+        })
+    }
+
     fn create_custom_list<'a>(
         &'a self,
         token: &'a str,
@@ -1463,6 +1535,57 @@ impl TrackerPlugin for AniListPlugin {
     ) -> BoxFuture<'a, Result<Vec<String>, TrackerError>> {
         Box::pin(self.edit_custom_lists(token, |existing| without_custom_list(existing, name)))
     }
+}
+
+/// "12" → (12, 12), "1 - 12" → (1, 12); anything else (status-only activities) → None.
+pub fn parse_activity_progress(progress: &str) -> Option<(u32, u32)> {
+    let mut parts = progress.split('-').map(|p| p.trim().parse::<u32>());
+    let from = parts.next()?.ok()?;
+    let to = match parts.next() {
+        Some(p) => p.ok()?,
+        None => from,
+    };
+    if parts.next().is_some() || to < from {
+        return None;
+    }
+    Some((from, to))
+}
+
+/// One `ListActivity` node. Activities of deleted media (no `media`) are skipped.
+fn parse_list_activity(node: &Value) -> Option<RemoteListActivity> {
+    let media = node.get("media")?;
+    let title = media.get("title");
+    let title_of = |key: &str| {
+        title
+            .and_then(|t| t.get(key))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string)
+    };
+    let range = node
+        .get("progress")
+        .and_then(|v| v.as_str())
+        .and_then(parse_activity_progress);
+    Some(RemoteListActivity {
+        id: node.get("id")?.as_i64()?,
+        media_id: media.get("id")?.as_i64()?,
+        status: node.get("status").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+        progress_from: range.map(|r| r.0),
+        progress_to: range.map(|r| r.1),
+        created_at: node.get("createdAt")?.as_i64()?,
+        media: ActivityMedia {
+            title_romaji: title_of("romaji").unwrap_or_default(),
+            title_english: title_of("english"),
+            title_native: title_of("native"),
+            cover: media
+                .pointer("/coverImage/medium")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            format: media.get("format").and_then(|v| v.as_str()).map(str::to_string),
+            episodes: opt_u32(media.get("episodes")),
+        },
+    })
 }
 
 impl AniListPlugin {
@@ -1753,5 +1876,37 @@ mod tests {
             fuzzy_date_input(Some("")),
             json!({"year":null,"month":null,"day":null})
         );
+    }
+
+    #[test]
+    fn activity_progress_ranges() {
+        assert_eq!(parse_activity_progress("12"), Some((12, 12)));
+        assert_eq!(parse_activity_progress("1 - 12"), Some((1, 12)));
+        assert_eq!(parse_activity_progress(" 8-11 "), Some((8, 11)));
+        assert_eq!(parse_activity_progress(""), None);
+        assert_eq!(parse_activity_progress("5 - 3"), None);
+        assert_eq!(parse_activity_progress("1 - 2 - 3"), None);
+        assert_eq!(parse_activity_progress("abc"), None);
+    }
+
+    #[test]
+    fn list_activity_nodes_parse() {
+        let node = json!({
+            "id": 1191305395, "status": "rewatched episode", "progress": "8 - 11", "createdAt": 1793389859,
+            "media": { "id": 147105, "title": { "romaji": "Tongari Boushi no Atelier", "english": null, "native": "" },
+                       "coverImage": { "medium": "https://x/small.jpg" }, "format": "ONA", "episodes": 13 }
+        });
+        let a = parse_list_activity(&node).unwrap();
+        assert_eq!((a.id, a.media_id, a.created_at), (1191305395, 147105, 1793389859));
+        assert_eq!((a.progress_from, a.progress_to), (Some(8), Some(11)));
+        assert_eq!(a.media.title_romaji, "Tongari Boushi no Atelier");
+        assert_eq!((a.media.title_english, a.media.title_native), (None, None));
+        assert_eq!(a.media.episodes, Some(13));
+
+        let status_only = json!({ "id": 2, "status": "completed", "progress": null, "createdAt": 1, "media": { "id": 3 } });
+        let a = parse_list_activity(&status_only).unwrap();
+        assert_eq!((a.progress_from, a.progress_to), (None, None));
+        // Activities of deleted media come back without one
+        assert!(parse_list_activity(&json!({ "id": 2, "status": "completed", "createdAt": 1, "media": null })).is_none());
     }
 }

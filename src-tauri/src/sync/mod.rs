@@ -14,6 +14,7 @@
 //! - `tracker-entry-synced`  `{ entry }`
 //! - `library-changed`       `ScanSummary` (after a pull, when background matching bound new local files)
 //! - `tracker-account-switched` `{ previous_user_id, user_id, username, discarded_changes }`
+//! - `anilist-history-progress` / `anilist-history-updated` (see [`history`])
 //!
 //! Edits and deletes are always queued (`sync_pending` / tombstones), signed in or not; they are only sent
 //! while signed in, so changes made while signed out reach AniList on the owner's next sign-in. Without a
@@ -38,6 +39,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub use crate::db::ResolvedState;
+
+mod history;
+pub use history::{EVENT_HISTORY_PROGRESS, EVENT_HISTORY_UPDATED};
 
 /// Event sink, decoupled from Tauri so the service is testable. In the app:
 /// `Arc::new(move |name, payload| { let _ = app.emit(name, payload); })`.
@@ -555,6 +559,13 @@ pub struct TrackerSyncService {
     limiter: RateLimiter,
     in_progress: AtomicBool,
     last_synced_at: Mutex<Option<i64>>,
+    /// An AniList history import or refresh is running (one at a time).
+    history_running: AtomicBool,
+    /// Asks the running import to stop after its current page.
+    history_pause: AtomicBool,
+    history_page_interval: Duration,
+    /// Multiplies the import's retry waits (0 in tests).
+    history_retry_scale: u64,
 }
 
 impl TrackerSyncService {
@@ -573,7 +584,18 @@ impl TrackerSyncService {
             limiter: RateLimiter::new(MIN_REQUEST_INTERVAL),
             in_progress: AtomicBool::new(false),
             last_synced_at: Mutex::new(None),
+            history_running: AtomicBool::new(false),
+            history_pause: AtomicBool::new(false),
+            history_page_interval: history::HISTORY_PAGE_INTERVAL,
+            history_retry_scale: 1,
         }
+    }
+
+    /// Override the AniList history import's page spacing and retry waits (tests).
+    pub fn with_history_pacing(mut self, page_interval: Duration, retry_scale: u64) -> Self {
+        self.history_page_interval = page_interval;
+        self.history_retry_scale = retry_scale;
+        self
     }
 
     /// Override the minimum spacing between tracker requests (tests).
@@ -1251,7 +1273,7 @@ impl TrackerSyncService {
     /// entries whose titles changed (`library-changed` is emitted if anything matched).
     /// Never runs two pulls at once: a pull requested while one is running waits for it and returns an
     /// empty delta (the running pull's `tracker-list-synced` event carries the changes).
-    pub async fn pull(&self, reason: &str) -> Result<SyncSummary, String> {
+    pub async fn pull(self: &Arc<Self>, reason: &str) -> Result<SyncSummary, String> {
         let settings = self.blocking(|db| db.get_settings()).await?;
         let token = settings.anilist_token.trim().to_string();
         if token.is_empty() {
@@ -1306,6 +1328,8 @@ impl TrackerSyncService {
                     serde_json::to_value(&summary).unwrap_or(Value::Null),
                 );
                 self.spawn_targeted_matching(rematch_ids);
+                // Imported AniList activity: after the list event, so the sync spinner never waits for it
+                self.spawn_history_refresh(reason);
                 Ok(summary)
             }
             Err(PullFailure {
@@ -1854,8 +1878,10 @@ mod tests {
     use super::*;
     use crate::db::test_entry;
     use crate::db::CustomListToggle;
+    use crate::db::{HistoryQuery, HistorySource, ImportStatus};
     use crate::plugins::{
-        BoxFuture, RemoteEntryState, RemoteListMembership, RemoteListSnapshot, TrackerUserProfile,
+        ActivityMedia, ActivityPage, ActivityPageQuery, BoxFuture, RemoteEntryState, RemoteListActivity,
+        RemoteListMembership, RemoteListSnapshot, TrackerUserProfile,
     };
     use std::collections::HashMap;
 
@@ -2145,6 +2171,11 @@ mod tests {
         /// By media id.
         memberships: Mutex<HashMap<i64, RemoteListMembership>>,
         score_format: Mutex<Option<String>>,
+        /// The account's list activity; pages hold at most 2.
+        activities: Mutex<Vec<RemoteListActivity>>,
+        activity_calls: Mutex<Vec<ActivityPageQuery>>,
+        /// `fetch_list_activities` fails with this from call number `.0` (0-based) on.
+        activity_error: Mutex<Option<(usize, TrackerError)>>,
     }
 
     impl TrackerPlugin for MockTracker {
@@ -2322,6 +2353,39 @@ mod tests {
                 Ok(lists.clone())
             })
         }
+        fn fetch_list_activities<'a>(
+            &'a self,
+            _token: &'a str,
+            query: &'a ActivityPageQuery,
+        ) -> BoxFuture<'a, Result<ActivityPage, TrackerError>> {
+            Box::pin(async move {
+                let call = {
+                    let mut calls = self.activity_calls.lock().unwrap();
+                    calls.push(query.clone());
+                    calls.len() - 1
+                };
+                if let Some((from, e)) = self.activity_error.lock().unwrap().clone() {
+                    if call >= from {
+                        return Err(e);
+                    }
+                }
+                let mut all: Vec<RemoteListActivity> = self
+                    .activities
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|a| query.created_before.map_or(true, |b| a.created_at < b))
+                    .filter(|a| query.created_after.map_or(true, |b| a.created_at > b))
+                    .cloned()
+                    .collect();
+                all.sort_by_key(|a| if query.oldest_first { a.id } else { -a.id });
+                let n = query.per_page.min(2) as usize;
+                Ok(ActivityPage {
+                    has_next_page: all.len() > n,
+                    items: all.into_iter().take(n).collect(),
+                })
+            })
+        }
     }
 
     type Events = Arc<Mutex<Vec<(String, Value)>>>;
@@ -2335,7 +2399,8 @@ mod tests {
             sink.lock().unwrap().push((name.to_string(), payload));
         });
         let svc = TrackerSyncService::new(db, Arc::new(plugins), emit, Arc::new(Mutex::new(None)))
-            .with_min_request_interval(Duration::from_millis(0));
+            .with_min_request_interval(Duration::from_millis(0))
+            .with_history_pacing(Duration::ZERO, 0);
         (Arc::new(svc), events)
     }
 
@@ -3195,5 +3260,168 @@ mod tests {
         svc.fetch_season("SUMMER", 2025, false).await.unwrap();
         assert_eq!(svc.media_metadata(7).await.unwrap().unwrap().entry.title_romaji, "Seasonal");
         assert_eq!(*mock.metadata_calls.lock().unwrap(), vec![42]);
+    }
+
+    fn activity(id: i64, media_id: i64, status: &str, range: Option<(u32, u32)>, at: i64) -> RemoteListActivity {
+        RemoteListActivity {
+            id,
+            media_id,
+            status: status.into(),
+            progress_from: range.map(|r| r.0),
+            progress_to: range.map(|r| r.1),
+            created_at: at,
+            media: ActivityMedia {
+                title_romaji: format!("Media {}", media_id),
+                ..Default::default()
+            },
+        }
+    }
+
+    /// Ids 1..=7, one second apart in id order; 3 and 6 are status-only.
+    fn activity_feed() -> Vec<RemoteListActivity> {
+        vec![
+            activity(1, 10, "watched episode", Some((1, 3)), 1_000),
+            activity(2, 10, "watched episode", Some((4, 4)), 1_001),
+            activity(3, 10, "completed", None, 1_002),
+            activity(4, 20, "watched episode", Some((1, 2)), 1_003),
+            activity(5, 20, "rewatched episode", Some((1, 1)), 1_004),
+            activity(6, 30, "plans to watch", None, 1_005),
+            activity(7, 30, "watched episode", Some((5, 5)), 1_006),
+        ]
+    }
+
+    async fn wait_for_import(svc: &Arc<TrackerSyncService>) {
+        wait_until(|| !svc.history_running.load(Ordering::SeqCst)).await;
+        // The final status event follows the flag
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    #[tokio::test]
+    async fn history_import_pauses_on_errors_and_resumes_from_its_cursor() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        sign_in(&db, 42);
+        db.set_list_owner(42).unwrap();
+        let mock = Arc::new(MockTracker {
+            viewer_id: 42,
+            ..Default::default()
+        });
+        *mock.activities.lock().unwrap() = activity_feed();
+        // Oldest lookup + 2 pages succeed, then the connection drops (3 retries fail too)
+        *mock.activity_error.lock().unwrap() = Some((3, TrackerError::Network("offline".into())));
+        let (svc, events) = service(db.clone(), mock.clone());
+
+        svc.start_history_import();
+        wait_for_import(&svc).await;
+        let state = db.anilist_history_state().unwrap();
+        assert_eq!(state.status, ImportStatus::Paused);
+        assert_eq!(state.last_error.as_deref(), Some("offline"));
+        assert_eq!((state.earliest_at, state.newest_at), (Some(1_000), Some(1_006)));
+        assert_eq!(state.cursor, Some(1_004));
+        assert_eq!(state.fetched, 3);
+        assert_eq!(mock.activity_calls.lock().unwrap().len(), 3 + 4);
+        assert!(names(&events).iter().any(|n| n == EVENT_HISTORY_PROGRESS));
+
+        // An error-paused import resumes at startup and continues below its cursor
+        *mock.activity_error.lock().unwrap() = None;
+        mock.activity_calls.lock().unwrap().clear();
+        svc.resume_history_import_if_interrupted().await;
+        wait_for_import(&svc).await;
+        let state = db.anilist_history_state().unwrap();
+        assert_eq!(state.status, ImportStatus::Done);
+        assert_eq!(state.last_error, None);
+        assert_eq!(state.fetched, 7);
+        let calls = mock.activity_calls.lock().unwrap().clone();
+        assert_eq!(calls[0].created_before, Some(1_005));
+        assert!(calls.iter().all(|c| !c.oldest_first));
+
+        // Status-only activities are not stored; every episode is
+        assert_eq!(db.anilist_history_counts().unwrap(), (5, 8));
+        let rows = db
+            .list_history(&HistoryQuery {
+                source: HistorySource::Anilist,
+                limit: 50,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), vec![7, 5, 4, 2, 1]);
+        assert!(rows.iter().find(|r| r.id == 5).unwrap().rewatch);
+
+        // A finished import is not started again
+        mock.activity_calls.lock().unwrap().clear();
+        svc.start_history_import();
+        wait_for_import(&svc).await;
+        assert!(mock.activity_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn history_import_refuses_another_account_and_user_pauses_stay() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        sign_in(&db, 42);
+        db.set_list_owner(7).unwrap();
+        let mock = Arc::new(MockTracker {
+            viewer_id: 42,
+            ..Default::default()
+        });
+        *mock.activities.lock().unwrap() = activity_feed();
+        let (svc, _events) = service(db.clone(), mock.clone());
+
+        svc.start_history_import();
+        wait_for_import(&svc).await;
+        let state = db.anilist_history_state().unwrap();
+        assert_eq!(state.status, ImportStatus::Paused);
+        assert!(state.last_error.unwrap().contains("belongs to AniList user 7"));
+        assert!(mock.activity_calls.lock().unwrap().is_empty());
+
+        // Paused by the user (no error): startup leaves it alone
+        let mut state = db.anilist_history_state().unwrap();
+        state.last_error = None;
+        db.set_anilist_history_state(&state).unwrap();
+        db.set_list_owner(42).unwrap();
+        svc.resume_history_import_if_interrupted().await;
+        wait_for_import(&svc).await;
+        assert!(mock.activity_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn history_refresh_rereads_the_overlap_and_grows_merged_ranges() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        sign_in(&db, 42);
+        db.set_list_owner(42).unwrap();
+        let mock = Arc::new(MockTracker {
+            viewer_id: 42,
+            ..Default::default()
+        });
+        *mock.activities.lock().unwrap() = activity_feed();
+        let (svc, events) = service(db.clone(), mock.clone());
+        svc.start_history_import();
+        wait_for_import(&svc).await;
+        assert_eq!(db.anilist_history_state().unwrap().status, ImportStatus::Done);
+
+        // Off by default: refreshes do nothing
+        mock.activity_calls.lock().unwrap().clear();
+        assert_eq!(svc.refresh_history("manual").await.unwrap(), 0);
+        assert!(mock.activity_calls.lock().unwrap().is_empty());
+
+        let mut settings = db.get_settings().unwrap();
+        settings.anilist_history_enabled = true;
+        db.save_settings(&settings).unwrap();
+        {
+            let mut feed = mock.activities.lock().unwrap();
+            feed[6].progress_to = Some(8); // "watched episode 5 - 8": the same activity grew
+            feed.push(activity(8, 40, "watched episode", Some((1, 1)), 1_007));
+        }
+        assert_eq!(svc.refresh_history("manual").await.unwrap(), 2);
+        let calls = mock.activity_calls.lock().unwrap().clone();
+        assert_eq!(calls[0].created_after, Some(1_006 - 48 * 60 * 60));
+        assert_eq!(db.anilist_history_counts().unwrap(), (6, 12));
+        assert!(names(&events).iter().any(|n| n == EVENT_HISTORY_UPDATED));
+
+        // Unchanged activities are not rewritten
+        assert_eq!(svc.refresh_history("manual").await.unwrap(), 0);
+
+        // Deleting drops activities and state
+        svc.clear_history_import().await.unwrap();
+        assert_eq!(db.anilist_history_counts().unwrap(), (0, 0));
+        assert_eq!(db.anilist_history_state().unwrap().status, ImportStatus::Idle);
     }
 }

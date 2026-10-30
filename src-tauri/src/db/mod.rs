@@ -11,7 +11,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::Duration;
 
+mod activity;
 mod settings;
+
+pub use activity::{
+    AniListHistoryState, AniListHistoryStatus, HistoryCursor, HistoryQuery, HistoryRow, HistorySource,
+    ImportStatus, TimelineEpisode,
+};
 pub use settings::{
     SettingsBackupInfo, TORRENT_BOARD_OPTIONS_KEY, TORRENT_FANSUBS_KEY, TORRENT_FEEDS_KEY,
     TORRENT_FILTERS_KEY, TORRENT_PRIORITY_KEY, TORRENT_SEARCH_FEEDS_KEY,
@@ -324,6 +330,10 @@ pub struct AppSettings {
     /// Check GitHub for a new Tora release and a newer `anime-relations.txt` on startup.
     #[serde(default = "default_true")]
     pub check_updates_on_startup: bool,
+    /// The user imported their AniList activity history and wants it kept up to date after each sync
+    /// (History → AniList, Stats toggle). Off by default; the import's state lives under its own key.
+    #[serde(default)]
+    pub anilist_history_enabled: bool,
     /// Set when the stored settings were unreadable and defaults are in use (never read back from JSON).
     #[serde(default, skip_deserializing)]
     pub settings_recovered: bool,
@@ -376,6 +386,7 @@ impl Default for AppSettings {
             players: default_players(),
             title_language: default_title_language(),
             check_updates_on_startup: true,
+            anilist_history_enabled: false,
             settings_recovered: false,
         }
     }
@@ -1997,6 +2008,7 @@ impl Database {
         add_column_if_missing(&conn, "anime_entries", "end_date", "TEXT")?;
         add_column_if_missing(&conn, "anime_entries", "custom_synonyms_json", "TEXT")?;
         add_column_if_missing(&conn, "watch_history", "progress_from", "INTEGER")?;
+        activity::create_tables(&conn)?;
 
         run_data_migrations(&mut conn)?;
         drop(conn);
@@ -3267,7 +3279,7 @@ impl Database {
     /// transaction (list entries with their custom folders, queued pushes and deletions, watch history,
     /// title aliases) and make `new_owner` the owner. Machine data stays: library folders and the indexed
     /// files (only unmatched), settings, torrent config (feeds, filters, priority, fansub overrides) and the public
-    /// metadata caches.
+    /// metadata caches. Imported AniList activity and its import state go with the account.
     /// Returns how many unsent changes of the previous account were discarded.
     pub fn reset_for_account_switch(&self, new_owner: i64) -> Result<usize, String> {
         let discarded = {
@@ -3292,6 +3304,7 @@ impl Database {
                  DELETE FROM anime_entries;",
             )
             .map_err(|e| e.to_string())?;
+            activity::clear_tx(&tx)?;
             tx.execute(
                 "INSERT OR REPLACE INTO app_settings (key, value_json) VALUES (?1, ?2)",
                 params![LIST_OWNER_KEY, new_owner.to_string()],
@@ -3540,7 +3553,8 @@ impl Database {
 
     /// Everything the Stats tab shows except drive usage (`list_drive_summaries`). One reader snapshot;
     /// `watch_events` are the watched-episode rows logged at or after `events_since` (corrections excluded).
-    pub fn list_stats(&self, events_since: i64) -> Result<ListStats, String> {
+    /// `include_anilist` adds imported AniList episodes that have no local row (player "AniList").
+    pub fn list_stats(&self, events_since: i64, include_anilist: bool) -> Result<ListStats, String> {
         let conn = self.reader()?;
         let mut stats = ListStats::default();
 
@@ -3628,6 +3642,14 @@ impl Database {
             .map_err(|e| e.to_string())?;
         stats.logged_episodes = count;
         stats.first_logged_at = first;
+        if include_anilist {
+            let (remote_count, remote_first) = activity::anilist_only_totals(&conn)?;
+            stats.logged_episodes += remote_count;
+            stats.first_logged_at = match (first, remote_first) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+        }
 
         let mut stmt = conn
             .prepare(
@@ -3647,6 +3669,12 @@ impl Database {
             })
             .map_err(|e| e.to_string())?;
         stats.watch_events = rows.flatten().collect();
+        if include_anilist {
+            stats
+                .watch_events
+                .extend(activity::anilist_only_watch_events(&conn, events_since)?);
+            stats.watch_events.sort_by_key(|e| e.t);
+        }
         Ok(stats)
     }
 
@@ -4543,7 +4571,7 @@ mod tests {
         insert_episode(&db, Some(1), "C:/lib/alpha-05.mkv", 5, false);
         db.record_manual_progress(&[(1, "Alpha".into(), 0, 2), (1, "Alpha".into(), 2, 1)]).unwrap();
 
-        let s = db.list_stats(0).unwrap();
+        let s = db.list_stats(0, false).unwrap();
         assert_eq!(s.total_entries, 2);
         assert_eq!(s.status_counts.get("PLANNING"), Some(&1));
         assert_eq!((s.episodes_watched, s.minutes_watched), (2, 40));

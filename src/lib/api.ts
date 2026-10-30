@@ -39,6 +39,10 @@ import {
   TrackerUserProfile,
   WatchHistoryEntry,
   WatchStats,
+  AniListHistoryStatus,
+  HistoryQuery,
+  HistoryRow,
+  TimelineEpisode,
 } from "./types";
 import { errorText, log } from "./log";
 
@@ -205,7 +209,25 @@ export const toraApi = {
 
   getWatchStats: () => invoke<WatchStats>("get_watch_stats"),
 
-  getStats: () => invoke<ListStats>("get_stats"),
+  /** `includeAnilist`: imported AniList episodes Tora didn't log count too */
+  getStats: (includeAnilist = false) => invoke<ListStats>("get_stats", { includeAnilist }),
+
+  /** One page of History (newest first; pass the last row's `cursor` as `before` for the next) */
+  listHistory: (query: HistoryQuery) => invoke<HistoryRow[]>("list_history", { query }),
+
+  getHistoryTimeline: (mediaId: number) => invoke<TimelineEpisode[]>("get_history_timeline", { mediaId }),
+
+  getAniListHistoryStatus: () => invoke<AniListHistoryStatus>("get_anilist_history_status"),
+
+  /** Start or resume the AniList activity import (progress arrives as `anilist-history-progress`) */
+  startAniListHistoryImport: () => invoke<AniListHistoryStatus>("start_anilist_history_import"),
+
+  pauseAniListHistoryImport: () => invoke<void>("pause_anilist_history_import"),
+
+  /** Fetch activity newer than the stored history; how many activities were new or changed */
+  refreshAniListHistory: () => invoke<number>("refresh_anilist_history"),
+
+  clearAniListHistory: () => invoke<void>("clear_anilist_history"),
 
   getAppInfo: () => invoke<AppInfo>("get_app_info"),
 

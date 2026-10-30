@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
+  AniListHistoryStatus,
   AppSettings,
   DetectedMediaSession,
   RelationsUpdatedEvent,
@@ -30,6 +31,10 @@ export interface AppEventHandlers {
   relationsUpdated: (event: RelationsUpdatedEvent) => void;
   /** An update held until the player closed was applied (the session is already gone) */
   playbackScrobbled: (session: DetectedMediaSession) => void;
+  /** AniList history import / refresh progress */
+  historyProgress: (status: AniListHistoryStatus) => void;
+  /** A refresh stored new AniList activity */
+  historyUpdated: (event: { added: number }) => void;
   /** Runs once, after every listener is registered */
   ready: () => void;
 }
@@ -47,6 +52,8 @@ const EVENTS: [string, Exclude<keyof AppEventHandlers, "ready">][] = [
   ["tracker-entry-synced", "entrySynced"],
   ["relations-updated", "relationsUpdated"],
   ["playback-scrobbled", "playbackScrobbled"],
+  ["anilist-history-progress", "historyProgress"],
+  ["anilist-history-updated", "historyUpdated"],
 ];
 
 /**

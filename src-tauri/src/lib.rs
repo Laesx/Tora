@@ -10,9 +10,9 @@ pub mod torrents;
 pub mod updates;
 
 use crate::db::{
-    AnimeEntry, AppSettings, BatchAnimeUpdatePatch, CachedSeason, CustomListChange,
-    CustomListsState, Database, LibraryFolder, ListStats,
-    LocalEpisodeFile, SettingsBackupInfo, WatchHistoryEntry,
+    AniListHistoryStatus, AnimeEntry, AppSettings, BatchAnimeUpdatePatch, CachedSeason,
+    CustomListChange, CustomListsState, Database, HistoryQuery, HistoryRow, LibraryFolder, ListStats,
+    LocalEpisodeFile, SettingsBackupInfo, TimelineEpisode, WatchHistoryEntry,
 };
 use crate::detection::anisthesia::{
     detect_active_media_player, foreground_process_id, DetectedMediaSession, UpdatePolicy,
@@ -1046,6 +1046,59 @@ async fn get_watch_history(
         .map_err(|e| e.to_string())?
 }
 
+/// One page of the History tab (local rows, imported AniList-only rows or both; keyset paginated).
+#[tauri::command]
+async fn list_history(state: State<'_, AppState>, query: HistoryQuery) -> Result<Vec<HistoryRow>, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || db.list_history(&query))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Every watched episode of one anime with its time and source (History's per-anime view).
+#[tauri::command]
+async fn get_history_timeline(
+    state: State<'_, AppState>,
+    media_id: i64,
+) -> Result<Vec<TimelineEpisode>, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || db.history_timeline(media_id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn get_anilist_history_status(state: State<'_, AppState>) -> Result<AniListHistoryStatus, String> {
+    state.sync.history_status().await
+}
+
+/// Start (or resume) the AniList activity import in the background; progress arrives as
+/// `anilist-history-progress` events.
+#[tauri::command]
+async fn start_anilist_history_import(
+    state: State<'_, AppState>,
+) -> Result<AniListHistoryStatus, String> {
+    state.sync.start_history_import();
+    state.sync.history_status().await
+}
+
+#[tauri::command]
+async fn pause_anilist_history_import(state: State<'_, AppState>) -> Result<(), String> {
+    state.sync.pause_history_import();
+    Ok(())
+}
+
+/// Fetch AniList activity newer than the stored history now (History's refresh button).
+#[tauri::command]
+async fn refresh_anilist_history(state: State<'_, AppState>) -> Result<usize, String> {
+    state.sync.refresh_history("manual").await
+}
+
+#[tauri::command]
+async fn clear_anilist_history(state: State<'_, AppState>) -> Result<(), String> {
+    state.sync.clear_history_import().await
+}
+
 /// Episodes watched (scrobbled or logged manually) in the last 7 days and the 7 days before.
 #[derive(Debug, Clone, Serialize)]
 struct WatchStats {
@@ -1072,13 +1125,17 @@ async fn get_watch_stats(state: State<'_, AppState>) -> Result<WatchStats, Strin
     .map_err(|e| e.to_string())?
 }
 
-/// List, activity and backlog numbers for the Stats tab (activity covers the last 366 days).
+/// List, activity and backlog numbers for the Stats tab (activity covers the last 366 days;
+/// `include_anilist` adds imported AniList-only episodes).
 #[tauri::command]
-async fn get_stats(state: State<'_, AppState>) -> Result<ListStats, String> {
+async fn get_stats(
+    state: State<'_, AppState>,
+    include_anilist: Option<bool>,
+) -> Result<ListStats, String> {
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
         let since = chrono::Utc::now().timestamp() - 366 * 24 * 60 * 60;
-        db.list_stats(since)
+        db.list_stats(since, include_anilist.unwrap_or(false))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1843,6 +1900,8 @@ pub fn run() {
             // so a signed-out user sees no failure toast.
             tauri::async_runtime::spawn(async move {
                 let _ = sync.pull("startup").await;
+                // An AniList history import the app was closed during (or a dropped connection paused)
+                sync.resume_history_import_if_interrupted().await;
             });
 
             // The app-update check runs in the frontend (it prompts); relations update silently.
@@ -1900,6 +1959,13 @@ pub fn run() {
             confirm_playback_update,
             link_detected_episode_to_anime,
             get_watch_history,
+            list_history,
+            get_history_timeline,
+            get_anilist_history_status,
+            start_anilist_history_import,
+            pause_anilist_history_import,
+            refresh_anilist_history,
+            clear_anilist_history,
             get_watch_stats,
             get_stats,
             get_app_info,

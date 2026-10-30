@@ -461,6 +461,84 @@ export interface WatchHistoryEntry {
   progress_from: number | null;
 }
 
+/** `player_name` of imported AniList rows (History, Stats events) */
+export const ANILIST_HISTORY_PLAYER = "AniList";
+
+export type HistorySource = "all" | "local" | "anilist";
+
+/** Keyset position of a History row (pass the last row's to load the next page) */
+export interface HistoryCursor {
+  ts: number;
+  kind: number;
+  id: number;
+}
+
+export interface HistoryQuery {
+  source: HistorySource;
+  search?: string | null;
+  media_id?: number | null;
+  before?: HistoryCursor | null;
+  limit: number;
+}
+
+/**
+ * One History row: a local scrobble / manual change (`kind` "local", one episode) or an imported AniList
+ * activity reduced to the episodes Tora didn't log itself (`episode_from`–`episode_to`, `episode_count`).
+ */
+export interface HistoryRow {
+  kind: "local" | "anilist";
+  id: number;
+  anime_id: number | null;
+  anime_title: string;
+  episode_from: number;
+  episode_to: number;
+  episode_count: number;
+  player_name: string;
+  file_name: string;
+  scrobbled_to_tracker: boolean;
+  timestamp_unix: number;
+  /** Correction rows only: progress before; `episode_to` is the new one */
+  progress_from: number | null;
+  rewatch: boolean;
+  /** AniList rows: the activity's cover (anime no longer in the list) */
+  cover: string | null;
+  cursor: HistoryCursor;
+}
+
+/** One watched episode of one anime (History's per-anime view) */
+export interface TimelineEpisode {
+  episode: number;
+  timestamp_unix: number;
+  source: "player" | "manual" | "anilist";
+  player_name: string;
+  rewatch: boolean;
+  /** AniList merged several episodes into one activity: the time is the activity's */
+  batch: boolean;
+}
+
+export type HistoryImportStatus = "idle" | "running" | "paused" | "done";
+
+/** The AniList activity import: resume point, progress and what is stored */
+export interface AniListHistoryStatus {
+  status: HistoryImportStatus;
+  /** `createdAt` of the oldest activity read so far */
+  cursor: number | null;
+  /** Newest activity when the import started (top of the progress bar) */
+  newest_at: number | null;
+  /** The account's oldest activity (bottom of the progress bar) */
+  earliest_at: number | null;
+  /** Activities read, status-only ones included */
+  fetched: number;
+  last_error: string | null;
+  started_at: number | null;
+  finished_at: number | null;
+  last_refreshed_at: number | null;
+  /** An import or refresh is running right now */
+  active: boolean;
+  activity_count: number;
+  episode_count: number;
+}
+
 /** One watched-episode history row (corrections excluded) */
 export interface WatchEvent {
   t: number;
@@ -582,6 +660,8 @@ export interface AppSettings {
   title_language: TitleLanguage;
   /** Check GitHub for a new Tora release and newer anime relations on startup */
   check_updates_on_startup: boolean;
+  /** Imported AniList activity is shown and kept up to date after each sync */
+  anilist_history_enabled: boolean;
   /** Stored settings were unreadable; defaults are in use until a backup is restored */
   settings_recovered?: boolean;
 }

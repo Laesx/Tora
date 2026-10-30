@@ -228,6 +228,55 @@ pub struct AiringSchedulePage {
     pub has_next_page: bool,
 }
 
+/// Media of a list activity: enough to show the row when the anime is no longer in the list.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ActivityMedia {
+    pub title_romaji: String,
+    pub title_english: Option<String>,
+    pub title_native: Option<String>,
+    pub cover: String,
+    pub format: Option<String>,
+    pub episodes: Option<u32>,
+}
+
+/// One anime list activity of the viewer (AniList `ListActivity`). Status-only activities ("completed",
+/// "plans to watch", …) have no progress.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RemoteListActivity {
+    pub id: i64,
+    pub media_id: i64,
+    /// Tracker wording, e.g. "watched episode", "rewatched episode", "completed".
+    pub status: String,
+    pub progress_from: Option<u32>,
+    pub progress_to: Option<u32>,
+    /// Unix seconds.
+    pub created_at: i64,
+    pub media: ActivityMedia,
+}
+
+/// Bounds of one [`TrackerPlugin::fetch_list_activities`] request.
+#[derive(Debug, Clone, Default)]
+pub struct ActivityPageQuery {
+    pub user_id: i64,
+    /// Only activities created before this unix second (exclusive).
+    pub created_before: Option<i64>,
+    /// Only activities created after this unix second (exclusive).
+    pub created_after: Option<i64>,
+    /// Oldest first instead of newest first.
+    pub oldest_first: bool,
+    pub per_page: u32,
+}
+
+/// One page of [`TrackerPlugin::fetch_list_activities`].
+#[derive(Debug, Clone, Default)]
+pub struct ActivityPage {
+    pub items: Vec<RemoteListActivity>,
+    pub has_next_page: bool,
+}
+
+/// Max activities per [`TrackerPlugin::fetch_list_activities`] request (AniList `Page.perPage` limit).
+pub const ACTIVITY_PAGE_SIZE: u32 = 50;
+
 /// Core internal trait for all anime tracker plugins (AniList, MyAnimeList, Kitsu, Shikimori, etc.)
 pub trait TrackerPlugin: Send + Sync {
     fn descriptor(&self) -> TrackerPluginDescriptor;
@@ -326,6 +375,19 @@ pub trait TrackerPlugin: Send + Sync {
         let name = self.descriptor().name;
         Box::pin(async move {
             Err(TrackerError::Api(format!("{} doesn't support deleting custom lists.", name)))
+        })
+    }
+
+    /// One page of the user's anime list activity within `query`'s bounds (`query.per_page` items,
+    /// at most [`ACTIVITY_PAGE_SIZE`]).
+    fn fetch_list_activities<'a>(
+        &'a self,
+        _token: &'a str,
+        _query: &'a ActivityPageQuery,
+    ) -> BoxFuture<'a, Result<ActivityPage, TrackerError>> {
+        let name = self.descriptor().name;
+        Box::pin(async move {
+            Err(TrackerError::Api(format!("{} doesn't support activity history.", name)))
         })
     }
 }

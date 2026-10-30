@@ -31,6 +31,7 @@ import { TITLE_LANGUAGES } from "@/contexts/titles";
 import { LibraryManagerView } from "./LibraryManagerView";
 import { AnitomyParserPanel } from "./AnitomyParserPanel";
 import { TorrentSettingsSection } from "@/features/torrents/TorrentSettings";
+import { AniListHistorySettings } from "@/features/settings/AniListHistorySettings";
 import { SettingsBackupsPanel } from "./SettingsBackups";
 import { useToast } from "@/contexts/toast";
 import { logError } from "@/lib/log";
@@ -341,6 +342,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 })}
               </div>
             </div>
+
+            <AniListHistorySettings settings={settings} />
           </>
         )}
 
