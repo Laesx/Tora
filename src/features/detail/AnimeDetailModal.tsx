@@ -35,6 +35,9 @@ import { seasonName } from "@/lib/seasons";
 import { AiringDot } from "@/components/AiringDot";
 import { useToast } from "@/contexts/toast";
 import { useAnimeActions } from "@/contexts/animeActions";
+import { useScoreFormat } from "@/contexts/scoreFormat";
+import { formatScore, SCORE_SCALES } from "@/lib/scores";
+import { ScoreInput } from "@/components/ScoreInput";
 import { log } from "@/lib/log";
 
 interface AnimeDetailModalProps {
@@ -69,6 +72,7 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
   const [status, setStatus] = useState(anime.user_status);
   const [progress, setProgress] = useState(anime.user_progress);
   const [score, setScore] = useState(anime.user_score);
+  const scoreFormat = useScoreFormat();
   const [repeats, setRepeats] = useState(anime.user_repeats);
   const [notes, setNotes] = useState(anime.user_notes);
   const [startedAt, setStartedAt] = useState(anime.user_started_at || "");
@@ -600,17 +604,12 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
 
                 <div>
                   <label className="block text-[11px] font-medium text-text-muted uppercase mb-1">
-                    Your Score ({score}/100)
+                    Your Score ({formatScore(score, scoreFormat) || "–"}{SCORE_SCALES[scoreFormat].suffix})
                   </label>
-                  <input
-                    type="number"
-                    min={0}
-                    max={100}
-                    step={1}
-                    value={score}
-                    onChange={(e) => setScore(Number(e.target.value))}
-                    onBlur={() => handleSave(status, progress, score, repeats, false)}
-                    className="w-full px-3 py-2 rounded-lg bg-bg-primary border border-border-subtle text-xs font-mono text-text-primary focus:outline-none focus:border-accent"
+                  <ScoreInput
+                    score={score}
+                    onChange={setScore}
+                    onCommit={(next) => handleSave(status, progress, next, repeats, false)}
                   />
                 </div>
 

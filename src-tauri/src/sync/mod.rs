@@ -481,6 +481,8 @@ pub struct SyncSummary {
     pub removed_ids: Vec<i64>,
     /// Custom list names or memberships changed; the frontend refetches `get_custom_lists`.
     pub custom_lists_changed: bool,
+    /// The owner's score format after this pull (`Database::score_format`).
+    pub score_format: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1405,8 +1407,9 @@ impl TrackerSyncService {
         let remote_entries = snapshot.entries;
         let custom_list_names = snapshot.custom_lists;
         let memberships = snapshot.memberships;
+        let remote_score_format = snapshot.score_format;
         let phase = Instant::now();
-        let (stats, custom_lists_changed) = self
+        let (stats, custom_lists_changed, score_format) = self
             .blocking(move |db| {
                 let skip: HashSet<i64> = db
                     .list_pending_deletions()?
@@ -1417,7 +1420,12 @@ impl TrackerSyncService {
                 // Same guard as entry deletions: an empty remote list never wipes local memberships
                 let lists_changed = !remote_entries.is_empty()
                     && db.merge_remote_custom_lists(&custom_list_names, &memberships)?;
-                Ok((stats, lists_changed))
+                if let Some(format) = &remote_score_format {
+                    if db.set_score_format(format)? {
+                        log::info!(target: "sync", "score format is now {}", format);
+                    }
+                }
+                Ok((stats, lists_changed, db.score_format()?))
             })
             .await
             .map_err(|m| PullFailure {
@@ -1516,6 +1524,7 @@ impl TrackerSyncService {
             changed,
             removed_ids: stats.removed_ids,
             custom_lists_changed,
+            score_format: Some(score_format),
         };
         Ok((summary, stats.rematch_ids))
     }
@@ -2135,6 +2144,7 @@ mod tests {
         custom_lists: Mutex<Vec<String>>,
         /// By media id.
         memberships: Mutex<HashMap<i64, RemoteListMembership>>,
+        score_format: Mutex<Option<String>>,
     }
 
     impl TrackerPlugin for MockTracker {
@@ -2164,6 +2174,7 @@ mod tests {
                     entries: self.remote.lock().unwrap().clone(),
                     custom_lists: self.custom_lists.lock().unwrap().clone(),
                     memberships: self.memberships.lock().unwrap().clone(),
+                    score_format: self.score_format.lock().unwrap().clone(),
                 })
             })
         }
@@ -2597,6 +2608,31 @@ mod tests {
         assert!(state.names.is_empty() && state.members.is_empty());
         assert!(mock.custom_lists.lock().unwrap().is_empty());
         assert!(!db.get_anime_entry_by_id(1).unwrap().sync_pending);
+    }
+
+    #[tokio::test]
+    async fn pull_stores_score_format_and_account_switch_clears_it() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        sign_in(&db, 42);
+        let mock = Arc::new(MockTracker {
+            viewer_id: 42,
+            ..Default::default()
+        });
+        *mock.remote.lock().unwrap() = vec![test_entry(1, "Alpha")];
+        let (svc, _events) = service(db.clone(), mock.clone());
+
+        // Not reported: the stored (default) format stays
+        let summary = svc.pull("startup").await.unwrap();
+        assert_eq!(summary.score_format.as_deref(), Some("POINT_100"));
+
+        *mock.score_format.lock().unwrap() = Some("POINT_10_DECIMAL".into());
+        let summary = svc.pull("manual").await.unwrap();
+        assert_eq!(summary.score_format.as_deref(), Some("POINT_10_DECIMAL"));
+        assert_eq!(db.score_format().unwrap(), "POINT_10_DECIMAL");
+        assert!(!db.set_score_format("POINT_10_DECIMAL").unwrap());
+
+        db.reset_for_account_switch(7).unwrap();
+        assert_eq!(db.score_format().unwrap(), "POINT_100");
     }
 
     #[tokio::test]

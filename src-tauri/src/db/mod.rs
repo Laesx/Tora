@@ -827,6 +827,11 @@ const LEGACY_TORRENT_RULES_TABLE: &str = "torrent_rules";
 /// `app_settings` key holding the AniList user id the local list belongs to. Deliberately not part of
 /// `AppSettings`, so a frontend settings save can never overwrite it.
 const LIST_OWNER_KEY: &str = "list_owner_user_id";
+/// `app_settings` key holding the list owner's AniList score format, kept out of `AppSettings` for the
+/// same reason. Written by pulls only.
+const SCORE_FORMAT_KEY: &str = "tracker_score_format";
+/// Shown until the first pull tells otherwise (scores are stored on this scale anyway).
+pub const DEFAULT_SCORE_FORMAT: &str = "POINT_100";
 
 /// `watch_history.player_name` of rows logged from manual progress changes (not a media player).
 pub const MANUAL_HISTORY_PLAYER: &str = "Manual";
@@ -3217,6 +3222,37 @@ impl Database {
         Ok(raw.and_then(|v| v.trim().parse::<i64>().ok()))
     }
 
+    /// The list owner's score format (`POINT_100` until a pull stored one).
+    pub fn score_format(&self) -> Result<String, String> {
+        let conn = self.reader()?;
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT value_json FROM app_settings WHERE key = ?1",
+                params![SCORE_FORMAT_KEY],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        Ok(raw
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| DEFAULT_SCORE_FORMAT.to_string()))
+    }
+
+    /// Store the owner's score format; true when it changed.
+    pub fn set_score_format(&self, format: &str) -> Result<bool, String> {
+        if self.score_format()? == format {
+            return Ok(false);
+        }
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT OR REPLACE INTO app_settings (key, value_json) VALUES (?1, ?2)",
+            params![SCORE_FORMAT_KEY, format],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(true)
+    }
+
     pub fn set_list_owner(&self, user_id: i64) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
@@ -3261,6 +3297,9 @@ impl Database {
                 params![LIST_OWNER_KEY, new_owner.to_string()],
             )
             .map_err(|e| e.to_string())?;
+            // The new account's format arrives with its first pull
+            tx.execute("DELETE FROM app_settings WHERE key = ?1", params![SCORE_FORMAT_KEY])
+                .map_err(|e| e.to_string())?;
             tx.commit().map_err(|e| e.to_string())?;
             discarded as usize
         };

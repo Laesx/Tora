@@ -474,6 +474,20 @@ fn parse_custom_list_names(collection: &Value) -> Vec<String> {
     list_names_at(collection.pointer("/user/mediaListOptions/animeList/customLists"))
 }
 
+/// Viewer's score format (`POINT_100`, `POINT_10_DECIMAL`, `POINT_10`, `POINT_5`, `POINT_3`) from
+/// `MediaListCollection.user.mediaListOptions`; `None` when missing or unknown.
+fn parse_score_format(collection: &Value) -> Option<String> {
+    collection
+        .pointer("/user/mediaListOptions/scoreFormat")
+        .and_then(|v| v.as_str())
+        .filter(|f| SCORE_FORMATS.contains(f))
+        .map(str::to_string)
+}
+
+/// AniList `ScoreFormat` values. Scores are always read and written as `POINT_100`; the format is
+/// only how the user shows and enters them.
+pub const SCORE_FORMATS: [&str; 5] = ["POINT_100", "POINT_10_DECIMAL", "POINT_10", "POINT_5", "POINT_3"];
+
 /// Non-empty, deduplicated names of a `MediaListTypeOptions.customLists` array.
 fn list_names_at(value: Option<&Value>) -> Vec<String> {
     let mut seen = HashSet::new();
@@ -971,6 +985,7 @@ impl TrackerPlugin for AniListPlugin {
                     MediaListCollection(userId: $userId, type: ANIME) {{
                         user {{
                             mediaListOptions {{
+                                scoreFormat
                                 animeList {{
                                     customLists
                                 }}
@@ -1020,6 +1035,7 @@ impl TrackerPlugin for AniListPlugin {
                 .ok_or_else(|| TrackerError::Api("AniList returned no MediaListCollection".into()))?;
 
             let custom_lists = parse_custom_list_names(collection);
+            let score_format = parse_score_format(collection);
             let mut seen: HashSet<i64> = HashSet::new();
             let mut entries = Vec::new();
             let mut memberships: HashMap<i64, RemoteListMembership> = HashMap::new();
@@ -1058,6 +1074,7 @@ impl TrackerPlugin for AniListPlugin {
                 entries,
                 custom_lists,
                 memberships,
+                score_format,
             })
         })
     }
@@ -1488,6 +1505,16 @@ impl AniListPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_score_format() {
+        let with = |f: Value| json!({ "user": { "mediaListOptions": { "scoreFormat": f } } });
+        assert_eq!(parse_score_format(&with(json!("POINT_10_DECIMAL"))).as_deref(), Some("POINT_10_DECIMAL"));
+        assert_eq!(parse_score_format(&with(json!("POINT_3"))).as_deref(), Some("POINT_3"));
+        assert_eq!(parse_score_format(&with(json!("STARS"))), None);
+        assert_eq!(parse_score_format(&with(Value::Null)), None);
+        assert_eq!(parse_score_format(&json!({ "user": null })), None);
+    }
 
     #[test]
     fn parses_custom_list_names_and_membership() {

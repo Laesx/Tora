@@ -32,6 +32,8 @@ import { torrentSearchFor } from "@/lib/torrents";
 import { useToast } from "@/contexts/toast";
 import { LIST_STATUSES } from "@/lib/status";
 import { useAnimeActions } from "@/contexts/animeActions";
+import { useScoreFormat } from "@/contexts/scoreFormat";
+import { formatScore, formatValueLabel, fromFormatValue, SCORE_SCALES, toFormatValue } from "@/lib/scores";
 
 interface AnimeQuickMenuProps {
   anime: AnimeEntry;
@@ -61,6 +63,8 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
   const { batchDelete, batchUpdate, deleteAnime, searchTorrents, stepEpisode } = useAnimeActions();
   const showToast = useToast();
   const titleOf = useAnimeTitle();
+  const scoreFormat = useScoreFormat();
+  const scoreScale = SCORE_SCALES[scoreFormat];
   const isMultiSelect = selectedAnime.length > 1;
   const targets = isMultiSelect ? selectedAnime : [anime];
   const targetIds = targets.map((a) => a.id);
@@ -174,7 +178,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
           user_score: sc,
         },
         sc > 0
-          ? `Set score to ${sc}/100 for ${targets.length} anime`
+          ? `Set score to ${formatScore(sc, scoreFormat)}${scoreScale.suffix} for ${targets.length} anime`
           : `Cleared score for ${targets.length} anime`
       );
     };
@@ -374,33 +378,37 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
           {activePanel === "score" && (
             <div className="mx-2 my-1 p-2.5 rounded-lg bg-bg-primary border border-border-subtle space-y-2">
               <div className="flex items-center justify-between gap-1">
-                {[100, 90, 80, 70, 0].map((preset) => (
+                {[...scoreScale.presets, 0].map((preset) => (
                   <button
                     key={preset}
-                    onClick={() => handleApplyScore(preset)}
+                    onClick={() => handleApplyScore(fromFormatValue(preset, scoreFormat))}
                     className="px-1.5 py-0.5 rounded bg-bg-secondary hover:bg-accent hover:text-white text-[10px] font-mono border border-border-subtle transition"
                   >
-                    {preset === 0 ? "Clear" : preset}
+                    {preset === 0 ? "Clear" : formatValueLabel(preset, scoreFormat)}
                   </button>
                 ))}
               </div>
-              <div className="flex items-center gap-1.5">
-                <input
-                  type="number"
-                  min={0}
-                  max={100}
-                  value={scoreValue}
-                  onChange={(e) => setScoreValue(Number(e.target.value))}
-                  className="w-full px-2 py-1 rounded bg-bg-secondary border border-border-subtle text-xs font-mono text-text-primary focus:outline-none focus:border-accent"
-                />
-                <button
-                  onClick={() => handleApplyScore(scoreValue)}
-                  className="px-2.5 py-1 rounded bg-accent hover:bg-accent-hover text-white font-semibold text-[11px] shrink-0 flex items-center gap-1"
-                >
-                  <Check className="w-3 h-3" />
-                  Apply
-                </button>
-              </div>
+              {/* Stars and smileys: the presets above are every value */}
+              {scoreScale.numeric && (
+                <div className="flex items-center gap-1.5">
+                  <input
+                    type="number"
+                    min={0}
+                    max={scoreScale.max}
+                    step={scoreScale.step}
+                    value={toFormatValue(scoreValue, scoreFormat)}
+                    onChange={(e) => setScoreValue(fromFormatValue(Number(e.target.value), scoreFormat))}
+                    className="w-full px-2 py-1 rounded bg-bg-secondary border border-border-subtle text-xs font-mono text-text-primary focus:outline-none focus:border-accent"
+                  />
+                  <button
+                    onClick={() => handleApplyScore(scoreValue)}
+                    className="px-2.5 py-1 rounded bg-accent hover:bg-accent-hover text-white font-semibold text-[11px] shrink-0 flex items-center gap-1"
+                  >
+                    <Check className="w-3 h-3" />
+                    Apply
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>

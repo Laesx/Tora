@@ -603,6 +603,8 @@ export interface SyncSummary {
   removed_ids: number[];
   // Custom list names or memberships changed: refetch getCustomLists
   custom_lists_changed: boolean;
+  // The AniList score format after this pull (`ScoreFormat` in lib/scores)
+  score_format: string | null;
 }
 
 // AniList custom lists, kept apart from AnimeEntry so search and matching never see them

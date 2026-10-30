@@ -135,6 +135,9 @@ pub struct RemoteListSnapshot {
     /// Custom-list membership by media id; only entries in at least one list or hidden from status lists.
     #[serde(default)]
     pub memberships: HashMap<i64, RemoteListMembership>,
+    /// The viewer's score format (AniList `ScoreFormat`); `None` when the tracker doesn't say.
+    #[serde(default)]
+    pub score_format: Option<String>,
 }
 
 /// Custom-list membership of one remote list entry.

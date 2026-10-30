@@ -41,6 +41,8 @@ import { altTitles, useAnimeTitle, useTitleLanguage } from "@/contexts/titles";
 import { stripSeasonSuffix, torrentSearchFor } from "@/lib/torrents";
 import { episodeBar, episodeTotalLabel } from "@/lib/episodes";
 import { EpisodeProgressBar } from "@/components/EpisodeProgressBar";
+import { useScoreFormat } from "@/contexts/scoreFormat";
+import { formatScore, SCORE_SCALES } from "@/lib/scores";
 import { AiringDot } from "@/components/AiringDot";
 import { useToast } from "@/contexts/toast";
 import { useAnimeActions } from "@/contexts/animeActions";
@@ -78,6 +80,7 @@ export const NowPlayingHero: React.FC<NowPlayingHeroProps> = ({
   const showToast = useToast();
   const titleOf = useAnimeTitle();
   const titleLanguage = useTitleLanguage();
+  const scoreFormat = useScoreFormat();
   const [isRelinking, setIsRelinking] = useState(false);
   const [media, setMedia] = useState<SeasonalAnime | null>(null);
   const [localFiles, setLocalFiles] = useState<LocalEpisodeFile[]>([]);
@@ -355,9 +358,9 @@ export const NowPlayingHero: React.FC<NowPlayingHeroProps> = ({
                 <span className="text-xs text-text-muted">Your progress: {progress}</span>
               )}
               {entry && entry.user_score > 0 && (
-                <span className="text-xs text-text-secondary flex items-center gap-1">
-                  <Star className="w-3.5 h-3.5 text-amber-400 fill-current" />
-                  {entry.user_score}
+                <span className="text-xs text-text-secondary flex items-center gap-1" title="Your score">
+                  {SCORE_SCALES[scoreFormat].numeric && <Star className="w-3.5 h-3.5 text-amber-400 fill-current" />}
+                  {formatScore(entry.user_score, scoreFormat)}
                 </span>
               )}
               {entry?.next_airing_episode && entry.next_airing_at && (

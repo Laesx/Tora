@@ -32,6 +32,8 @@ import { AiringDot } from "@/components/AiringDot";
 import { FloatingQuickMenu } from "@/components/FloatingQuickMenu";
 import { useToast } from "@/contexts/toast";
 import { useAnimeActions } from "@/contexts/animeActions";
+import { useScoreFormat } from "@/contexts/scoreFormat";
+import { formatScore, SCORE_SCALES } from "@/lib/scores";
 import { useScrollViewport, visibleRange } from "@/hooks/virtual";
 import { useNow } from "@/hooks/useNow";
 import type { SortDir, WatchlistSortKey } from "./sort";
@@ -122,6 +124,9 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
   const showToast = useToast();
   const { openAnime, openSeason } = useAnimeActions();
   const titleOf = useAnimeTitle();
+  const scoreFormat = useScoreFormat();
+  // Stars and smileys carry their own symbol; numbers get a star icon in the table
+  const scoreIcon = SCORE_SCALES[scoreFormat].numeric;
   const containerRef = useRef<HTMLDivElement | null>(null);
   const menuWrapperRef = useRef<HTMLDivElement | null>(null);
   const lastClickedIdRef = useRef<number | null>(null);
@@ -598,7 +603,7 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
           <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/15 to-transparent" />
 
           <div className="absolute top-2.5 left-2.5 right-2.5 flex items-start justify-between gap-1.5">
-            {/* Top Left: Airing Marker & Countdown (truncates before the scores do) */}
+            {/* Top Left: Airing Marker & Countdown */}
             <div className="flex items-center gap-1.5 min-w-0 h-5">
               <AiringDot anime={anime} onCover />
               {cd && anime.next_airing_episode && (
@@ -611,36 +616,36 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
               )}
             </div>
 
-            {/* Top Right: pending-sync dot, AniList average above the user's own score */}
-            <div className="flex items-start gap-1.5 shrink-0">
-              {anime.sync_pending && (
-                <PendingSyncDot className="mt-1.5 ring-2 ring-black/60" />
-              )}
-              {(anime.average_score || anime.user_score > 0) && (
-                <span className="px-1.5 py-0.5 rounded-md bg-black/75 text-[10px] font-mono font-bold flex items-center gap-1.5">
-                  {anime.average_score ? (
-                    <span title="AniList average score" className="flex items-center gap-1 text-amber-400">
-                      <Star className="w-2.5 h-2.5 fill-amber-400" />
-                      {anime.average_score}%
-                    </span>
-                  ) : null}
-                  {anime.average_score && anime.user_score > 0 ? (
-                    <span aria-hidden="true" className="w-px h-2.5 bg-white/25" />
-                  ) : null}
-                  {anime.user_score > 0 && (
-                    <span title="Your score" className="flex items-center gap-1 text-white">
-                      <User className="w-2.5 h-2.5 text-accent" />
-                      {anime.user_score}
-                    </span>
-                  )}
-                </span>
-              )}
-            </div>
+            {/* Top Right: pending-sync dot */}
+            {anime.sync_pending && (
+              <PendingSyncDot className="mt-1.5 shrink-0 ring-2 ring-black/60" />
+            )}
           </div>
 
-          {/* Bottom Overlay: Progress */}
-          <div className="absolute bottom-2.5 left-3 right-3 text-white text-xs font-mono font-bold truncate">
-            Ep {anime.user_progress} / {episodeTotalLabel(anime)}
+          {/* Bottom Overlay: Progress, and the AniList average + your score on the right */}
+          <div className="absolute bottom-2.5 left-3 right-3 flex items-center justify-between gap-1.5 text-white">
+            <span className="text-xs font-mono font-bold truncate">
+              Ep {anime.user_progress} / {episodeTotalLabel(anime)}
+            </span>
+            {(anime.average_score || anime.user_score > 0) && (
+              <span className="shrink-0 px-1.5 py-0.5 rounded-md bg-black/75 text-[10px] font-mono font-bold flex items-center gap-1.5">
+                {anime.average_score ? (
+                  <span title="AniList average score" className="flex items-center gap-1 text-amber-400">
+                    <Star className="w-2.5 h-2.5 fill-amber-400" />
+                    {anime.average_score}%
+                  </span>
+                ) : null}
+                {anime.average_score && anime.user_score > 0 ? (
+                  <span aria-hidden="true" className="w-px h-2.5 bg-white/25" />
+                ) : null}
+                {anime.user_score > 0 && (
+                  <span title="Your score" className="flex items-center gap-1 text-white">
+                    <User className="w-2.5 h-2.5 text-accent" />
+                    {formatScore(anime.user_score, scoreFormat)}
+                  </span>
+                )}
+              </span>
+            )}
           </div>
         </div>
 
@@ -804,8 +809,8 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
                 <div className="text-[10px] text-text-muted truncate">
                   {anime.user_score > 0 && (
                     <span title="Your score" className="font-mono font-bold text-amber-400">
-                      <Star className="inline-block w-2.5 h-2.5 mr-0.5 -mt-0.5 fill-amber-400" />
-                      {anime.user_score}
+                      {scoreIcon && <Star className="inline-block w-2.5 h-2.5 mr-0.5 -mt-0.5 fill-amber-400" />}
+                      {formatScore(anime.user_score, scoreFormat)}
                       {subline && <span className="text-text-muted font-sans font-normal"> · </span>}
                     </span>
                   )}

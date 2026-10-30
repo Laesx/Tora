@@ -25,6 +25,8 @@ import { toraApi } from "@/lib/api";
 import { useAnimeTitle } from "@/contexts/titles";
 import { AiringDot } from "@/components/AiringDot";
 import { useAnimeActions } from "@/contexts/animeActions";
+import { useScoreFormat } from "@/contexts/scoreFormat";
+import { formatMeanScore } from "@/lib/scores";
 
 interface StatsViewProps {
   animeList: AnimeEntry[];
@@ -172,6 +174,7 @@ export const StatsView: React.FC<StatsViewProps> = ({
 }) => {
   const { openAnime } = useAnimeActions();
   const titleOf = useAnimeTitle();
+  const scoreFormat = useScoreFormat();
   const [stats, setStats] = useState<ListStats | null>(null);
   const [drives, setDrives] = useState<DriveStorageSummary[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -235,7 +238,7 @@ export const StatsView: React.FC<StatsViewProps> = ({
         />
         <StatTile
           icon={<Star className="w-4 h-4" />}
-          value={stats.mean_score !== null ? stats.mean_score.toFixed(1) : "—"}
+          value={stats.mean_score !== null ? formatMeanScore(stats.mean_score, scoreFormat) : "—"}
           label="Mean score"
           note={`${stats.scored_count} scored`}
         />

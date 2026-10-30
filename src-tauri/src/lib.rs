@@ -135,6 +135,15 @@ async fn get_custom_lists(state: State<'_, AppState>) -> Result<CustomListsState
         .map_err(|e| e.to_string())?
 }
 
+/// The list owner's AniList score format (`POINT_100`, `POINT_10_DECIMAL`, …); pulls keep it current.
+#[tauri::command]
+async fn get_score_format(state: State<'_, AppState>) -> Result<String, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || db.score_format())
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 async fn set_anime_custom_lists(
     state: State<'_, AppState>,
@@ -1859,6 +1868,7 @@ pub fn run() {
             update_anime_entry,
             batch_update_anime_entries,
             get_custom_lists,
+            get_score_format,
             set_anime_custom_lists,
             create_custom_list,
             delete_custom_list,

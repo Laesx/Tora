@@ -87,6 +87,9 @@ export const toraApi = {
 
   getCustomLists: () => invoke<CustomListsState>("get_custom_lists"),
 
+  // The list owner's AniList score format ("POINT_10_DECIMAL", …); pulls keep it current
+  getScoreFormat: () => invoke<string>("get_score_format"),
+
   // Add to / remove from custom lists or toggle "hidden from status lists"; queued and pushed like any edit
   setAnimeCustomLists: (change: CustomListChange) =>
     invoke<CustomListsState>("set_anime_custom_lists", { change }),
