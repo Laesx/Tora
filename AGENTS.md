@@ -217,7 +217,7 @@ Tora/
 When a filename or media player window title is parsed (`parse_filename` in `src-tauri/src/detection/anitomy.rs` and `AnimeMatcherIndex` in `src-tauri/src/db/mod.rs`):
 1. **C++ Anitomy Tokenization**: Extracts raw `Title`, `Season`, `Episode`, `ReleaseGroup`, `VideoResolution`, etc. Note that Anitomy v2 strips `S02` / `2nd Season` / `Part 2` out of `ElementKind::Title`.
 2. **Parent Directory Fallback for Weak Titles**:
-   - If a video filename contains only numeric digits or generic episode markers (e.g., `Sousou no Frieren\01.mkv`, `special.mp4`, `ep.mkv`), the scanner inspects the parent folder name (`parse_filename(parent_name)`) to recover the true anime title.
+   - If a video filename contains only numeric digits or generic episode markers (e.g., `Houseki no Kuni\01.mkv`, `special.mp4`, `ep.mkv`), the scanner inspects the parent folder name (`parse_filename(parent_name)`) to recover the true anime title.
 3. **Canonical Season & Title Extension**:
    - `RelationsDatabase::resolve_canonical_season_title` checks `anime-relations.txt` to expand abbreviated titles with explicit seasons (e.g., `[Judas] Kusuriya - S03E03.mkv` $\rightarrow$ `"Kusuriya no Hitorigoto 3rd Season"`).
    - Otherwise, Taiga's `ExtendAnimeTitle` logic appends `Season N` / `Part N` when `season > 1` or `part > 1`.

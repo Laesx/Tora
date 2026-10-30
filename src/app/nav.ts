@@ -31,8 +31,8 @@ export interface NavItem {
 /** Every tab in sidebar order (Ctrl+1–8). Settings is a modal, not a tab: see `SETTINGS_SHORTCUT_DIGIT`. */
 export const NAV_ITEMS: NavItem[] = [
   { id: "nowplaying", label: "Now Playing", icon: Activity, keywords: ["playing", "player", "dashboard"] },
-  { id: "watchlist", label: "Anime Watchlist", icon: Tv, keywords: ["list", "library"] },
-  { id: "torrents", label: "Torrents & RSS", icon: Magnet, keywords: ["nyaa", "download", "rss", "feed"] },
+  { id: "watchlist", label: "Anime List", icon: Tv, keywords: ["list", "library"] },
+  { id: "torrents", label: "Torrents", icon: Magnet, keywords: ["nyaa", "download", "rss", "feed"] },
   { id: "seasons", label: "Seasons", icon: CalendarDays, keywords: ["seasonal", "browse"] },
   { id: "schedule", label: "Schedule", icon: CalendarClock, keywords: ["airing", "calendar", "timetable"] },
   { id: "search", label: "Search", icon: Compass, keywords: ["anilist", "find"] },

@@ -703,7 +703,7 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
                 <div className="flex items-center justify-between">
                   <h3 className="text-xs font-semibold uppercase tracking-wider text-text-secondary flex items-center gap-2">
                     <Film className="w-4 h-4 text-accent" />
-                    Episode Grid & Local Disk Availability ({localFiles.length} files on disk)
+                    Episodes ({localFiles.length} files on disk)
                   </h3>
                   <div className="flex items-center gap-3 text-[11px] text-text-muted">
                     <span className="flex items-center gap-1">
@@ -765,7 +765,7 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
                 <div className="space-y-2">
                   <h4 className="text-xs font-semibold uppercase tracking-wider text-text-secondary flex items-center gap-1.5">
                     <HardDrive className="w-3.5 h-3.5 text-accent" />
-                    Matched Local Video Files
+                    Local Video Files
                   </h4>
                   <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
                     {localFiles.map((f) => (
@@ -864,7 +864,7 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
                     type="text"
                     value={synonymsInput}
                     onChange={(e) => setSynonymsInput(e.target.value)}
-                    placeholder="e.g. Frieren, Sousou no Frieren"
+                    placeholder="Separated by a coma: HnK, Houseki"
                     className="w-full px-3 py-2 rounded-lg bg-bg-primary border border-border-subtle text-xs text-text-primary focus:outline-none focus:border-accent"
                   />
                 </div>
@@ -878,7 +878,7 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
                       type="text"
                       value={customFolder}
                       onChange={(e) => setCustomFolder(e.target.value)}
-                      placeholder="e.g. D:\Anime\Sousou no Frieren"
+                      placeholder="e.g. D:\Anime\Houseki no Kuni"
                       className="flex-1 min-w-0 px-3 py-2 rounded-lg bg-bg-primary border border-border-subtle text-xs font-mono text-text-primary focus:outline-none focus:border-accent"
                     />
                     <button
