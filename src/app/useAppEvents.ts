@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
   AppSettings,
+  DetectedMediaSession,
   RelationsUpdatedEvent,
   ScanSummary,
   SyncSummary,
@@ -26,6 +27,8 @@ export interface AppEventHandlers {
   accountSwitched: (event: TrackerAccountSwitchedEvent) => void;
   entrySynced: (event: TrackerEntrySyncedEvent) => void;
   relationsUpdated: (event: RelationsUpdatedEvent) => void;
+  /** An update held until the player closed was applied (the session is already gone) */
+  playbackScrobbled: (session: DetectedMediaSession) => void;
   /** Runs once, after every listener is registered */
   ready: () => void;
 }
@@ -42,6 +45,7 @@ const EVENTS: [string, Exclude<keyof AppEventHandlers, "ready">][] = [
   ["tracker-account-switched", "accountSwitched"],
   ["tracker-entry-synced", "entrySynced"],
   ["relations-updated", "relationsUpdated"],
+  ["playback-scrobbled", "playbackScrobbled"],
 ];
 
 /**

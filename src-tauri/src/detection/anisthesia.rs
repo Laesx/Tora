@@ -34,8 +34,129 @@ pub struct DetectedMediaSession {
     pub matched_current_progress: Option<u32>,
     pub matched_total_episodes: Option<u32>,
     pub detected_at_unix: i64,
-    pub elapsed_seconds: u64,
     pub auto_synced: bool,
+    /// Auto mode: the unix second the list update fires. Set only while the countdown runs; the UI
+    /// shows `update_due_at - now` from its own clock.
+    #[serde(default)]
+    pub update_due_at: Option<i64>,
+    /// Seconds left while the countdown is paused (the player lost focus); None = not started yet.
+    #[serde(default)]
+    pub update_remaining_seconds: Option<u64>,
+    /// Manual update mode: the episode can be updated with the "Update" button (`confirm_playback_update`).
+    #[serde(default)]
+    pub awaiting_confirmation: bool,
+    /// Auto mode with "wait for the player to close": the countdown finished, the update runs once
+    /// the player closes or switches to another file.
+    #[serde(default)]
+    pub waiting_for_close: bool,
+    /// The player closed while an update was still offered (manual mode); kept until updated or dismissed.
+    #[serde(default)]
+    pub player_closed: bool,
+}
+
+/// How a matched playback session turns into a list update (`AppSettings` update fields).
+#[derive(Debug, Clone, Copy)]
+pub struct UpdatePolicy {
+    /// Never count down: offer the "Update" button instead.
+    pub manual: bool,
+    pub delay_seconds: u64,
+    pub wait_for_close: bool,
+    pub require_focus: bool,
+}
+
+impl DetectedMediaSession {
+    /// Start the countdown over (new match, relinked episode, matched anime removed).
+    pub fn restart_countdown(&mut self, now: i64) {
+        self.detected_at_unix = now;
+        self.auto_synced = false;
+        self.update_due_at = None;
+        self.update_remaining_seconds = None;
+        self.awaiting_confirmation = false;
+        self.waiting_for_close = false;
+        self.player_closed = false;
+    }
+
+    /// The detected episode is at or below the list progress (rewatch): never counts down or updates.
+    pub fn is_already_seen(&self) -> bool {
+        matches!(
+            (self.parsed.episode_number, self.matched_current_progress),
+            (Some(ep), Some(progress)) if ep <= progress
+        )
+    }
+
+    /// One poll of a matched, still-playing session: advance the countdown and the update flags.
+    /// Returns true when the episode should be scrobbled now (auto mode, countdown done, not held).
+    ///
+    /// The countdown is a pausable deadline: it starts as `now + delay`, a focus loss (when focus is
+    /// required) pauses it into `update_remaining_seconds`, and regaining focus moves the deadline to
+    /// `now + remaining`. It only changes on those transitions, so the UI can tick from its own clock.
+    pub fn advance_update(&mut self, policy: &UpdatePolicy, player_focused: bool, now: i64) -> bool {
+        self.player_closed = false;
+        if self.auto_synced || self.is_already_seen() || policy.manual {
+            self.update_due_at = None;
+            self.update_remaining_seconds = None;
+            self.waiting_for_close = false;
+            self.awaiting_confirmation = policy.manual
+                && !self.auto_synced
+                && !self.is_already_seen()
+                && self.parsed.episode_number.is_some();
+            return false;
+        }
+        self.awaiting_confirmation = false;
+        if self.waiting_for_close {
+            // Held until the player closes, unless the option was turned off meanwhile
+            if policy.wait_for_close {
+                return false;
+            }
+            self.waiting_for_close = false;
+            return true;
+        }
+
+        let counting = !policy.require_focus || player_focused;
+        match self.update_due_at {
+            Some(due) if due <= now => {
+                self.update_due_at = None;
+                self.update_remaining_seconds = Some(0);
+                self.waiting_for_close = policy.wait_for_close;
+                !policy.wait_for_close
+            }
+            Some(due) => {
+                if !counting {
+                    self.update_due_at = None;
+                    self.update_remaining_seconds = Some((due - now) as u64);
+                }
+                false
+            }
+            None => {
+                let remaining = *self.update_remaining_seconds.get_or_insert(policy.delay_seconds);
+                if counting {
+                    self.update_due_at = Some(now + remaining as i64);
+                    self.update_remaining_seconds = None;
+                }
+                false
+            }
+        }
+    }
+}
+
+/// Process owning the foreground window (the countdown's "player must be in focus" check).
+#[cfg(windows)]
+pub fn foreground_process_id() -> Option<u32> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.is_null() {
+            return None;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        (pid != 0).then_some(pid)
+    }
+}
+
+#[cfg(not(windows))]
+pub fn foreground_process_id() -> Option<u32> {
+    None
 }
 
 /// Raw window & media candidate captured from `anisthesia::win::GetResults`.
@@ -395,5 +516,102 @@ mod tests {
         let players = default_players();
         // Verify calling `anisthesia::win::GetResults` via C++ FFI executes cleanly
         let _ = detect_active_media_player(&players);
+    }
+
+    fn matched_session(ep: u32, progress: u32) -> DetectedMediaSession {
+        DetectedMediaSession {
+            player_id: "mpv".into(),
+            player_name: "mpv".into(),
+            process_id: 1,
+            executable_path: String::new(),
+            raw_window_title: String::new(),
+            cleaned_media_title: "Show - 05.mkv".into(),
+            parsed: AnitomyElements {
+                episode_number: Some(ep),
+                ..Default::default()
+            },
+            matched_anime_id: Some(1),
+            matched_anime_title: Some("Show".into()),
+            matched_cover_image: None,
+            matched_current_progress: Some(progress),
+            matched_total_episodes: Some(12),
+            detected_at_unix: 1000,
+            auto_synced: false,
+            update_due_at: None,
+            update_remaining_seconds: None,
+            awaiting_confirmation: false,
+            waiting_for_close: false,
+            player_closed: false,
+        }
+    }
+
+    const AUTO: UpdatePolicy = UpdatePolicy {
+        manual: false,
+        delay_seconds: 120,
+        wait_for_close: false,
+        require_focus: false,
+    };
+
+    #[test]
+    fn auto_mode_scrobbles_at_the_deadline() {
+        let mut s = matched_session(5, 4);
+        assert!(!s.advance_update(&AUTO, false, 1000));
+        assert_eq!(s.update_due_at, Some(1120));
+        // The deadline stays put between polls
+        assert!(!s.advance_update(&AUTO, false, 1100));
+        assert_eq!(s.update_due_at, Some(1120));
+        assert!(s.advance_update(&AUTO, false, 1120));
+        assert_eq!(s.update_due_at, None);
+    }
+
+    #[test]
+    fn already_seen_episodes_never_count_down() {
+        for policy in [AUTO, UpdatePolicy { manual: true, ..AUTO }] {
+            let mut s = matched_session(4, 4);
+            assert!(!s.advance_update(&policy, true, 5000));
+            assert_eq!(s.update_due_at, None);
+            assert!(!s.awaiting_confirmation && !s.waiting_for_close);
+        }
+    }
+
+    #[test]
+    fn manual_mode_offers_the_update_without_a_countdown() {
+        let mut s = matched_session(5, 4);
+        let manual = UpdatePolicy { manual: true, ..AUTO };
+        assert!(!s.advance_update(&manual, false, 9000));
+        assert!(s.awaiting_confirmation);
+        assert_eq!(s.update_due_at, None);
+    }
+
+    #[test]
+    fn wait_for_close_holds_the_update() {
+        let mut s = matched_session(5, 4);
+        let wait = UpdatePolicy { wait_for_close: true, ..AUTO };
+        assert!(!s.advance_update(&wait, false, 1000));
+        assert!(!s.advance_update(&wait, false, 1120));
+        assert!(s.waiting_for_close);
+        assert!(!s.advance_update(&wait, false, 1200));
+        // Turning the option off while held scrobbles on the next poll
+        assert!(s.advance_update(&AUTO, false, 1203));
+    }
+
+    #[test]
+    fn focus_mode_pauses_and_resumes_the_deadline() {
+        let mut s = matched_session(5, 4);
+        let focus = UpdatePolicy { require_focus: true, delay_seconds: 60, ..AUTO };
+        // Not focused at detection: never starts
+        assert!(!s.advance_update(&focus, false, 1000));
+        assert_eq!((s.update_due_at, s.update_remaining_seconds), (None, Some(60)));
+        // Focused: runs
+        assert!(!s.advance_update(&focus, true, 1010));
+        assert_eq!(s.update_due_at, Some(1070));
+        // Focus lost 20 s later: paused with 40 s left, however long it stays paused
+        assert!(!s.advance_update(&focus, false, 1030));
+        assert_eq!((s.update_due_at, s.update_remaining_seconds), (None, Some(40)));
+        assert!(!s.advance_update(&focus, false, 5000));
+        // Back in focus: the deadline moves by the pause
+        assert!(!s.advance_update(&focus, true, 5005));
+        assert_eq!(s.update_due_at, Some(5045));
+        assert!(s.advance_update(&focus, true, 5045));
     }
 }

@@ -2,11 +2,13 @@ import React from "react";
 import { ExternalLink, Keyboard, LogIn, LogOut, Search, Settings, User } from "lucide-react";
 import { AppSettings } from "@/lib/types";
 import toraMark from "@/assets/tora-mark.svg";
-import { NAV_ITEMS, NavTab } from "./nav";
+import { NAV_ITEMS, NavTab, SETTINGS_SHORTCUT_DIGIT } from "./nav";
 
 interface SidebarProps {
   activeTab: NavTab;
   onNavigate: (tab: NavTab) => void;
+  onOpenSettings: () => void;
+  settingsOpen: boolean;
   onOpenPalette: () => void;
   onOpenShortcuts: () => void;
   /** Ctrl is held: show each tab's Ctrl+N badge */
@@ -40,15 +42,15 @@ const iconButtonClass = (active: boolean) =>
   }`;
 
 /**
- * Tab number badge for Ctrl+N (N = position in NAV_ITEMS, Settings last). Always mounted and absolutely
- * positioned so showing it never changes the row's size; it fades in while Ctrl is held.
+ * Ctrl+N badge (N = the tab's position in NAV_ITEMS, or the Settings digit on the gear). Always mounted and
+ * absolutely positioned so showing it never changes the row's size; it fades in while Ctrl is held.
  */
-const TabHint: React.FC<{ tab: NavTab; visible: boolean; className?: string }> = ({ tab, visible, className = "" }) => (
+const TabHint: React.FC<{ digit: number; visible: boolean; className?: string }> = ({ digit, visible, className = "" }) => (
   <kbd
     aria-hidden={!visible}
     className={`absolute pointer-events-none px-1.5 py-0.5 text-[10px] font-mono rounded bg-bg-primary text-text-primary border border-border-subtle shadow-sm whitespace-nowrap transition-opacity duration-200 ${visible ? "opacity-100" : "opacity-0"} ${className}`}
   >
-    {NAV_ITEMS.findIndex((item) => item.id === tab) + 1}
+    {digit}
   </kbd>
 );
 
@@ -56,6 +58,8 @@ const TabHint: React.FC<{ tab: NavTab; visible: boolean; className?: string }> =
 export const Sidebar: React.FC<SidebarProps> = ({
   activeTab,
   onNavigate,
+  onOpenSettings,
+  settingsOpen,
   onOpenPalette,
   onOpenShortcuts,
   showShortcutHints,
@@ -103,12 +107,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <Keyboard className="w-4 h-4" />
           </button>
           <button
-            onClick={() => onNavigate("settings")}
-            className={`relative ${iconButtonClass(activeTab === "settings")}`}
-            title="Settings (Ctrl+9)"
+            onClick={onOpenSettings}
+            className={`relative ${iconButtonClass(settingsOpen)}`}
+            title={`Settings (Ctrl+${SETTINGS_SHORTCUT_DIGIT})`}
           >
             <Settings className="w-4 h-4" />
-            <TabHint tab="settings" visible={showShortcutHints} className="top-full mt-1 right-0 z-10" />
+            <TabHint digit={SETTINGS_SHORTCUT_DIGIT} visible={showShortcutHints} className="top-full mt-1 right-0 z-10" />
           </button>
         </div>
       </div>
@@ -126,7 +130,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       </button>
 
       <nav className="space-y-1">
-        {NAV_ITEMS.filter((item) => item.id !== "settings").map(({ id, label, icon: Icon }) => (
+        {NAV_ITEMS.map(({ id, label, icon: Icon }, i) => (
           <React.Fragment key={id}>
             <button onClick={() => onNavigate(id)} className={navClass(activeTab === id)}>
               <span className="flex items-center gap-2.5">
@@ -141,7 +145,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   )}
                   {id === "watchlist" && <span className="text-[11px] font-mono opacity-80">{listCount}</span>}
                 </span>
-                <TabHint tab={id} visible={showShortcutHints} className="right-0 top-1/2 -translate-y-1/2" />
+                <TabHint digit={i + 1} visible={showShortcutHints} className="right-0 top-1/2 -translate-y-1/2" />
               </span>
             </button>
             {id === "nowplaying" && (

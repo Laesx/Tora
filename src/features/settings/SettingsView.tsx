@@ -52,6 +52,20 @@ const SECTIONS: { id: SettingsSection; label: string; icon: React.ElementType }[
   { id: "about", label: "About", icon: Info },
 ];
 
+// Settings -> Playback: automatic list update options (off in manual mode)
+const UPDATE_OPTIONS: { key: "update_wait_for_close" | "update_require_focus"; label: string; hint: string }[] = [
+  {
+    key: "update_wait_for_close",
+    label: "Wait for the media player to close",
+    hint: "Update once the player closes or moves to another file, not when the delay ends",
+  },
+  {
+    key: "update_require_focus",
+    label: "Media player must be in focus",
+    hint: "The delay only counts down while the player is the active window",
+  },
+];
+
 // Settings -> About: what Tora is built on (links open in the browser)
 const CREDITS: { name: string; role: string; license?: string; url: string }[] = [
   { name: "Taiga", role: "The anime tracker Tora is inspired by", url: "https://taiga.moe" },
@@ -125,10 +139,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     await onUpdateSettings({ ...settings, players: updatedPlayers });
   };
 
+  const isManualUpdate = settings.update_mode === "manual";
+
+  const handleSetAllPlayers = async (enabled: boolean) => {
+    await onUpdateSettings({ ...settings, players: settings.players.map((p) => ({ ...p, enabled })) });
+  };
+
   return (
-    <div className="p-6 max-w-7xl mx-auto flex gap-6 items-start">
+    <div className="flex h-full min-h-0">
       {/* Section Navigation */}
-      <nav className="w-48 shrink-0 sticky top-6 space-y-1">
+      <nav className="w-52 shrink-0 p-4 space-y-1 border-r border-border-subtle overflow-y-auto">
         {SECTIONS.map(({ id, label, icon: Icon }) => (
           <button
             key={id}
@@ -144,8 +164,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         ))}
       </nav>
 
-      {/* Active Section */}
-      <div className="flex-1 min-w-0 space-y-6">
+      {/* Active Section (keyed so switching sections starts at the top) */}
+      <div key={section} className="flex-1 min-w-0 overflow-y-auto [scrollbar-gutter:stable] p-6 space-y-6">
         {section === "appearance" && (
           <>
             {/* Theme & Aesthetic Section */}
@@ -343,6 +363,20 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
               <div className="space-y-3 text-xs">
                 <div>
+                  <label className="block text-[11px] text-text-muted mb-1">List Update</label>
+                  <select
+                    value={settings.update_mode}
+                    onChange={(e) =>
+                      onUpdateSettings({ ...settings, update_mode: e.target.value as AppSettings["update_mode"] })
+                    }
+                    className="w-full px-3 py-2 rounded-xl bg-bg-primary border border-border-subtle text-text-primary cursor-pointer"
+                  >
+                    <option value="auto">Automatic: update the list after the delay</option>
+                    <option value="manual">Manual: open Now Playing and offer an Update button</option>
+                  </select>
+                </div>
+
+                <div className={isManualUpdate ? "opacity-50" : ""}>
                   <label className="block text-[11px] text-text-muted mb-1">
                     Delay Before Updating Progress (Seconds)
                   </label>
@@ -350,6 +384,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     type="number"
                     min={2}
                     max={600}
+                    disabled={isManualUpdate}
                     value={settings.recognition_delay_seconds}
                     onChange={(e) =>
                       onUpdateSettings({
@@ -360,9 +395,43 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                         ),
                       })
                     }
-                    className="w-full px-3 py-2 rounded-xl bg-bg-primary border border-border-subtle font-mono text-text-primary"
+                    className="w-full px-3 py-2 rounded-xl bg-bg-primary border border-border-subtle font-mono text-text-primary disabled:cursor-not-allowed"
                   />
                 </div>
+
+                {UPDATE_OPTIONS.map(({ key, label, hint }) => (
+                  <label
+                    key={key}
+                    className={`flex items-start gap-2.5 ${isManualUpdate ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={settings[key]}
+                      disabled={isManualUpdate}
+                      onChange={(e) => onUpdateSettings({ ...settings, [key]: e.target.checked })}
+                      className="rounded accent-accent w-4 h-4 mt-0.5 cursor-pointer disabled:cursor-not-allowed"
+                    />
+                    <span>
+                      <span className="font-semibold text-text-primary">{label}</span>
+                      <span className="block text-[11px] text-text-muted">{hint}</span>
+                    </span>
+                  </label>
+                ))}
+
+                <label className="flex items-start gap-2.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={settings.discord_presence_enabled}
+                    onChange={(e) => onUpdateSettings({ ...settings, discord_presence_enabled: e.target.checked })}
+                    className="rounded accent-accent w-4 h-4 mt-0.5 cursor-pointer"
+                  />
+                  <span>
+                    <span className="font-semibold text-text-primary">Discord Rich Presence</span>
+                    <span className="block text-[11px] text-text-muted">
+                      Show the anime and episode you're watching on your Discord profile
+                    </span>
+                  </span>
+                </label>
 
                 <div>
                   <label className="block text-[11px] text-text-muted mb-1">
@@ -386,10 +455,28 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
             {/* Anisthesia Media Players Registry */}
             <div className="bg-bg-secondary border border-border-subtle rounded-2xl p-5 space-y-3">
-              <h2 className="text-sm font-bold text-text-primary flex items-center gap-2">
-                <Cpu className="w-4 h-4 text-accent" />
-                Supported Media Players ({settings.players.length})
-              </h2>
+              <div className="flex items-center justify-between gap-3">
+                <h2 className="text-sm font-bold text-text-primary flex items-center gap-2">
+                  <Cpu className="w-4 h-4 text-accent" />
+                  Supported Media Players ({settings.players.filter((p) => p.enabled).length}/{settings.players.length})
+                </h2>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    onClick={() => handleSetAllPlayers(true)}
+                    disabled={settings.players.every((p) => p.enabled)}
+                    className="px-2.5 py-1 rounded-lg bg-bg-tertiary hover:bg-bg-primary border border-border-subtle text-[11px] font-semibold text-text-secondary hover:text-text-primary transition disabled:opacity-40 disabled:cursor-default"
+                  >
+                    Select all
+                  </button>
+                  <button
+                    onClick={() => handleSetAllPlayers(false)}
+                    disabled={settings.players.every((p) => !p.enabled)}
+                    className="px-2.5 py-1 rounded-lg bg-bg-tertiary hover:bg-bg-primary border border-border-subtle text-[11px] font-semibold text-text-secondary hover:text-text-primary transition disabled:opacity-40 disabled:cursor-default"
+                  >
+                    Deselect all
+                  </button>
+                </div>
+              </div>
 
               <div className="divide-y divide-border-subtle max-h-96 overflow-y-auto pr-1">
                 {settings.players.map((player) => (

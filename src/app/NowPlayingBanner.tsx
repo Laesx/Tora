@@ -1,11 +1,14 @@
 import React from "react";
 import { AlertTriangle, CheckCircle2, Play } from "lucide-react";
 import { DetectedMediaSession } from "@/lib/types";
+import { UpdateCountdown } from "@/components/UpdateCountdown";
 
 interface NowPlayingBannerProps {
   session: DetectedMediaSession;
   recognitionDelaySeconds: number;
   onOpenNowPlaying: () => void;
+  /** Manual update mode's "Update" button */
+  onConfirmUpdate: () => void;
   onDismiss: () => void;
 }
 
@@ -14,6 +17,7 @@ export const NowPlayingBanner: React.FC<NowPlayingBannerProps> = ({
   session,
   recognitionDelaySeconds,
   onOpenNowPlaying,
+  onConfirmUpdate,
   onDismiss,
 }) => {
   const ep = session.parsed.episode_number;
@@ -25,7 +29,7 @@ export const NowPlayingBanner: React.FC<NowPlayingBannerProps> = ({
       <div className="flex items-center gap-3 min-w-0">
         <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-accent text-white text-[11px] font-bold shrink-0">
           <Play className="w-3 h-3 fill-current" />
-          NOW PLAYING ({session.player_name})
+          {session.player_closed ? "PLAYER CLOSED" : "NOW PLAYING"} ({session.player_name})
         </span>
         <span className="text-xs font-bold text-text-primary truncate">
           {session.matched_anime_title || session.parsed.anime_title} — Episode {ep ?? "?"}
@@ -44,9 +48,19 @@ export const NowPlayingBanner: React.FC<NowPlayingBannerProps> = ({
               <CheckCircle2 className="w-4 h-4" />
               Progress Scrobbled!
             </span>
-          ) : alreadySeen ? null : (
+          ) : alreadySeen ? null : session.awaiting_confirmation ? (
+            <button
+              onClick={onConfirmUpdate}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-accent hover:bg-accent-hover text-white font-semibold transition text-[11px]"
+            >
+              <CheckCircle2 className="w-3.5 h-3.5" />
+              Update to episode {ep}
+            </button>
+          ) : session.waiting_for_close ? (
+            <span className="text-amber-300 text-[11px] font-semibold">Updates when the player closes</span>
+          ) : (
             <span className="text-amber-300 font-mono text-[11px]">
-              Auto-updating in {Math.max(0, recognitionDelaySeconds - session.elapsed_seconds)}s...
+              Auto-updating in <UpdateCountdown session={session} delaySeconds={recognitionDelaySeconds} />s...
             </span>
           )
         ) : (

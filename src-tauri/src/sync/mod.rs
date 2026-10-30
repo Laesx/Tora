@@ -657,8 +657,8 @@ impl TrackerSyncService {
                     session.matched_cover_image = None;
                     session.matched_current_progress = None;
                     session.matched_total_episodes = None;
-                    session.elapsed_seconds = 0;
-                    session.auto_synced = false;
+                    let detected_at = session.detected_at_unix;
+                    session.restart_countdown(detected_at);
                 }
             }
         }

@@ -44,6 +44,7 @@ import { EpisodeProgressBar, ReadyBadge } from "@/components/EpisodeProgressBar"
 import { AiringDot } from "@/components/AiringDot";
 import { useToast } from "@/contexts/toast";
 import { useAnimeActions } from "@/contexts/animeActions";
+import { UpdateCountdown } from "@/components/UpdateCountdown";
 
 interface NowPlayingHeroProps {
   session: DetectedMediaSession;
@@ -52,6 +53,8 @@ interface NowPlayingHeroProps {
   animeList: AnimeEntry[];
   settings: AppSettings;
   onLinkDetectedEpisode: (animeId: number, aliasTitle: string) => Promise<void>;
+  /** Manual update mode's "Update" button */
+  onConfirmUpdate: () => void;
   /** Show this season in the Seasons tab */
   onOpenSeason: (season: string, year: number) => void;
 }
@@ -67,6 +70,7 @@ export const NowPlayingHero: React.FC<NowPlayingHeroProps> = ({
   animeList,
   settings,
   onLinkDetectedEpisode,
+  onConfirmUpdate,
   onOpenSeason,
 }) => {
   const { openAnime, searchTorrents } = useAnimeActions();
@@ -169,10 +173,23 @@ export const NowPlayingHero: React.FC<NowPlayingHeroProps> = ({
     <span className="px-2.5 py-1 rounded-lg bg-bg-tertiary text-text-muted text-[11px] font-semibold">
       Already watched
     </span>
+  ) : session.awaiting_confirmation ? (
+    <button
+      onClick={onConfirmUpdate}
+      className="px-2.5 py-1 rounded-lg bg-accent hover:bg-accent-hover text-white text-[11px] font-semibold flex items-center gap-1.5 transition cursor-pointer"
+    >
+      <CheckCircle2 className="w-3.5 h-3.5" />
+      Update to episode {ep}
+    </button>
+  ) : session.waiting_for_close ? (
+    <span className="px-2.5 py-1 rounded-lg bg-amber-500/20 text-amber-300 text-[11px] font-semibold flex items-center gap-1.5">
+      <Clock className="w-3.5 h-3.5" />
+      Updates when the player closes
+    </span>
   ) : (
     <span className="px-2.5 py-1 rounded-lg bg-amber-500/20 text-amber-300 text-[11px] font-mono flex items-center gap-1.5">
       <Clock className="w-3.5 h-3.5" />
-      Updating in {Math.max(0, settings.recognition_delay_seconds - session.elapsed_seconds)}s
+      Updating in <UpdateCountdown session={session} delaySeconds={settings.recognition_delay_seconds} />s
     </span>
   );
 
@@ -298,6 +315,7 @@ export const NowPlayingHero: React.FC<NowPlayingHeroProps> = ({
               <span className="px-2.5 py-1 rounded-lg bg-accent text-white text-[11px] font-bold flex items-center gap-1.5">
                 <Play className="w-3 h-3 fill-current" />
                 {session.player_name}
+                {session.player_closed && " (closed)"}
               </span>
               {statusChip}
               {entry && STATUS_INFO[entry.user_status] && (

@@ -38,7 +38,7 @@ export function useMediaPoll(handlers: {
         if (session?.matched_anime_id && session.auto_synced && !prev?.auto_synced) {
           handlersRef.current.onScrobbled(session);
         }
-        // Skip re-renders while nothing visible changed (the countdown only matters while it runs)
+        // Skip re-renders while nothing visible changed (the countdown ticks from its deadline)
         const unchanged =
           prev &&
           session &&
@@ -46,7 +46,11 @@ export function useMediaPoll(handlers: {
           prev.matched_anime_id === session.matched_anime_id &&
           prev.matched_current_progress === session.matched_current_progress &&
           prev.auto_synced === session.auto_synced &&
-          (session.auto_synced || !session.matched_anime_id || prev.elapsed_seconds === session.elapsed_seconds);
+          prev.awaiting_confirmation === session.awaiting_confirmation &&
+          prev.waiting_for_close === session.waiting_for_close &&
+          prev.player_closed === session.player_closed &&
+          prev.update_due_at === session.update_due_at &&
+          prev.update_remaining_seconds === session.update_remaining_seconds;
         if (!unchanged) setSession(session);
       } catch {
         // Ignore transient poll errors

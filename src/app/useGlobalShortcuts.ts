@@ -1,7 +1,8 @@
 import { useEffect, useRef } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { AnimeEntry } from "@/lib/types";
 import type { NavDirection } from "@/features/watchlist/VirtualWatchlist";
-import { NAV_ITEMS, NavTab } from "./nav";
+import { NAV_ITEMS, NavTab, SETTINGS_SHORTCUT_DIGIT } from "./nav";
 
 interface ShortcutState {
   onWatchlist: boolean;
@@ -9,6 +10,7 @@ interface ShortcutState {
   paletteOpen: boolean;
   signOutOpen: boolean;
   shortcutsOpen: boolean;
+  settingsOpen: boolean;
   /** Update prompt or changelog */
   updateModalOpen: boolean;
   quickMenuOpen: boolean;
@@ -28,6 +30,7 @@ interface ShortcutState {
   closeUpdateModal: () => void;
   openShortcuts: () => void;
   closeShortcuts: () => void;
+  closeSettings: () => void;
   closeQuickMenu: () => void;
   closeDrawer: () => void;
   openAnime: (anime: AnimeEntry) => void;
@@ -37,6 +40,7 @@ interface ShortcutState {
   /** Focus the selected card, or select the first one; false when the list is empty */
   enterList: () => boolean;
   navigate: (tab: NavTab) => void;
+  openSettings: () => void;
   rescanLibrary: () => void;
 }
 
@@ -48,17 +52,26 @@ const ARROWS: Record<string, NavDirection> = {
 };
 
 /**
- * F5 rescan (and never reload the webview), Ctrl+K palette, Ctrl+1–9 tabs (sidebar order, 9 =
- * Settings), ? shortcuts sheet.
+ * F5 rescan (and never reload the webview), F11 fullscreen, Ctrl+K palette, Ctrl+1–8 tabs (sidebar order),
+ * Ctrl+9 Settings, ? shortcuts sheet.
  *
  * Watchlist: focus decides what keys do. In the search box keys edit text, except ↓ (moves focus to
  * the selected / first card) and Enter (opens the selected anime, else the top result). On the
  * list, arrows move the selection and focus with it, Enter opens it, Ctrl+A selects all, typing
  * goes back to the search box with that character, Backspace goes back and deletes one, and ↑ on
- * the first row goes back. Escape peels one layer: modal → palette → quick menu → drawer → (on the
+ * the first row goes back. Escape peels one layer: modal → palette → Settings → quick menu → drawer → (on the
  * list during a search) back to the search box, deselecting → selection → search text → search
  * focus. Keep `SHORTCUT_GROUPS` (shortcuts.ts) in step with this.
  */
+async function toggleFullscreen() {
+  const win = getCurrentWindow();
+  try {
+    await win.setFullscreen(!(await win.isFullscreen()));
+  } catch (err) {
+    console.error("Fullscreen toggle failed:", err);
+  }
+}
+
 export function useGlobalShortcuts(state: ShortcutState) {
   const ref = useRef(state);
   ref.current = state;
@@ -77,7 +90,7 @@ export function useGlobalShortcuts(state: ShortcutState) {
           target.isContentEditable);
       const ctrl = e.ctrlKey || e.metaKey;
       const anyModifier = ctrl || e.altKey;
-      const layerOpen = s.drawerOpen || s.paletteOpen || s.signOutOpen || s.shortcutsOpen;
+      const layerOpen = s.drawerOpen || s.paletteOpen || s.signOutOpen || s.shortcutsOpen || s.settingsOpen;
       const listFocused = !isInputFocused && s.onWatchlist && !layerOpen;
       const searchFocused =
         s.onWatchlist && !layerOpen && searchInput !== null && target === searchInput;
@@ -94,11 +107,16 @@ export function useGlobalShortcuts(state: ShortcutState) {
         // Always swallow F5 so the webview never reloads; rescan when nothing else has focus
         e.preventDefault();
         if (!isInputFocused && !layerOpen) s.rescanLibrary();
+      } else if (e.key === "F11") {
+        e.preventDefault();
+        if (!e.repeat) void toggleFullscreen();
       } else if (ctrl && !e.altKey && !e.shiftKey && /^(Digit|Numpad)[1-9]$/.test(e.code)) {
         // By physical key, so it works on every keyboard layout and inside text fields
         e.preventDefault();
-        const item = NAV_ITEMS[Number(e.code.slice(-1)) - 1];
-        if (item && !s.signOutOpen) s.navigate(item.id);
+        const digit = Number(e.code.slice(-1));
+        if (s.signOutOpen) return;
+        if (digit === SETTINGS_SHORTCUT_DIGIT) s.openSettings();
+        else if (NAV_ITEMS[digit - 1]) s.navigate(NAV_ITEMS[digit - 1].id);
       } else if (ctrl && e.key.toLowerCase() === "k") {
         e.preventDefault();
         s.togglePalette();
@@ -149,6 +167,7 @@ export function useGlobalShortcuts(state: ShortcutState) {
         else if (s.signOutOpen) s.closeSignOut();
         else if (s.shortcutsOpen) s.closeShortcuts();
         else if (s.paletteOpen) s.closePalette();
+        else if (s.settingsOpen) s.closeSettings();
         else if (s.quickMenuOpen) s.closeQuickMenu();
         else if (s.drawerOpen) s.closeDrawer();
         else if (listFocused && s.searchQuery) backToSearch();

@@ -21,6 +21,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { keys: ["Ctrl+1–8"], label: "Go to a sidebar tab (hold Ctrl to see the numbers)" },
       { keys: ["Ctrl+9"], label: "Open Settings" },
       { keys: ["F5"], label: "Rescan library folders" },
+      { keys: ["F11"], label: "Toggle fullscreen" },
       { keys: ["?"], label: "Show keyboard shortcuts" },
       { keys: ["Esc"], label: "Close the topmost window, menu or drawer" },
     ],

@@ -285,6 +285,19 @@ pub struct AppSettings {
     pub anilist_avatar: Option<String>,
     pub recognition_enabled: bool,
     pub recognition_delay_seconds: u64,
+    /// "auto": count down, then update the list (default) | "manual": never update by itself, Now
+    /// Playing offers an "Update" button.
+    #[serde(default = "default_update_mode")]
+    pub update_mode: String,
+    /// Auto mode: hold the update until the media player closes (or plays another file).
+    #[serde(default)]
+    pub update_wait_for_close: bool,
+    /// Auto mode: the countdown only advances while the media player is the foreground window.
+    #[serde(default)]
+    pub update_require_focus: bool,
+    /// Show the playing anime as Discord Rich Presence ("Watching Tora").
+    #[serde(default = "default_true")]
+    pub discord_presence_enabled: bool,
     pub custom_media_player_path: String,
     /// Torrent application exe; empty = auto-detect (registry `.torrent` handler, then qBittorrent).
     #[serde(default)]
@@ -316,6 +329,10 @@ pub struct AppSettings {
     pub settings_recovered: bool,
 }
 
+fn default_update_mode() -> String {
+    "auto".into()
+}
+
 fn default_title_language() -> String {
     "romaji".into()
 }
@@ -344,7 +361,11 @@ impl Default for AppSettings {
             anilist_user_id: None,
             anilist_avatar: None,
             recognition_enabled: true,
-            recognition_delay_seconds: 10,
+            recognition_delay_seconds: 120,
+            update_mode: default_update_mode(),
+            update_wait_for_close: false,
+            update_require_focus: false,
+            discord_presence_enabled: true,
             custom_media_player_path: String::new(),
             torrent_app_path: String::new(),
             torrent_category: default_torrent_category(),

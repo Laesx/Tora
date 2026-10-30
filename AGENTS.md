@@ -58,14 +58,15 @@ Tora/
 │   ├── main.tsx                          # React 19 entrypoint & root provider
 │   ├── App.tsx                           # Wiring only: app state hooks, context providers, tab switch, drawer / palette / modals
 │   ├── app/                              # App shell and app-wide state
-│   │   ├── nav.ts                        # `NavTab`, `NAV_ITEMS` (sidebar rows + palette "Go to" commands)
-│   │   ├── Sidebar.tsx                   # Brand, Ctrl+K + shortcuts buttons, tab navigation (Ctrl+N badges while Ctrl is held), AniList account card
+│   │   ├── nav.ts                        # `NavTab`, `NAV_ITEMS` (the 8 tabs: sidebar rows, Ctrl+1–8, palette "Go to"), `SETTINGS_SHORTCUT_DIGIT` (Settings is a modal, not a tab)
+│   │   ├── Sidebar.tsx                   # Brand, Ctrl+K + shortcuts + Settings (modal) buttons, tab navigation (Ctrl+N badges while Ctrl is held), AniList account card
 │   │   ├── NowPlayingBanner.tsx          # Live playback strip above every tab except Now Playing
 │   │   ├── SignOutModal.tsx              # Sign-out confirmation
 │   │   ├── shortcuts.ts                  # `SHORTCUT_GROUPS`: every shortcut shown in the sheet (keep in step with the handlers)
 │   │   ├── ShortcutsModal.tsx            # Keyboard shortcuts sheet (?, sidebar keyboard button, palette command)
 │   │   ├── useCtrlHint.ts                # Ctrl held alone ~400 ms → sidebar shows Ctrl+1–9 badges
 │   │   ├── Toast.tsx                     # `useToastState` (stable `showToast`) + toast view
+│   │   ├── useBrowserGuards.ts           # No native right-click menu (except text fields), Ctrl+J/F/P/R… panels, Alt+←/→ or mouse back/forward
 │   │   ├── useAppUpdater.ts              # App updates (`plugin-updater` check / install / relaunch), sidebar version dot (`tora.update.seenChangelog`)
 │   │   ├── UpdatePromptModal.tsx         # "New version available" prompt (release notes, Later, Update & restart)
 │   │   ├── ChangelogModal.tsx            # Changelog from GitHub releases (+ Update button), `ReleaseNotesHtml`, `compareVersions`
@@ -75,7 +76,7 @@ Tora/
 │   │   ├── useMediaPoll.ts               # 2.5 s player recognition poll (`inFlight` guard), new-session / scrobbled callbacks
 │   │   ├── useAppEvents.ts               # Registers every Tauri listener before the initial load
 │   │   ├── useCustomListsState.ts        # AniList custom lists state, membership maps, counts, `CustomListsContext` value
-│   │   ├── useGlobalShortcuts.ts         # F5, Ctrl+K, Ctrl+1–9 tabs, ?, watchlist type-to-search / arrows / Enter / Ctrl+A, layered Escape
+│   │   ├── useGlobalShortcuts.ts         # F5, F11 fullscreen, Ctrl+K, Ctrl+1–8 tabs / Ctrl+9 Settings, ?, watchlist type-to-search / arrows / Enter / Ctrl+A, layered Escape
 │   │   └── paletteCommands.ts            # Ctrl+K Commands tab entries
 │   ├── contexts/                         # React contexts (provided by App)
 │   │   ├── toast.ts                      # `useToast()`; never pass `showToast` as a prop
@@ -105,7 +106,8 @@ Tora/
 │   │   ├── AnimePosterCard.tsx           # Poster card for remote anime (Seasons / Search): opens drawer, quick-add
 │   │   ├── CustomListsPanel.tsx          # Custom-list membership toggles + "hide from status lists" (quick menu rows / drawer chips)
 │   │   ├── EpisodeProgressBar.tsx        # Taiga-style progress bar with on-disk strip, "ready" badge
-│   │   └── AiringDot.tsx                 # Airing status dot with next-episode countdown
+│   │   ├── AiringDot.tsx                 # Airing status dot with next-episode countdown
+│   │   └── UpdateCountdown.tsx           # Seconds until the playback auto update (from `update_due_at`, local clock)
 │   ├── features/                         # One folder per tab / surface
 │   │   ├── watchlist/
 │   │   │   ├── WatchlistView.tsx         # Sticky toolbar (status tabs, custom-list chip, search, sort + direction, sync, view mode) + the list
@@ -131,7 +133,8 @@ Tora/
 │   │   ├── history/HistoryView.tsx       # History tab: scrobbles + manual progress changes (decreases as correction rows), grouped by day
 │   │   ├── stats/StatsView.tsx           # Stats tab: overview tiles, status bar, activity heatmap/streaks/monthly bars, backlog & ready-to-watch
 │   │   ├── settings/
-│   │   │   ├── SettingsView.tsx          # Sectioned settings: Appearance, Tracker, Library, Playback & Detection (Anisthesia players), Torrents, Diagnostics, About
+│   │   │   ├── SettingsModal.tsx         # Settings is a modal, not a tab (gear button, Ctrl+9, palette, `openSettings(section)`)
+│   │   │   ├── SettingsView.tsx          # Sectioned settings: Appearance, Tracker, Library, Playback & Detection (update mode, Discord, Anisthesia players), Torrents, Diagnostics, About
 │   │   │   ├── LibraryManagerView.tsx    # Multi-drive folder manager, disk usage & virtualized episode table (Settings → Library)
 │   │   │   ├── AnitomyParserPanel.tsx    # Interactive Anitomy filename / window title parser (Settings → Diagnostics)
 │   │   │   └── SettingsBackups.tsx       # Settings → About: settings snapshots list, Back up now, Restore
@@ -159,7 +162,8 @@ Tora/
     │   ├── anisthesia/                   # Upstream `erengy/anisthesia` C++20 source + `data/players.anisthesia`
     │   └── anime-relations/              # Upstream `erengy/anime-relations` (`anime-relations.txt`)
     └── src/
-        ├── lib.rs                        # Tauri state (`AppState`), async commands, background monitor & media poll loop
+        ├── lib.rs                        # Tauri state (`AppState`), async commands, background monitor & media poll loop, WebView2 accelerator keys off (release)
+        ├── discord.rs                    # Discord Rich Presence worker thread ("Watching <anime>", cover, episode, AniList + GitHub buttons)
         ├── main.rs                       # Tauri binary entrypoint
         ├── db/mod.rs                     # SQLite schema, `AnimeMatcherIndex`, season-isolated fuzzy matching & aliases
         ├── db/settings.rs                # Lenient `get_settings`, JSON config keys, rolling settings backups & restore
@@ -239,8 +243,15 @@ When a filename or media player window title is parsed (`parse_filename` in `src
 - **Already-Seen Episode Suppression**:
   - The scrobbler countdown timer (`elapsed_seconds`) **only** advances if the detected episode is strictly greater than the user's current progress (`detected_ep > user_progress`).
   - If a user rewinds or rewatches an episode (`detected_ep <= user_progress`), `elapsed_seconds` stays reset to `0` and auto-scrobbling is suppressed to prevent accidental regressions or redundant notifications.
+- **Update mode** (`AppSettings.update_mode`, Settings → Playback): `auto` (default) counts down, then updates; `manual` never counts down: Now Playing opens as usual and the hero / banner offer "Update to episode N" (`awaiting_confirmation` → `confirm_playback_update`). The per-poll decision is the pure, unit-tested `DetectedMediaSession::advance_update` (`detection/anisthesia.rs`).
+  - `update_wait_for_close` (auto only): when the countdown ends the update is held (`waiting_for_close`) and runs in `end_session` once the player closes or plays another file, emitting `playback-scrobbled` (the session is already gone).
+  - The countdown is a pausable deadline: `update_due_at` (unix second the update fires) is set when it starts and only moves on pause / resume; while paused, `update_remaining_seconds` holds what's left. The UI (`components/UpdateCountdown.tsx`) ticks `update_due_at - now` from its own clock (`useNow`); the poll never drives the display.
+  - `update_require_focus` (auto only): the deadline pauses on a poll where the player's process doesn't own the foreground window (`foreground_process_id`) and resumes at `now + remaining` once it does.
+  - A manual offer whose player closed stays as `player_closed` until updated, dismissed or replaced by a new file.
+  - Default delay: `recognition_delay_seconds` = 120 (saved settings keep their value).
+- **Discord Rich Presence** (`discord.rs`, `discord_presence_enabled`, default on): `poll_media_recognition` sends the matched, open session (or None) to `DiscordPresence` every poll; its worker thread owns the IPC pipe, skips unchanged presences, reconnects after 15 s. The anime's display data is cached per (id, title language). Never call Discord IPC from a command or the async runtime.
 - **Auto-Sync Progression**:
-  - Once `elapsed_seconds >= settings.recognition_delay_seconds`:
+  - Once `elapsed_seconds >= settings.recognition_delay_seconds` (auto mode; held while waiting for the player to close):
     - If `new_progress >= total_episodes`, the status automatically transitions to `COMPLETED`.
     - If the entry was in `PLANNING`, it transitions to `CURRENT`.
     - The watch history entry is recorded (`scrobbled_to_tracker = false`) and the change goes through `TrackerSyncService::apply_local_update_with_history`, which pushes to AniList and marks the history row scrobbled only after the push succeeds.
@@ -250,6 +261,11 @@ When a filename or media player window title is parsed (`parse_filename` in `src
   - Card sorting position in the watchlist is locked using the stepper's `snapshots` during rapid successive clicks to prevent jarring layout jumps.
   - A debounce timer coalesces repeated clicks, persisting the final state to SQLite and AniList once clicking stops.
   - Active recognition session state (`active_session.matched_current_progress`) is kept in immediate sync when an entry is updated.
+
+### 5b. The Webview Is Not a Browser
+- Release builds turn off WebView2 browser accelerator keys (`disable_browser_accelerator_keys` in `lib.rs` setup: Ctrl+J downloads, Ctrl+F / P / R / U, zoom, DevTools); keys still reach the page. Debug builds keep them for DevTools.
+- `useBrowserGuards` blocks the native context menu outside text fields, the same Ctrl shortcuts (dev builds), Alt+← / → and mouse back / forward. Custom right-click menus use React `onContextMenu` as before.
+- F11 toggles fullscreen (`useGlobalShortcuts`, `core:window:allow-set-fullscreen`).
 
 ### 6. Database Performance & In-Memory Matching (`src-tauri/src/db/mod.rs`)
 - Use the cached `AnimeMatcherIndex` (`db.matcher_index()`) for any matching (library scans, torrent RSS evaluation, playback recognition). It is built from the stored `normalized_titles_json` (keep that column correct on every title/synonym write) and cached until `matcher_generation` changes; an SQLite `update_hook` bumps the generation on any write to `anime_entries` or `title_aliases`, so writers never invalidate manually. Do not call the uncached `build_matcher_index()` in hot paths. The recognition poll only re-matches an unmatched session when the generation changed.

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AnimeEntry, AppSettings, ScanSummary } from "@/lib/types";
+import { AnimeEntry, AppSettings, DetectedMediaSession, ScanSummary } from "@/lib/types";
 import { toraApi } from "@/lib/api";
 import { applyThemeToDocument } from "@/lib/theme";
 import { plural } from "@/lib/format";
@@ -26,6 +26,7 @@ import { useMediaPoll } from "@/app/useMediaPoll";
 import { useAppEvents } from "@/app/useAppEvents";
 import { useGlobalShortcuts } from "@/app/useGlobalShortcuts";
 import { useCtrlHint } from "@/app/useCtrlHint";
+import { useBrowserGuards } from "@/app/useBrowserGuards";
 import { buildPaletteCommands } from "@/app/paletteCommands";
 import { useWatchlist } from "@/features/watchlist/useWatchlist";
 import { ViewMode, WatchlistView } from "@/features/watchlist/WatchlistView";
@@ -40,7 +41,8 @@ import { StatsView } from "@/features/stats/StatsView";
 import { SeasonRequest, SeasonsView } from "@/features/seasons/SeasonsView";
 import { ScheduleView } from "@/features/schedule/ScheduleView";
 import { SearchView } from "@/features/search/SearchView";
-import { SettingsSection, SettingsView } from "@/features/settings/SettingsView";
+import type { SettingsSection } from "@/features/settings/SettingsView";
+import { SettingsModal } from "@/features/settings/SettingsModal";
 
 export const App: React.FC = () => {
   const mainScrollRef = useRef<HTMLElement | null>(null);
@@ -52,6 +54,7 @@ export const App: React.FC = () => {
   setCurrentTitleLanguage(titleLanguage);
   const titleOf = useCallback((a: AnimeEntry) => animeTitle(a, titleLanguage), [titleLanguage]);
 
+  /* useBrowserGuards(); */ // Disabled for now since it has to be checked
   const [toast, showToast] = useToastState();
   const updater = useAppUpdater(showToast, settings ? settings.check_updates_on_startup !== false : null);
   const list = useAnimeList(showToast, titleOf);
@@ -69,6 +72,8 @@ export const App: React.FC = () => {
 
   // Hand-over requests to other tabs; `nonce` makes the same request apply again
   const [torrentSearch, setTorrentSearch] = useState<(TorrentSearchRequest & { nonce: number }) | null>(null);
+  // Settings modal: open, at the requested section (null = Appearance)
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsRequest, setSettingsRequest] = useState<{ section: SettingsSection; nonce: number } | null>(null);
   const [seasonRequest, setSeasonRequest] = useState<SeasonRequest | null>(null);
   const [globalSearchQuery, setGlobalSearchQuery] = useState("");
@@ -100,11 +105,6 @@ export const App: React.FC = () => {
     window.dispatchEvent(new Event(CLOSE_MENUS_EVENT));
   }, [cmdOpen]);
 
-  // A section request only applies to the visit it opened (the sidebar button opens Settings as usual)
-  useEffect(() => {
-    if (activeTab !== "settings") setSettingsRequest(null);
-  }, [activeTab]);
-
   // A scan or watcher batch: refetch only the entries it touched; the Library table reloads
   const applyScan = async (summary: ScanSummary) => {
     await list.refreshEntries(summary.changed_anime_ids);
@@ -125,16 +125,19 @@ export const App: React.FC = () => {
     animeList.length
   );
 
+  // The list was updated from playback (countdown, Update button, or once the player closed)
+  const handleScrobbled = (session: DetectedMediaSession) => {
+    void list.refreshEntries([session.matched_anime_id!]);
+    showToast(
+      `Updated: ${session.matched_anime_title || session.parsed.anime_title} Episode ${session.parsed.episode_number ?? ""}!`,
+      "success"
+    );
+  };
+
   const [activeSession, setActiveSession] = useMediaPoll({
     // Focus Now Playing when a new playback session is detected
     onNewSession: () => setActiveTab("nowplaying"),
-    onScrobbled: (session) => {
-      void list.refreshEntries([session.matched_anime_id!]);
-      showToast(
-        `Scrobbled: ${session.matched_anime_title || session.parsed.anime_title} Episode ${session.parsed.episode_number ?? ""}!`,
-        "success"
-      );
-    },
+    onScrobbled: handleScrobbled,
   });
 
   const loadInitialData = async () => {
@@ -154,7 +157,7 @@ export const App: React.FC = () => {
         toraApi
           .verifyTrackerAccount(s.active_tracker_plugin || "anilist", s.anilist_username || "", s.anilist_token || null)
           .then(async () => setSettings(await toraApi.getAppSettings()))
-          .catch(() => {});
+          .catch(() => { });
       }
 
       // Fast delta startup scan in the background, without blocking the first render
@@ -163,7 +166,7 @@ export const App: React.FC = () => {
         .then(async (summary) => {
           if (summary.newly_parsed > 0 || (summary.removed_files ?? 0) > 0) await applyScan(summary);
         })
-        .catch(() => {});
+        .catch(() => { });
     } catch (e) {
       console.error("Failed to initialize Tora:", e);
     }
@@ -197,7 +200,7 @@ export const App: React.FC = () => {
     authInvalid: () => {
       showToast("AniList session expired or was revoked — please sign in again", "error");
       // Pick up any token the backend cleared
-      toraApi.getAppSettings().then(setSettings).catch(() => {});
+      toraApi.getAppSettings().then(setSettings).catch(() => { });
     },
     // A different AniList account signed in: the previous account's list was wiped and the new
     // account's list is imported next (it arrives through tracker-list-synced)
@@ -218,6 +221,7 @@ export const App: React.FC = () => {
       if (!stepper.isPending(entry.id)) list.replaceEntries([entry]);
     },
     relationsUpdated: ({ last_modified }) => showToast(`Anime relations updated (${last_modified})`, "success"),
+    playbackScrobbled: handleScrobbled,
   });
 
   const handleUpdateSettings = async (next: AppSettings) => {
@@ -225,9 +229,9 @@ export const App: React.FC = () => {
     setSettings(await toraApi.saveAppSettings(next));
   };
 
-  const openSettings = (section: SettingsSection) => {
-    setSettingsRequest({ section, nonce: Date.now() });
-    setActiveTab("settings");
+  const openSettings = (section?: SettingsSection) => {
+    setSettingsRequest(section ? { section, nonce: Date.now() } : null);
+    setSettingsOpen(true);
   };
 
   const openGlobalSearch = (q: string) => {
@@ -244,12 +248,17 @@ export const App: React.FC = () => {
     setActiveTab("seasons");
   };
 
-  // Ctrl+1–9: switch tabs, closing the palette and any open menu (the drawer isn't tab-bound)
-  const navigateTo = (tab: NavTab) => {
+  // Ctrl+1–8 / Ctrl+9 close the palette and any open menu first (the drawer isn't tab-bound)
+  const closeTransientLayers = () => {
     setCmdOpen(false);
     setShortcutsOpen(false);
     list.setQuickMenuAnimeId(null);
     window.dispatchEvent(new Event(CLOSE_MENUS_EVENT));
+  };
+
+  const navigateTo = (tab: NavTab) => {
+    closeTransientLayers();
+    setSettingsOpen(false);
     setActiveTab(tab);
   };
 
@@ -323,6 +332,16 @@ export const App: React.FC = () => {
     setActiveSession(null);
   };
 
+  const confirmPlaybackUpdate = async () => {
+    try {
+      const session = await toraApi.confirmPlaybackUpdate();
+      setActiveSession(session);
+      if (session?.auto_synced) handleScrobbled(session);
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  };
+
   const openAnime = (anime: AnimeEntry) => setSelectedAnime(animeList.find((a) => a.id === anime.id) ?? anime);
 
   const openRandomAnime = () => {
@@ -378,6 +397,7 @@ export const App: React.FC = () => {
     paletteOpen: cmdOpen,
     signOutOpen: signOutModalOpen,
     shortcutsOpen,
+    settingsOpen,
     updateModalOpen: updater.promptOpen || updater.changelogOpen,
     quickMenuOpen: list.quickMenuAnimeId !== null,
     selectedAnimeIds: list.selectedAnimeIds,
@@ -393,6 +413,7 @@ export const App: React.FC = () => {
     closeUpdateModal: () => (updater.promptOpen ? updater.closePrompt() : updater.closeChangelog()),
     openShortcuts: () => setShortcutsOpen(true),
     closeShortcuts: () => setShortcutsOpen(false),
+    closeSettings: () => setSettingsOpen(false),
     closeQuickMenu: () => list.setQuickMenuAnimeId(null),
     closeDrawer: () => setSelectedAnime(null),
     openAnime: setSelectedAnime,
@@ -400,11 +421,16 @@ export const App: React.FC = () => {
     moveSelection: (dir) => watchlistNavRef.current?.move(dir) ?? false,
     enterList: () => watchlistNavRef.current?.enter() ?? false,
     navigate: navigateTo,
+    openSettings: () => {
+      closeTransientLayers();
+      openSettings();
+    },
     rescanLibrary: () => void handleRescanLibrary(),
   });
 
   const paletteCommands = buildPaletteCommands({
     navigate: setActiveTab,
+    openSettings: () => openSettings(),
     openTorrentSettings: () => openSettings("torrents"),
     rescanLibrary: () => void handleRescanLibrary(),
     syncFromAnilist: handleSyncFromAnilist,
@@ -424,212 +450,217 @@ export const App: React.FC = () => {
 
   return (
     <TitleLanguageContext.Provider value={titleLanguage}>
-    <ToastContext.Provider value={showToast}>
-    <CustomListsContext.Provider value={customLists.api}>
-    <AnimeActionsContext.Provider value={animeActions}>
-    <div
-      className="flex h-screen w-screen overflow-hidden bg-bg-primary text-text-primary select-none"
-      onClick={() => list.setQuickMenuAnimeId(null)}
-      onContextMenu={() => list.setQuickMenuAnimeId(null)}
-    >
-      <Sidebar
-        activeTab={activeTab}
-        onNavigate={setActiveTab}
-        onOpenPalette={() => setCmdOpen(true)}
-        onOpenShortcuts={() => setShortcutsOpen(true)}
-        showShortcutHints={showShortcutHints}
-        isPlaying={activeSession !== null}
-        listCount={animeList.length}
-        settings={settings}
-        isSignedIn={isSignedIn}
-        isAuthorizing={isAuthorizingAnilist}
-        onSignIn={handleStartAnilistLogin}
-        onSignOut={() => setSignOutModalOpen(true)}
-        onOpenProfile={handleOpenAnilistProfile}
-        version={updater.version}
-        updateDot={updater.showDot}
-        updateChecking={updater.checking}
-        onVersionClick={updater.onVersionClick}
-      />
+      <ToastContext.Provider value={showToast}>
+        <CustomListsContext.Provider value={customLists.api}>
+          <AnimeActionsContext.Provider value={animeActions}>
+            <div
+              className="flex h-screen w-screen overflow-hidden bg-bg-primary text-text-primary select-none"
+              onClick={() => list.setQuickMenuAnimeId(null)}
+              onContextMenu={() => list.setQuickMenuAnimeId(null)}
+            >
+              <Sidebar
+                activeTab={activeTab}
+                onNavigate={setActiveTab}
+                onOpenSettings={() => openSettings()}
+                settingsOpen={settingsOpen}
+                onOpenPalette={() => setCmdOpen(true)}
+                onOpenShortcuts={() => setShortcutsOpen(true)}
+                showShortcutHints={showShortcutHints}
+                isPlaying={activeSession !== null}
+                listCount={animeList.length}
+                settings={settings}
+                isSignedIn={isSignedIn}
+                isAuthorizing={isAuthorizingAnilist}
+                onSignIn={handleStartAnilistLogin}
+                onSignOut={() => setSignOutModalOpen(true)}
+                onOpenProfile={handleOpenAnilistProfile}
+                version={updater.version}
+                updateDot={updater.showDot}
+                updateChecking={updater.checking}
+                onVersionClick={updater.onVersionClick}
+              />
 
-      <div className="flex-1 flex flex-col min-w-0 h-full overflow-hidden">
-        {activeSession && activeTab !== "nowplaying" && (
-          <NowPlayingBanner
-            session={activeSession}
-            recognitionDelaySeconds={settings?.recognition_delay_seconds || 10}
-            onOpenNowPlaying={() => setActiveTab("nowplaying")}
-            onDismiss={dismissSession}
-          />
-        )}
+              <div className="flex-1 flex flex-col min-w-0 h-full overflow-hidden">
+                {activeSession && activeTab !== "nowplaying" && (
+                  <NowPlayingBanner
+                    session={activeSession}
+                    recognitionDelaySeconds={settings?.recognition_delay_seconds || 120}
+                    onOpenNowPlaying={() => setActiveTab("nowplaying")}
+                    onConfirmUpdate={() => void confirmPlaybackUpdate()}
+                    onDismiss={dismissSession}
+                  />
+                )}
 
-        <main
-          ref={mainScrollRef}
-          // Reserve the scrollbar's space so content doesn't shift sideways when it appears/disappears
-          className="flex-1 overflow-y-auto [scrollbar-gutter:stable]"
-          onClick={() => {
-            if (list.selectedAnimeIds.length > 0) list.setSelectedAnimeIds([]);
-          }}
-        >
-          {activeTab === "watchlist" && (
-            <WatchlistView
-              watchlist={watchlist}
-              animeList={animeList}
-              customListNames={customLists.names}
-              customListCounts={customLists.counts}
-              onCreateCustomList={customLists.create}
-              onDeleteCustomList={customLists.remove}
-              viewMode={settings?.view_mode || "grid"}
-              onViewModeChange={settings ? setViewMode : undefined}
-              isSignedIn={isSignedIn}
-              isSyncing={sync.isSyncing}
-              lastSyncedAt={sync.lastSyncedAt}
-              onSync={handleSyncFromAnilist}
-              scrollContainerRef={mainScrollRef}
-              selectedAnimeIds={list.selectedAnimeIds}
-              onSetSelectedAnimeIds={list.setSelectedAnimeIds}
-              quickMenuAnimeId={list.quickMenuAnimeId}
-              onSetQuickMenuAnimeId={list.setQuickMenuAnimeId}
-              searchInputRef={watchlistSearchRef}
-              navRef={watchlistNavRef}
-            />
-          )}
+                <main
+                  ref={mainScrollRef}
+                  // Reserve the scrollbar's space so content doesn't shift sideways when it appears/disappears
+                  className="flex-1 overflow-y-auto [scrollbar-gutter:stable]"
+                  onClick={() => {
+                    if (list.selectedAnimeIds.length > 0) list.setSelectedAnimeIds([]);
+                  }}
+                >
+                  {activeTab === "watchlist" && (
+                    <WatchlistView
+                      watchlist={watchlist}
+                      animeList={animeList}
+                      customListNames={customLists.names}
+                      customListCounts={customLists.counts}
+                      onCreateCustomList={customLists.create}
+                      onDeleteCustomList={customLists.remove}
+                      viewMode={settings?.view_mode || "grid"}
+                      onViewModeChange={settings ? setViewMode : undefined}
+                      isSignedIn={isSignedIn}
+                      isSyncing={sync.isSyncing}
+                      lastSyncedAt={sync.lastSyncedAt}
+                      onSync={handleSyncFromAnilist}
+                      scrollContainerRef={mainScrollRef}
+                      selectedAnimeIds={list.selectedAnimeIds}
+                      onSetSelectedAnimeIds={list.setSelectedAnimeIds}
+                      quickMenuAnimeId={list.quickMenuAnimeId}
+                      onSetQuickMenuAnimeId={list.setQuickMenuAnimeId}
+                      searchInputRef={watchlistSearchRef}
+                      navRef={watchlistNavRef}
+                    />
+                  )}
 
-          {activeTab === "torrents" && (
-            <TorrentsView
-              animeList={animeList}
-              searchRequest={torrentSearch}
-              onRefreshAnimeList={list.refresh}
-              onOpenSettings={() => openSettings("torrents")}
-            />
-          )}
+                  {activeTab === "torrents" && (
+                    <TorrentsView
+                      animeList={animeList}
+                      searchRequest={torrentSearch}
+                      onRefreshAnimeList={list.refresh}
+                      onOpenSettings={() => openSettings("torrents")}
+                    />
+                  )}
 
-          {activeTab === "seasons" && (
-            <SeasonsView
-              animeList={animeList}
-              scrollContainerRef={mainScrollRef}
-              keyboardEnabled={!selectedAnime && !cmdOpen && !signOutModalOpen && !shortcutsOpen}
-              onGlobalSearch={openGlobalSearch}
-              seasonRequest={seasonRequest}
-              onSeasonRequestHandled={() => setSeasonRequest(null)}
-            />
-          )}
+                  {activeTab === "seasons" && (
+                    <SeasonsView
+                      animeList={animeList}
+                      scrollContainerRef={mainScrollRef}
+                      keyboardEnabled={!selectedAnime && !cmdOpen && !signOutModalOpen && !shortcutsOpen && !settingsOpen}
+                      onGlobalSearch={openGlobalSearch}
+                      seasonRequest={seasonRequest}
+                      onSeasonRequestHandled={() => setSeasonRequest(null)}
+                    />
+                  )}
 
-          {activeTab === "schedule" && <ScheduleView animeList={animeList} />}
+                  {activeTab === "schedule" && <ScheduleView animeList={animeList} />}
 
-          {activeTab === "search" && (
-            <SearchView animeList={animeList} initialQuery={globalSearchQuery} searchRequestId={globalSearchRequest} />
-          )}
+                  {activeTab === "search" && (
+                    <SearchView animeList={animeList} initialQuery={globalSearchQuery} searchRequestId={globalSearchRequest} />
+                  )}
 
-          {activeTab === "nowplaying" && settings && (
-            <NowPlayingView
-              activeSession={activeSession}
-              animeList={animeList}
-              settings={settings}
-              onUpdateSettings={handleUpdateSettings}
-              onLinkDetectedEpisode={async (animeId, aliasTitle) => {
-                const updated = await toraApi.linkDetectedEpisodeToAnime(animeId, aliasTitle);
-                if (updated) setActiveSession(updated);
-                await list.refresh();
-              }}
-              onDismissSession={dismissSession}
-              onOpenSeason={openSeason}
-            />
-          )}
+                  {activeTab === "nowplaying" && settings && (
+                    <NowPlayingView
+                      activeSession={activeSession}
+                      animeList={animeList}
+                      settings={settings}
+                      onUpdateSettings={handleUpdateSettings}
+                      onLinkDetectedEpisode={async (animeId, aliasTitle) => {
+                        const updated = await toraApi.linkDetectedEpisodeToAnime(animeId, aliasTitle);
+                        if (updated) setActiveSession(updated);
+                        await list.refresh();
+                      }}
+                      onConfirmUpdate={() => void confirmPlaybackUpdate()}
+                      onDismissSession={dismissSession}
+                      onOpenSeason={openSeason}
+                    />
+                  )}
 
-          {activeTab === "history" && <HistoryView animeList={animeList} refreshKey={statsKey} />}
+                  {activeTab === "history" && <HistoryView animeList={animeList} refreshKey={statsKey} />}
 
-          {activeTab === "stats" && (
-            <StatsView
-              animeList={animeList}
-              refreshKey={statsKey}
-              onOpenStatus={(status) => showInWatchlist(() => watchlist.showStatus(status))}
-            />
-          )}
+                  {activeTab === "stats" && (
+                    <StatsView
+                      animeList={animeList}
+                      refreshKey={statsKey}
+                      onOpenStatus={(status) => showInWatchlist(() => watchlist.showStatus(status))}
+                    />
+                  )}
+                </main>
+              </div>
 
-          {activeTab === "settings" && settings && (
-            <SettingsView
-              settings={settings}
-              onUpdateSettings={handleUpdateSettings}
-              animeList={animeList}
-              libraryRefreshTick={libraryRefreshTick}
-              onRefreshAnimeList={list.refresh}
-              sectionRequest={settingsRequest}
-              onCheckForUpdates={() => void updater.checkForUpdates(true)}
-              updateChecking={updater.checking}
-              onOpenChangelog={updater.openChangelog}
-            />
-          )}
-        </main>
-      </div>
+              {selectedAnime && (
+                <AnimeDetailModal
+                  anime={selectedAnime}
+                  onOpenSeason={openSeason}
+                  inList={animeList.some((a) => a.id === selectedAnime.id)}
+                  onAddToList={(status) => list.addAnime(selectedAnime, status)}
+                  onClose={() => setSelectedAnime(null)}
+                  onUpdated={(updated) => {
+                    list.replaceEntries([updated]);
+                    setSelectedAnime(updated);
+                  }}
+                  onSavedInBackground={(updated) => list.setAnimeList((prev) => prev.map((a) => (a.id === updated.id ? updated : a)))}
+                  onDeleted={(deletedId) => {
+                    list.applyDelta([], [deletedId]);
+                    showToast("Removed anime from library", "info");
+                  }}
+                />
+              )}
 
-      {selectedAnime && (
-        <AnimeDetailModal
-          anime={selectedAnime}
-          onOpenSeason={openSeason}
-          inList={animeList.some((a) => a.id === selectedAnime.id)}
-          onAddToList={(status) => list.addAnime(selectedAnime, status)}
-          onClose={() => setSelectedAnime(null)}
-          onUpdated={(updated) => {
-            list.replaceEntries([updated]);
-            setSelectedAnime(updated);
-          }}
-          onSavedInBackground={(updated) => list.setAnimeList((prev) => prev.map((a) => (a.id === updated.id ? updated : a)))}
-          onDeleted={(deletedId) => {
-            list.applyDelta([], [deletedId]);
-            showToast("Removed anime from library", "info");
-          }}
-        />
-      )}
+              {settingsOpen && settings && (
+                <SettingsModal
+                  onClose={() => setSettingsOpen(false)}
+                  settings={settings}
+                  onUpdateSettings={handleUpdateSettings}
+                  animeList={animeList}
+                  libraryRefreshTick={libraryRefreshTick}
+                  onRefreshAnimeList={list.refresh}
+                  sectionRequest={settingsRequest}
+                  onCheckForUpdates={() => void updater.checkForUpdates(true)}
+                  updateChecking={updater.checking}
+                  onOpenChangelog={updater.openChangelog}
+                />
+              )}
 
-      <CommandPalette
-        open={cmdOpen}
-        onClose={() => setCmdOpen(false)}
-        query={cmdQuery}
-        onQueryChange={setCmdQuery}
-        animeList={animeList}
-        searchIndex={watchlist.searchIndex}
-        commands={paletteCommands}
-        onOpenAnime={handleOpenAnimeFromPalette}
-        onSearchAniList={openGlobalSearch}
-      />
+              <CommandPalette
+                open={cmdOpen}
+                onClose={() => setCmdOpen(false)}
+                query={cmdQuery}
+                onQueryChange={setCmdQuery}
+                animeList={animeList}
+                searchIndex={watchlist.searchIndex}
+                commands={paletteCommands}
+                onOpenAnime={handleOpenAnimeFromPalette}
+                onSearchAniList={openGlobalSearch}
+              />
 
-      {signOutModalOpen && (
-        <SignOutModal
-          username={settings?.anilist_username}
-          onCancel={() => setSignOutModalOpen(false)}
-          onConfirm={handleConfirmSignOut}
-        />
-      )}
+              {signOutModalOpen && (
+                <SignOutModal
+                  username={settings?.anilist_username}
+                  onCancel={() => setSignOutModalOpen(false)}
+                  onConfirm={handleConfirmSignOut}
+                />
+              )}
 
-      {shortcutsOpen && <ShortcutsModal onClose={() => setShortcutsOpen(false)} />}
+              {shortcutsOpen && <ShortcutsModal onClose={() => setShortcutsOpen(false)} />}
 
-      {updater.promptOpen && updater.available && (
-        <UpdatePromptModal
-          currentVersion={updater.version}
-          newVersion={updater.available.version}
-          manifestNotes={updater.available.body}
-          progress={updater.progress}
-          onInstall={() => void updater.installUpdate()}
-          onViewChangelog={updater.openChangelog}
-          onLater={updater.closePrompt}
-        />
-      )}
+              {updater.promptOpen && updater.available && (
+                <UpdatePromptModal
+                  currentVersion={updater.version}
+                  newVersion={updater.available.version}
+                  manifestNotes={updater.available.body}
+                  progress={updater.progress}
+                  onInstall={() => void updater.installUpdate()}
+                  onViewChangelog={updater.openChangelog}
+                  onLater={updater.closePrompt}
+                />
+              )}
 
-      {updater.changelogOpen && (
-        <ChangelogModal
-          version={updater.version}
-          availableVersion={updater.available?.version ?? null}
-          progress={updater.progress}
-          onInstall={() => void updater.installUpdate()}
-          onClose={updater.closeChangelog}
-        />
-      )}
+              {updater.changelogOpen && (
+                <ChangelogModal
+                  version={updater.version}
+                  availableVersion={updater.available?.version ?? null}
+                  progress={updater.progress}
+                  onInstall={() => void updater.installUpdate()}
+                  onClose={updater.closeChangelog}
+                />
+              )}
 
-      {toast && <Toast toast={toast} />}
-    </div>
-    </AnimeActionsContext.Provider>
-    </CustomListsContext.Provider>
-    </ToastContext.Provider>
+              {toast && <Toast toast={toast} />}
+            </div>
+          </AnimeActionsContext.Provider>
+        </CustomListsContext.Provider>
+      </ToastContext.Provider>
     </TitleLanguageContext.Provider>
   );
 };

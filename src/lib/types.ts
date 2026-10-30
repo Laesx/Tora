@@ -244,8 +244,17 @@ export interface DetectedMediaSession {
   matched_current_progress: number | null;
   matched_total_episodes: number | null;
   detected_at_unix: number;
-  elapsed_seconds: number;
   auto_synced: boolean;
+  /** Auto mode: unix second the list update fires (only while the countdown runs) */
+  update_due_at: number | null;
+  /** Seconds left while the countdown is paused (player not focused); null = not started */
+  update_remaining_seconds: number | null;
+  /** Manual update mode: the episode can be updated with the "Update" button */
+  awaiting_confirmation: boolean;
+  /** Auto mode, waiting for the player to close: the countdown finished, the update is held */
+  waiting_for_close: boolean;
+  /** The player closed while the update was still offered */
+  player_closed: boolean;
 }
 
 export interface FilenameTestResult {
@@ -548,6 +557,14 @@ export interface AppSettings {
   anilist_avatar: string | null;
   recognition_enabled: boolean;
   recognition_delay_seconds: number;
+  /** "auto": count down, then update the list; "manual": Now Playing offers an Update button */
+  update_mode: "auto" | "manual";
+  /** Auto mode: hold the update until the media player closes */
+  update_wait_for_close: boolean;
+  /** Auto mode: the countdown only advances while the media player is focused */
+  update_require_focus: boolean;
+  /** Show the playing anime as Discord Rich Presence */
+  discord_presence_enabled: boolean;
   custom_media_player_path: string;
   /** Torrent app exe; empty = auto-detect */
   torrent_app_path: string;

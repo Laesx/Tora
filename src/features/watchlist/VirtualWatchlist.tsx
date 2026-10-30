@@ -211,6 +211,8 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
   const handleItemDoubleClick = useCallback(
     (e: React.MouseEvent, anime: AnimeEntry) => {
       e.stopPropagation();
+      // Ctrl / Shift clicks edit the selection; two in a row are not an "open"
+      if (e.ctrlKey || e.metaKey || e.shiftKey) return;
       onSetQuickMenuAnimeId(null);
       openAnime(anime);
     },

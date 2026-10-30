@@ -496,13 +496,16 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
           {/* Quick Action Bar */}
           {inList && (
             <div className="flex flex-wrap items-center gap-2.5 bg-bg-tertiary/70 p-3 rounded-xl border border-border-subtle">
-              <button
-                onClick={handlePlayNextUnwatched}
-                className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-accent hover:bg-accent-hover text-white text-xs font-semibold transition shadow-sm"
-              >
-                <Play className="w-3.5 h-3.5 fill-current" />
-                Play Next (Ep {progress + 1})
-              </button>
+              {/* Nothing left to play once every episode is watched */}
+              {!(anime.episodes && progress >= anime.episodes) && (
+                <button
+                  onClick={handlePlayNextUnwatched}
+                  className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-accent hover:bg-accent-hover text-white text-xs font-semibold transition shadow-sm"
+                >
+                  <Play className="w-3.5 h-3.5 fill-current" />
+                  Play Next (Ep {progress + 1})
+                </button>
+              )}
 
               <button
                 onClick={() => searchTorrents(torrentSearchFor(anime))}

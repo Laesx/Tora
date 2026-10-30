@@ -1,5 +1,6 @@
 pub mod db;
 pub mod detection;
+pub mod discord;
 pub mod library;
 pub mod plugins;
 pub mod sync;
@@ -11,8 +12,11 @@ use crate::db::{
     CustomListsState, Database, LibraryFolder, ListStats,
     LocalEpisodeFile, SettingsBackupInfo, WatchHistoryEntry,
 };
-use crate::detection::anisthesia::{detect_active_media_player, DetectedMediaSession};
+use crate::detection::anisthesia::{
+    detect_active_media_player, foreground_process_id, DetectedMediaSession, UpdatePolicy,
+};
 use crate::detection::anitomy::{parse_filename, AnitomyElements};
+use crate::discord::{DiscordPresence, PresenceAnime, PresenceInfo};
 use crate::library::scanner::{DriveStorageSummary, LibraryMonitorHandle, ScanSummary};
 use crate::plugins::{PluginManager, SeasonalAnime, TrackerPluginDescriptor, TrackerUserProfile};
 use crate::sync::{
@@ -51,6 +55,8 @@ pub struct AppState {
     pub unmatched_check_generation: AtomicU64,
     /// RAM cache of fetched torrent feeds + releases sent this session.
     pub torrents: Arc<TorrentCache>,
+    /// Discord Rich Presence for the playing anime (fed by the media poll).
+    pub discord: DiscordPresence,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -566,18 +572,172 @@ async fn dismiss_playback_session(state: State<'_, AppState>) -> Result<(), Stri
     Ok(())
 }
 
-/// A scrobble decided under the `active_session` lock and executed after it is released:
-/// `(anime_id, episode, title, player_name, cleaned_media_title)`.
-type PendingScrobble = (i64, u32, String, String, String);
+/// A scrobble decided under the `active_session` lock and executed after it is released.
+struct PendingScrobble {
+    anime_id: i64,
+    episode: u32,
+    title: String,
+    player: String,
+    file: String,
+}
+
+impl PendingScrobble {
+    /// The session's matched anime and episode (None when unmatched or without an episode number).
+    fn of(session: &DetectedMediaSession) -> Option<Self> {
+        Some(Self {
+            anime_id: session.matched_anime_id?,
+            episode: session.parsed.episode_number?,
+            title: session
+                .matched_anime_title
+                .clone()
+                .unwrap_or_else(|| session.parsed.anime_title.clone()),
+            player: session.player_name.clone(),
+            file: session.cleaned_media_title.clone(),
+        })
+    }
+}
+
+fn update_policy(settings: &AppSettings) -> UpdatePolicy {
+    UpdatePolicy {
+        manual: settings.update_mode == "manual",
+        delay_seconds: settings.recognition_delay_seconds,
+        wait_for_close: settings.update_wait_for_close,
+        require_focus: settings.update_require_focus,
+    }
+}
+
+/// Record the watch and set the progress through the sync service, unless the list already reached
+/// the episode meanwhile. Returns whether the list was updated. Never call with `active_session` held.
+async fn run_scrobble(state: &AppState, pending: PendingScrobble) -> Result<bool, String> {
+    let PendingScrobble { anime_id, episode, title, player, file } = pending;
+    let db = state.db.clone();
+    // Record the watch as not-yet-scrobbled; the sync service marks it scrobbled once AniList accepts it.
+    let history_id = tokio::task::spawn_blocking(move || {
+        let entry = db.get_anime_entry_by_id(anime_id)?;
+        if episode <= entry.user_progress {
+            return Ok::<_, String>(None);
+        }
+        let history = db
+            .record_watch_history(Some(anime_id), &title, episode, &player, &file, false)
+            .map_err(|e| eprintln!("[scrobble] failed to record watch history: {}", e))
+            .ok();
+        Ok(Some(history))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let Some(history_id) = history_id else {
+        return Ok(false);
+    };
+
+    // The service derives status (PLANNING -> CURRENT, COMPLETED at total) and dates, writes SQLite,
+    // refreshes `active_session.matched_current_progress` and pushes to AniList in the background.
+    let change = UserStateChange {
+        progress: Some(episode),
+        ..UserStateChange::new(anime_id, ChangeSource::Scrobble)
+    };
+    state
+        .sync
+        .apply_local_update_with_history(change, history_id)
+        .await
+        .map_err(|e| format!("failed to update anime {}: {}", anime_id, e))?;
+    Ok(true)
+}
+
+/// A session is over (player closed or another file started). An update held for the player to close
+/// runs now (`playback-scrobbled` tells the frontend); an update still offered in manual mode stays
+/// visible as "player closed" until it is used or dismissed. Returns the session to report.
+async fn end_session(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    ended: Option<DetectedMediaSession>,
+) -> Result<Option<DetectedMediaSession>, String> {
+    let Some(mut session) = ended.filter(|s| !s.auto_synced) else {
+        return Ok(None);
+    };
+    if session.waiting_for_close {
+        if let Some(pending) = PendingScrobble::of(&session) {
+            match run_scrobble(state, pending).await {
+                Ok(true) => {
+                    session.auto_synced = true;
+                    session.waiting_for_close = false;
+                    session.player_closed = true;
+                    let _ = app.emit("playback-scrobbled", &session);
+                }
+                Ok(false) => {}
+                Err(e) => eprintln!("[scrobble] {}", e),
+            }
+        }
+        return Ok(None);
+    }
+    if session.awaiting_confirmation && !session.is_already_seen() {
+        session.player_closed = true;
+        let mut guard = state.active_session.lock().map_err(|e| e.to_string())?;
+        // Unless something else became current meanwhile
+        if guard.is_none() {
+            *guard = Some(session);
+        }
+        return Ok(guard.clone());
+    }
+    Ok(None)
+}
 
 #[tauri::command]
 async fn poll_media_recognition(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Option<DetectedMediaSession>, String> {
     let db = state.db.clone();
     let settings = tokio::task::spawn_blocking(move || db.get_settings())
         .await
         .map_err(|e| e.to_string())??;
+    let session = poll_session(&app, &state, &settings).await;
+
+    // Discord shows a matched episode while its player is open; anything else clears it
+    let presence = match session.as_ref() {
+        Ok(Some(s)) if settings.discord_presence_enabled && !s.player_closed => {
+            discord_presence_for(&state, s, &settings.title_language).await
+        }
+        _ => None,
+    };
+    state.discord.update(presence);
+    session
+}
+
+async fn discord_presence_for(
+    state: &AppState,
+    session: &DetectedMediaSession,
+    title_language: &str,
+) -> Option<PresenceInfo> {
+    let anime_id = session.matched_anime_id?;
+    let anime = match state.discord.cached_anime(anime_id, title_language) {
+        Some(anime) => anime,
+        None => {
+            let db = state.db.clone();
+            let lang = title_language.to_string();
+            let anime = tokio::task::spawn_blocking(move || {
+                db.get_anime_entry_by_id(anime_id)
+                    .ok()
+                    .map(|entry| PresenceAnime::from_entry(&entry, &lang))
+            })
+            .await
+            .ok()??;
+            state.discord.cache_anime(anime_id, title_language, anime.clone());
+            anime
+        }
+    };
+    Some(PresenceInfo {
+        anime,
+        episode: session.parsed.episode_number,
+        total_episodes: session.matched_total_episodes,
+        started_at_unix: session.detected_at_unix,
+    })
+}
+
+async fn poll_session(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    settings: &AppSettings,
+) -> Result<Option<DetectedMediaSession>, String> {
     if !settings.recognition_enabled {
         let mut active = state.active_session.lock().map_err(|e| e.to_string())?;
         *active = None;
@@ -586,10 +746,12 @@ async fn poll_media_recognition(
 
     let now = chrono::Utc::now().timestamp();
     let players = settings.players.clone();
+    let policy = update_policy(settings);
+    let check_focus = policy.require_focus && !policy.manual;
 
     // Run Win32 window enumeration on blocking pool so main thread is never touched
-    let detected_candidate = tokio::task::spawn_blocking(move || {
-        detect_active_media_player(&players).map(|(player, win, cleaned, parsed)| {
+    let (detected_candidate, foreground_pid) = tokio::task::spawn_blocking(move || {
+        let candidate = detect_active_media_player(&players).map(|(player, win, cleaned, parsed)| {
             (
                 player.id,
                 player.name,
@@ -599,7 +761,9 @@ async fn poll_media_recognition(
                 cleaned,
                 parsed,
             )
-        })
+        });
+        let foreground = if check_focus { foreground_process_id() } else { None };
+        (candidate, foreground)
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -607,25 +771,33 @@ async fn poll_media_recognition(
     let Some((player_id, player_name, pid, exe_path, raw_title, cleaned_title, parsed)) =
         detected_candidate
     else {
-        *state.active_session.lock().map_err(|e| e.to_string())? = None;
-        return Ok(None);
+        let ended = state.active_session.lock().map_err(|e| e.to_string())?.take();
+        return end_session(app, state, ended).await;
     };
 
     let is_same_session = |s: &DetectedMediaSession| {
         s.cleaned_media_title == cleaned_title && s.player_name == player_name
     };
 
-    // Snapshot the continuing session (if any). DB work happens without holding the lock.
-    let continuing: Option<(Option<i64>, AnitomyElements)> = {
-        let guard = state.active_session.lock().map_err(|e| e.to_string())?;
-        guard
-            .as_ref()
-            .filter(|s| is_same_session(s))
-            .map(|s| (s.matched_anime_id, s.parsed.clone()))
+    // Snapshot the continuing session (if any), or take the one this file replaces.
+    // DB work happens without holding the lock.
+    let (continuing, replaced) = {
+        let mut guard = state.active_session.lock().map_err(|e| e.to_string())?;
+        match guard.as_ref().filter(|s| is_same_session(s)) {
+            Some(s) => (Some((s.matched_anime_id, s.parsed.clone())), None),
+            None => (None, guard.take()),
+        }
     };
 
     let Some((snapshot_matched_id, mut session_parsed)) = continuing else {
-        // New playback session detected
+        // New playback session detected; the previous one may still owe its held update
+        // (an offered manual update is dropped with the session it belongs to).
+        if replaced.as_ref().is_some_and(|s| s.waiting_for_close) {
+            if let Err(e) = end_session(app, state, replaced).await {
+                eprintln!("[scrobble] {}", e);
+            }
+        }
+
         let db = state.db.clone();
         let (parsed, matched, generation) = tokio::task::spawn_blocking(move || {
             let mut parsed = parsed;
@@ -652,7 +824,7 @@ async fn poll_media_recognition(
             None => (None, None, None, None, None),
         };
 
-        let new_session = DetectedMediaSession {
+        let mut new_session = DetectedMediaSession {
             player_id,
             player_name,
             process_id: pid,
@@ -666,9 +838,18 @@ async fn poll_media_recognition(
             matched_current_progress,
             matched_total_episodes,
             detected_at_unix: now,
-            elapsed_seconds: 0,
             auto_synced: false,
+            update_due_at: None,
+            update_remaining_seconds: None,
+            awaiting_confirmation: false,
+            waiting_for_close: false,
+            player_closed: false,
         };
+        // Start the countdown now (or, in manual mode, offer the update right away)
+        if new_session.matched_anime_id.is_some() {
+            let focused = foreground_pid == Some(new_session.process_id);
+            new_session.advance_update(&policy, focused, now);
+        }
 
         *state.active_session.lock().map_err(|e| e.to_string())? = Some(new_session.clone());
         return Ok(Some(new_session));
@@ -718,9 +899,7 @@ async fn poll_media_recognition(
                 existing.matched_cover_image = Some(cover);
                 existing.matched_current_progress = Some(prog);
                 existing.matched_total_episodes = total;
-                existing.detected_at_unix = now;
-                existing.elapsed_seconds = 0;
-                existing.auto_synced = false;
+                existing.restart_countdown(now);
             }
         }
 
@@ -732,80 +911,69 @@ async fn poll_media_recognition(
                 existing.matched_total_episodes = entry.episodes;
             }
 
-            let is_already_seen = match (
-                existing.parsed.episode_number,
-                existing.matched_current_progress,
-            ) {
-                (Some(ep), Some(cur_prog)) => ep <= cur_prog,
-                _ => false,
-            };
-
-            if !existing.auto_synced && is_already_seen {
-                // If the currently detected episode is the last one seen (or earlier),
-                // do not count down or auto-update progress.
-                existing.elapsed_seconds = 0;
-            } else {
-                existing.elapsed_seconds = (now - existing.detected_at_unix).max(0) as u64;
-
-                // Only auto-update when matched to an anime entry and delay threshold is met
-                if !existing.auto_synced
-                    && existing.elapsed_seconds >= settings.recognition_delay_seconds
-                {
-                    if let Some(entry) = entry.as_ref() {
-                        existing.auto_synced = true;
-                        if let Some(ep) = existing.parsed.episode_number {
-                            if ep > entry.user_progress {
-                                scrobble = Some((
-                                    aid,
-                                    ep,
-                                    existing
-                                        .matched_anime_title
-                                        .clone()
-                                        .unwrap_or_else(|| existing.parsed.anime_title.clone()),
-                                    existing.player_name.clone(),
-                                    existing.cleaned_media_title.clone(),
-                                ));
-                            }
-                        }
-                    }
-                }
+            // Already-seen episodes (detected <= progress) never count down. In auto mode the update
+            // is due once the delay passed (held instead while waiting for the player to close);
+            // manual mode only offers it.
+            let focused = foreground_pid == Some(existing.process_id);
+            let due = existing.advance_update(&policy, focused, now);
+            if due && entry.is_some() {
+                existing.auto_synced = true;
+                scrobble = PendingScrobble::of(existing);
             }
         } else {
-            existing.elapsed_seconds = 0;
-            existing.auto_synced = false;
+            // Unmatched media never counts down or updates
+            let detected_at = existing.detected_at_unix;
+            existing.restart_countdown(detected_at);
         }
 
         existing.clone()
     }; // active_session lock released here: never held across an `.await`.
 
-    let Some((aid, ep, title, player, file)) = scrobble else {
+    let Some(pending) = scrobble else {
         return Ok(Some(session_now));
     };
-
-    // Record the watch as not-yet-scrobbled; the sync service marks it scrobbled once AniList accepts it.
-    let db = state.db.clone();
-    let history_id = tokio::task::spawn_blocking(move || {
-        db.record_watch_history(Some(aid), &title, ep, &player, &file, false)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| eprintln!("[scrobble] failed to record watch history: {}", e))
-    .ok();
-
-    // The service derives status (PLANNING -> CURRENT, COMPLETED at total) and dates, writes SQLite,
-    // refreshes `active_session.matched_current_progress` and pushes to AniList in the background.
-    let change = UserStateChange {
-        progress: Some(ep),
-        ..UserStateChange::new(aid, ChangeSource::Scrobble)
-    };
-    if let Err(e) = state
-        .sync
-        .apply_local_update_with_history(change, history_id)
-        .await
-    {
-        eprintln!("[scrobble] failed to update anime {}: {}", aid, e);
+    if let Err(e) = run_scrobble(state, pending).await {
+        eprintln!("[scrobble] {}", e);
     }
 
+    let current = state.active_session.lock().map_err(|e| e.to_string())?.clone();
+    Ok(current)
+}
+
+/// Manual mode's "Update" button (also used on a session whose player already closed).
+#[tauri::command]
+async fn confirm_playback_update(
+    state: State<'_, AppState>,
+) -> Result<Option<DetectedMediaSession>, String> {
+    let pending = {
+        let mut guard = state.active_session.lock().map_err(|e| e.to_string())?;
+        let Some(session) = guard.as_mut() else {
+            return Ok(None);
+        };
+        if session.auto_synced {
+            return Ok(Some(session.clone()));
+        }
+        let pending = PendingScrobble::of(session).ok_or("No matched episode to update")?;
+        session.auto_synced = true;
+        session.awaiting_confirmation = false;
+        session.waiting_for_close = false;
+        pending
+    };
+    let file = pending.file.clone();
+    if let Err(e) = run_scrobble(&state, pending).await {
+        // Offer it again
+        if let Some(session) = state
+            .active_session
+            .lock()
+            .map_err(|e| e.to_string())?
+            .as_mut()
+            .filter(|s| s.cleaned_media_title == file)
+        {
+            session.auto_synced = false;
+            session.awaiting_confirmation = true;
+        }
+        return Err(e);
+    }
     let current = state.active_session.lock().map_err(|e| e.to_string())?.clone();
     Ok(current)
 }
@@ -829,9 +997,7 @@ async fn link_detected_episode_to_anime(
         existing.matched_cover_image = Some(entry.cover_image.clone());
         existing.matched_current_progress = Some(entry.user_progress);
         existing.matched_total_episodes = entry.episodes;
-        existing.detected_at_unix = now;
-        existing.elapsed_seconds = 0;
-        existing.auto_synced = false;
+        existing.restart_countdown(now);
         return Ok(Some(existing.clone()));
     }
     Ok(None)
@@ -1514,6 +1680,33 @@ fn start_library_monitor(
     })
 }
 
+/// Release builds: WebView2 stops handling browser shortcuts (Ctrl+J downloads, Ctrl+F find, Ctrl+P
+/// print, Ctrl+R reload, zoom, DevTools…). Keys still reach the page, so the app's own shortcuts work;
+/// clipboard and undo keys are unaffected. Debug builds keep them for DevTools.
+#[cfg(windows)]
+fn disable_browser_accelerator_keys(app: &tauri::App) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let result = window.with_webview(|webview| {
+        use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3;
+        use windows_core::Interface;
+        let apply = || -> windows_core::Result<()> {
+            unsafe {
+                let settings: ICoreWebView2Settings3 =
+                    webview.controller().CoreWebView2()?.Settings()?.cast()?;
+                settings.SetAreBrowserAcceleratorKeysEnabled(false)
+            }
+        };
+        if let Err(e) = apply() {
+            eprintln!("[webview] failed to disable browser accelerator keys: {}", e);
+        }
+    });
+    if let Err(e) = result {
+        eprintln!("[webview] with_webview failed: {}", e);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1576,6 +1769,7 @@ pub fn run() {
                 sync: sync.clone(),
                 unmatched_check_generation: AtomicU64::new(u64::MAX),
                 torrents: torrent_cache.clone(),
+                discord: DiscordPresence::start(),
             });
 
             let torrent_emit_handle = app.handle().clone();
@@ -1594,6 +1788,11 @@ pub fn run() {
             });
 
             // The app-update check runs in the frontend (it prompts); relations update silently.
+            #[cfg(windows)]
+            if !cfg!(debug_assertions) {
+                disable_browser_accelerator_keys(app);
+            }
+
             if check_updates {
                 let relations_handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
@@ -1639,6 +1838,7 @@ pub fn run() {
             test_parse_filename,
             dismiss_playback_session,
             poll_media_recognition,
+            confirm_playback_update,
             link_detected_episode_to_anime,
             get_watch_history,
             get_watch_stats,

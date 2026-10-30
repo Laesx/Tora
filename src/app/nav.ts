@@ -7,7 +7,6 @@ import {
   Compass,
   History,
   Magnet,
-  Settings,
   Tv,
 } from "lucide-react";
 
@@ -19,8 +18,7 @@ export type NavTab =
   | "search"
   | "nowplaying"
   | "history"
-  | "stats"
-  | "settings";
+  | "stats";
 
 export interface NavItem {
   id: NavTab;
@@ -30,7 +28,7 @@ export interface NavItem {
   keywords: string[];
 }
 
-/** Every tab in sidebar order; Settings is the gear button, not a sidebar row */
+/** Every tab in sidebar order (Ctrl+1–8). Settings is a modal, not a tab: see `SETTINGS_SHORTCUT_DIGIT`. */
 export const NAV_ITEMS: NavItem[] = [
   { id: "nowplaying", label: "Now Playing", icon: Activity, keywords: ["playing", "player", "dashboard"] },
   { id: "watchlist", label: "Anime Watchlist", icon: Tv, keywords: ["list", "library"] },
@@ -40,5 +38,7 @@ export const NAV_ITEMS: NavItem[] = [
   { id: "search", label: "Search", icon: Compass, keywords: ["anilist", "find"] },
   { id: "history", label: "History", icon: History, keywords: ["watched", "scrobbles"] },
   { id: "stats", label: "Stats", icon: BarChart3, keywords: ["statistics", "activity", "backlog"] },
-  { id: "settings", label: "Settings", icon: Settings, keywords: ["preferences", "options"] },
 ];
+
+/** Ctrl+<this> opens the Settings modal (the digit after the last tab) */
+export const SETTINGS_SHORTCUT_DIGIT = NAV_ITEMS.length + 1;

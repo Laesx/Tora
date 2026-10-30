@@ -164,6 +164,9 @@ export const toraApi = {
 
   dismissPlaybackSession: () => invoke<void>("dismiss_playback_session"),
 
+  /** Manual update mode: update the list to the detected episode */
+  confirmPlaybackUpdate: () => invoke<DetectedMediaSession | null>("confirm_playback_update"),
+
   pollMediaRecognition: () =>
     invoke<DetectedMediaSession | null>("poll_media_recognition"),
 

@@ -10,6 +10,7 @@ interface NowPlayingViewProps {
   settings: AppSettings;
   onUpdateSettings: (next: AppSettings) => Promise<void>;
   onLinkDetectedEpisode: (animeId: number, aliasTitle: string) => Promise<void>;
+  onConfirmUpdate: () => void;
   onDismissSession: () => void;
   onOpenSeason: (season: string, year: number) => void;
 }
@@ -21,6 +22,7 @@ export const NowPlayingView: React.FC<NowPlayingViewProps> = ({
   settings,
   onUpdateSettings,
   onLinkDetectedEpisode,
+  onConfirmUpdate,
   onDismissSession,
   onOpenSeason,
 }) => {
@@ -70,6 +72,7 @@ export const NowPlayingView: React.FC<NowPlayingViewProps> = ({
           animeList={animeList}
           settings={settings}
           onLinkDetectedEpisode={onLinkDetectedEpisode}
+          onConfirmUpdate={onConfirmUpdate}
           onOpenSeason={onOpenSeason}
         />
       ) : (

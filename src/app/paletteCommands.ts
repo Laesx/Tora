@@ -2,10 +2,11 @@ import { Download, HardDrive, Keyboard, LayoutGrid, List, ListChecks, Palette, R
 import { THEME_PRESETS } from "@/lib/theme";
 import type { PaletteCommand } from "@/features/palette/CommandPalette";
 import type { ViewMode } from "@/features/watchlist/WatchlistView";
-import { NAV_ITEMS, NavTab } from "./nav";
+import { NAV_ITEMS, NavTab, SETTINGS_SHORTCUT_DIGIT } from "./nav";
 
 interface PaletteCommandDeps {
   navigate: (tab: NavTab) => void;
+  openSettings: () => void;
   openTorrentSettings: () => void;
   rescanLibrary: () => void;
   syncFromAnilist: () => void;
@@ -30,6 +31,7 @@ export function buildPaletteCommands(d: PaletteCommandDeps): PaletteCommand[] {
       shortcut: `Ctrl+${i + 1}`,
       run: () => d.navigate(item.id),
     })),
+    { id: "settings", label: "Open Settings", keywords: ["preferences", "options"], icon: Settings, shortcut: `Ctrl+${SETTINGS_SHORTCUT_DIGIT}`, run: d.openSettings },
     { id: "torrent-settings", label: "Torrent settings", keywords: ["qbittorrent", "download folder", "refresh interval", "torrents"], icon: Settings, run: d.openTorrentSettings },
     { id: "rescan-library", label: "Rescan All Library Folders", keywords: ["scan", "refresh", "files", "disk"], icon: HardDrive, shortcut: "F5", run: d.rescanLibrary },
     { id: "sync-anilist", label: "Sync from AniList", keywords: ["pull", "refresh", "tracker"], icon: RefreshCw, run: d.syncFromAnilist },

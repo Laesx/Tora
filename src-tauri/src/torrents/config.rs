@@ -138,10 +138,10 @@ pub fn default_feeds() -> Vec<TorrentFeed> {
 
 pub fn default_search_feeds() -> Vec<SearchFeed> {
     vec![
-        SearchFeed { id: 1, name: "Nyaa – English-translated".into(), url: NYAA_SEARCH_DEFAULT.into() },
+        SearchFeed { id: 1, name: "Nyaa – English".into(), url: NYAA_SEARCH_DEFAULT.into() },
         SearchFeed {
             id: 2,
-            name: "Nyaa – All categories".into(),
+            name: "Nyaa – All".into(),
             url: "https://nyaa.si/?page=rss&c=0_0&f=0&q=%title%".into(),
         },
     ]
