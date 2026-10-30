@@ -13,9 +13,6 @@ import {
   ArrowUp,
   Check,
   Clock,
-  Columns3,
-  Plus,
-  Minus,
   RotateCcw,
   Star,
   User,
@@ -27,8 +24,10 @@ import { AnimeQuickMenu } from "@/components/AnimeQuickMenu";
 import { LIST_STATUSES } from "@/lib/status";
 import { displayTitle, useAnimeTitle } from "@/contexts/titles";
 import { playLocalEpisode } from "@/lib/anime";
+import { seasonName } from "@/lib/seasons";
 import { episodeBar, episodeTotalLabel } from "@/lib/episodes";
-import { EpisodeProgressBar, ReadyBadge } from "@/components/EpisodeProgressBar";
+import { EpisodeProgressBar } from "@/components/EpisodeProgressBar";
+import { ProgressStepper, StepButton } from "@/components/ProgressStepper";
 import { AiringDot } from "@/components/AiringDot";
 import { FloatingQuickMenu } from "@/components/FloatingQuickMenu";
 import { useToast } from "@/contexts/toast";
@@ -46,6 +45,10 @@ export interface WatchlistGroup {
 }
 
 const GROUP_HEADER_HEIGHT = 40;
+
+/** Poster grid -1 / +1: round chips over the ends of the progress bar, shown on hover (or selected) */
+const GRID_STEP_BUTTON =
+  "absolute z-10 top-1/2 -translate-y-1/2 rounded-full bg-black/80 hover:bg-accent text-white border border-white/15 shadow opacity-0 group-hover:opacity-100 focus-visible:opacity-100 disabled:invisible";
 
 export type NavDirection = "left" | "right" | "up" | "down";
 
@@ -117,7 +120,7 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
   onSort,
 }) => {
   const showToast = useToast();
-  const { openAnime, stepEpisode } = useAnimeActions();
+  const { openAnime, openSeason } = useAnimeActions();
   const titleOf = useAnimeTitle();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const menuWrapperRef = useRef<HTMLDivElement | null>(null);
@@ -380,6 +383,9 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
   // Scroll a requested anime to the middle of the viewport and select it. Waits until the
   // anime is part of the rendered rows (the list may still be catching up with a new search).
   const handledFocusNonceRef = useRef<number | null>(null);
+  // What covers the top of the viewport: the sticky toolbar, plus the sticky table header
+  const coveredTop = (containerEl: HTMLElement) =>
+    stickyOffset + (containerEl.querySelector("thead")?.offsetHeight ?? 0);
   useEffect(() => {
     if (!focusRequest || handledFocusNonceRef.current === focusRequest.nonce) return;
     const containerEl = containerRef.current;
@@ -400,10 +406,11 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
       rowsEl.getBoundingClientRect().top -
       scrollEl.getBoundingClientRect().top +
       scrollEl.scrollTop;
-    // Centered in the part of the viewport below the sticky toolbar
+    // Centered in the part of the viewport below the sticky toolbar (and table header)
+    const covered = coveredTop(containerEl);
     scrollEl.scrollTop = Math.max(
       0,
-      listTop + row.top - stickyOffset - (scrollEl.clientHeight - stickyOffset - row.height) / 2
+      listTop + row.top - covered - (scrollEl.clientHeight - covered - row.height) / 2
     );
     onSetSelectedAnimeIds([focusRequest.id]);
     lastClickedIdRef.current = focusRequest.id;
@@ -457,8 +464,8 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
         scrollEl.getBoundingClientRect().top +
         scrollEl.scrollTop;
       const margin = 8;
-      // The sticky toolbar covers the top of the viewport
-      const top = listTop + rowTop - margin - stickyOffset;
+      // The sticky toolbar (and table header) covers the top of the viewport
+      const top = listTop + rowTop - margin - coveredTop(containerEl);
       const bottom = listTop + row.top + row.height + margin;
       if (top < scrollEl.scrollTop) scrollEl.scrollTop = Math.max(0, top);
       else if (bottom > scrollEl.scrollTop + scrollEl.clientHeight)
@@ -610,64 +617,47 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
                 <PendingSyncDot className="mt-1.5 ring-2 ring-black/60" />
               )}
               {(anime.average_score || anime.user_score > 0) && (
-                <div className="flex flex-col items-end gap-1">
+                <span className="px-1.5 py-0.5 rounded-md bg-black/75 text-[10px] font-mono font-bold flex items-center gap-1.5">
                   {anime.average_score ? (
-                    <span
-                      title="AniList average score"
-                      className="px-1.5 py-0.5 rounded-md bg-black/75 text-amber-400 text-[10px] font-mono font-bold flex items-center gap-1"
-                    >
+                    <span title="AniList average score" className="flex items-center gap-1 text-amber-400">
                       <Star className="w-2.5 h-2.5 fill-amber-400" />
                       {anime.average_score}%
                     </span>
                   ) : null}
+                  {anime.average_score && anime.user_score > 0 ? (
+                    <span aria-hidden="true" className="w-px h-2.5 bg-white/25" />
+                  ) : null}
                   {anime.user_score > 0 && (
-                    <span
-                      title="Your score"
-                      className="px-1.5 py-0.5 rounded-md bg-accent/90 text-white text-[10px] font-mono font-bold flex items-center gap-1 shadow"
-                    >
-                      <User className="w-2.5 h-2.5" />
+                    <span title="Your score" className="flex items-center gap-1 text-white">
+                      <User className="w-2.5 h-2.5 text-accent" />
                       {anime.user_score}
                     </span>
                   )}
-                </div>
+                </span>
               )}
             </div>
           </div>
 
-          {/* Bottom Overlay: Progress, On-Disk Count & Stepper (-1 / +1) */}
-          <div className="absolute bottom-2.5 left-3 right-3 flex items-center justify-between gap-1.5 text-white">
-            <span className="flex items-center gap-1.5 min-w-0">
-              <span className="text-xs font-mono font-bold truncate">
-                Ep {anime.user_progress} / {episodeTotalLabel(anime)}
-              </span>
-              <ReadyBadge bar={bar} progress={anime.user_progress} tone="overlay" />
-            </span>
-            <div
-              className="flex items-center gap-1"
-              onClick={(e) => e.stopPropagation()}
-              onDoubleClick={(e) => e.stopPropagation()}
-            >
-              <button
-                onClick={() => stepEpisode(anime, -1)}
-                disabled={anime.user_progress <= 0}
-                className="p-1 rounded-lg bg-black/75 hover:bg-white/20 disabled:opacity-40 disabled:pointer-events-none text-white border border-white/15 transition shadow"
-                title="Decrement Episode (-1)"
-              >
-                <Minus className="w-3 h-3" />
-              </button>
-              <button
-                onClick={() => stepEpisode(anime, 1)}
-                className="px-2 py-1 rounded-lg bg-accent hover:bg-accent-hover text-white text-[11px] font-bold flex items-center gap-0.5 shadow transition"
-                title="Increment Episode (+1)"
-              >
-                <Plus className="w-3 h-3" />1
-              </button>
-            </div>
+          {/* Bottom Overlay: Progress */}
+          <div className="absolute bottom-2.5 left-3 right-3 text-white text-xs font-mono font-bold truncate">
+            Ep {anime.user_progress} / {episodeTotalLabel(anime)}
           </div>
         </div>
 
-        {/* Progress Bar (watched + episodes on disk) */}
-        <EpisodeProgressBar bar={bar} className="w-full h-2.5 shrink-0" />
+        {/* Progress Bar (watched + episodes on disk); -1 / +1 sit on its ends while hovered or selected */}
+        <div className="relative shrink-0">
+          <EpisodeProgressBar bar={bar} className="w-full h-2.5" />
+          <StepButton
+            anime={anime}
+            delta={-1}
+            className={`${GRID_STEP_BUTTON} left-1.5 ${isSelected ? "opacity-100" : ""}`}
+          />
+          <StepButton
+            anime={anime}
+            delta={1}
+            className={`${GRID_STEP_BUTTON} right-1.5 ${isSelected ? "opacity-100" : ""}`}
+          />
+        </div>
 
         {/* Card Footer (fixed 60px height) */}
         <div className="p-3 h-[60px] shrink-0 flex flex-col justify-between">
@@ -694,6 +684,9 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
   const renderCompactCard = (anime: AnimeEntry) => {
     const isSelected = selectedSet.has(anime.id);
     const bar = episodeBar(anime);
+    const cd = formatCountdown(anime.next_airing_at);
+    const airing = cd && anime.next_airing_episode ? `Ep ${anime.next_airing_episode} in ${cd}` : null;
+    const genres = anime.genres.slice(0, 3).join(", ");
     return (
       <div
         key={anime.id}
@@ -746,40 +739,26 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
                 )}
               </div>
             )}
-            <p className="text-[11px] text-text-muted line-clamp-1 mt-1">
-              {anime.synopsis}
-            </p>
+            {(airing || genres) && (
+              <div className="flex items-center gap-1 min-w-0 mt-1 text-[11px] text-text-muted">
+                {airing && (
+                  <span className="flex items-center gap-1 shrink-0 font-mono text-emerald-400">
+                    <Clock className="w-3 h-3" />
+                    {airing}
+                  </span>
+                )}
+                {airing && genres && <span aria-hidden="true">·</span>}
+                {genres && <span className="truncate">{genres}</span>}
+              </div>
+            )}
           </div>
 
           <div>
-            <EpisodeProgressBar bar={bar} className="w-full h-2.5 rounded-full" />
-            <div className="flex items-center justify-between gap-2 pt-2 text-xs">
-              <div className="flex items-center gap-2">
-                <span className="font-mono font-bold text-accent">
-                  Ep {anime.user_progress} / {episodeTotalLabel(anime)}
-                </span>
-                <ReadyBadge bar={bar} progress={anime.user_progress} />
-              </div>
-
-              <div
-                className="flex items-center gap-1"
-                onClick={(e) => e.stopPropagation()}
-                onDoubleClick={(e) => e.stopPropagation()}
-              >
-                <button
-                  onClick={() => stepEpisode(anime, -1)}
-                  className="p-1.5 rounded-lg bg-bg-primary hover:bg-bg-tertiary border border-border-subtle text-text-secondary"
-                >
-                  <Minus className="w-3 h-3" />
-                </button>
-                <button
-                  onClick={() => stepEpisode(anime, 1)}
-                  className="px-2.5 py-1 rounded-lg bg-accent hover:bg-accent-hover text-white font-semibold text-xs flex items-center gap-1"
-                >
-                  <Plus className="w-3 h-3" />1
-                </button>
-              </div>
+            {/* Lined up with the bar, past the -1 button */}
+            <div className="pl-6 pb-1 text-xs font-mono font-bold text-accent truncate">
+              Ep {anime.user_progress} / {episodeTotalLabel(anime)}
             </div>
+            <ProgressStepper anime={anime} bar={bar} />
           </div>
         </div>
       </div>
@@ -792,7 +771,13 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
   const renderTableCell = (column: TableColumn, anime: AnimeEntry, bar: ReturnType<typeof episodeBar>, isSelected: boolean) => {
     const cls = `${CELL} ${column.className}`;
     switch (column.id) {
-      case "title":
+      case "title": {
+        const subline = [
+          anime.studios.join(", "),
+          anime.user_started_at ? `Started ${anime.user_started_at}` : "",
+        ]
+          .filter(Boolean)
+          .join(" · ");
         return (
           <td key={column.id} className={cls}>
             <div className="flex items-center gap-3 min-w-0">
@@ -817,42 +802,60 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
                   {titleOf(anime)}
                 </div>
                 <div className="text-[10px] text-text-muted truncate">
-                  {anime.studios.join(", ")}
-                  {anime.user_started_at ? ` • Started ${anime.user_started_at}` : ""}
+                  {anime.user_score > 0 && (
+                    <span title="Your score" className="font-mono font-bold text-amber-400">
+                      <Star className="inline-block w-2.5 h-2.5 mr-0.5 -mt-0.5 fill-amber-400" />
+                      {anime.user_score}
+                      {subline && <span className="text-text-muted font-sans font-normal"> · </span>}
+                    </span>
+                  )}
+                  {subline}
                 </div>
               </div>
             </div>
           </td>
         );
+      }
       case "format":
         return (
-          <td key={column.id} className={`${cls} font-mono text-[11px] text-text-secondary truncate`}>
-            {anime.format}
+          <td key={column.id} className={cls}>
+            {anime.format && (
+              <span className="px-1.5 py-0.5 rounded bg-bg-tertiary text-[10px] font-mono text-text-muted">
+                {anime.format}
+              </span>
+            )}
           </td>
         );
       case "progress":
         return (
           <td key={column.id} className={cls}>
-            <div className="flex items-center justify-between gap-2 text-[11px] font-mono mb-1 min-w-0">
-              <span className="truncate">
-                {anime.user_progress} / {episodeTotalLabel(anime)}
-              </span>
-              <ReadyBadge bar={bar} progress={anime.user_progress} className="py-0 shrink-0" />
+            {/* Lined up with the bar, past the -1 button */}
+            <div className="pl-6 mb-0.5 text-[11px] font-mono truncate">
+              {anime.user_progress} / {episodeTotalLabel(anime)}
             </div>
-            <EpisodeProgressBar bar={bar} className="w-full h-2.5 rounded-full" />
-          </td>
-        );
-      case "score":
-        return (
-          <td key={column.id} className={`${cls} font-mono font-bold text-amber-400`}>
-            {anime.user_score > 0 ? anime.user_score : "-"}
+            <ProgressStepper anime={anime} bar={bar} />
           </td>
         );
       case "season": {
-        const season = [anime.season, anime.season_year].filter(Boolean).join(" ");
+        const { season, season_year: year } = anime;
+        const label = [season && seasonName(season), year].filter(Boolean).join(" ");
         return (
-          <td key={column.id} className={`${cls} text-[11px] text-text-secondary truncate`} title={season || undefined}>
-            {season}
+          <td key={column.id} className={`${cls} text-[11px] text-text-secondary truncate`}>
+            {season && year ? (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openSeason(season, year);
+                }}
+                onDoubleClick={(e) => e.stopPropagation()}
+                className="max-w-full truncate hover:text-accent hover:underline transition"
+                title={`Show ${label} in Seasons`}
+              >
+                {label}
+              </button>
+            ) : (
+              label
+            )}
           </td>
         );
       }
@@ -864,30 +867,6 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
             ) : (
               <span className="text-text-muted">-</span>
             )}
-          </td>
-        );
-      case "actions":
-        return (
-          <td
-            key={column.id}
-            className={cls}
-            onClick={(e) => e.stopPropagation()}
-            onDoubleClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-end gap-1">
-              <button
-                onClick={() => stepEpisode(anime, -1)}
-                className="p-1.5 rounded bg-bg-primary hover:bg-bg-tertiary border border-border-subtle text-text-secondary"
-              >
-                <Minus className="w-3 h-3" />
-              </button>
-              <button
-                onClick={() => stepEpisode(anime, 1)}
-                className="px-2 py-1 rounded bg-accent hover:bg-accent-hover text-white font-mono font-bold text-[11px]"
-              >
-                +1
-              </button>
-            </div>
           </td>
         );
     }
@@ -958,13 +937,17 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
   const colSpan = tableColumns.columns.length;
   const widthOf = (column: TableColumn) =>
     dragWidth?.id === column.id ? dragWidth.width : tableColumns.widthOf(column);
-  // Below this width the table scrolls sideways instead of squeezing the title column
+  // Never squeeze the title below its minimum (narrower windows clip the last columns)
   const tableMinWidth = tableColumns.columns.reduce(
     (sum, c) => sum + (widthOf(c) ?? c.minWidth),
     0
   );
 
-  /** Drag a header's right edge; the width is saved once the pointer is released */
+  /**
+   * Drag the boundary on `column`'s left edge. The title takes the remaining width, so the columns
+   * after it are anchored to the right: moving the boundary right narrows `column` (the title
+   * grows), moving it left widens it until the title is at its minimum. Saved on release.
+   */
   const startResize = (e: React.PointerEvent<HTMLSpanElement>, column: TableColumn) => {
     if (e.button !== 0) return;
     e.preventDefault();
@@ -973,9 +956,12 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
     handle.setPointerCapture(e.pointerId);
     const startX = e.clientX;
     const startWidth = tableColumns.widthOf(column) ?? column.minWidth;
+    const titleCell = handle.closest("tr")?.firstElementChild as HTMLElement | null;
+    const titleSlack = Math.max(0, (titleCell?.offsetWidth ?? 0) - tableColumns.columns[0].minWidth);
+    const maxWidth = startWidth + titleSlack;
     let width = startWidth;
     const onMove = (ev: PointerEvent) => {
-      width = clampColumnWidth(column, startWidth + ev.clientX - startX);
+      width = Math.min(maxWidth, clampColumnWidth(column, startWidth - (ev.clientX - startX)));
       setDragWidth({ id: column.id, width });
     };
     const onUp = () => {
@@ -999,7 +985,8 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
   return (
     <div
       ref={containerRef}
-      className="bg-bg-secondary border border-border-subtle rounded-2xl overflow-x-auto overflow-y-hidden [overflow-anchor:none]"
+      // `overflow-clip`, not a scroll container: the sticky header follows <main>
+      className="bg-bg-secondary border border-border-subtle rounded-2xl overflow-clip [overflow-anchor:none]"
     >
       <table
         className="w-full table-fixed text-left border-collapse text-xs"
@@ -1013,14 +1000,19 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
         </colgroup>
         <thead className="bg-bg-tertiary text-text-muted uppercase text-[10px]" onContextMenu={openColumnMenu}>
           <tr>
-            {tableColumns.columns.map((column) => {
+            {tableColumns.columns.map((column, i) => {
               const { id, label, sortKey: key } = column;
               const active = key !== null && key === sortKey;
               const SortIcon = sortDir === "asc" ? ArrowUp : ArrowDown;
+              // The boundary on this header's right edge resizes the next column
+              const next = tableColumns.columns[i + 1];
+              const dragging = next !== undefined && dragWidth?.id === next.id;
               return (
                 <th
                   key={id}
-                  className={`relative py-2.5 whitespace-nowrap overflow-hidden ${column.className}`}
+                  // 1px under the toolbar: its measured height is rounded, and a sub-pixel gap shows rows
+                  style={{ top: stickyOffset - 1 }}
+                  className={`sticky z-10 py-2.5 whitespace-nowrap overflow-hidden bg-bg-tertiary shadow-[inset_0_-1px_0_0_rgb(var(--border-subtle))] ${column.className}`}
                   aria-sort={active ? (sortDir === "asc" ? "ascending" : "descending") : undefined}
                 >
                   <span className="inline-flex items-center gap-1 max-w-full">
@@ -1039,30 +1031,27 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
                     ) : (
                       <span className="truncate">{label}</span>
                     )}
-                    {id === "actions" && (
-                      <button
-                        onClick={openColumnMenu}
-                        className={`p-0.5 rounded hover:text-text-primary hover:bg-bg-secondary transition ${tableColumns.isCustomized ? "text-accent" : ""}`}
-                        title="Show or hide columns (or right-click the header)"
-                        aria-label="Columns"
-                      >
-                        <Columns3 className="w-3.5 h-3.5" />
-                      </button>
-                    )}
                   </span>
-                  {column.resizable && (
+                  {next?.resizable && (
                     <span
                       role="separator"
                       aria-orientation="vertical"
                       title="Drag to resize (double-click to reset)"
-                      onPointerDown={(e) => startResize(e, column)}
+                      onPointerDown={(e) => startResize(e, next)}
                       onClick={(e) => e.stopPropagation()}
                       onDoubleClick={(e) => {
                         e.stopPropagation();
-                        tableColumns.setWidth(column, null);
+                        tableColumns.setWidth(next, null);
                       }}
-                      className="absolute top-0 right-0 h-full w-1.5 cursor-col-resize touch-none hover:bg-accent/50 transition-colors"
-                    />
+                      className="group/resize absolute top-0 right-0 h-full w-2 flex items-center justify-end cursor-col-resize touch-none"
+                    >
+                      <span
+                        className={`w-px transition-all ${dragging
+                          ? "h-full bg-accent"
+                          : "h-3/5 bg-text-muted/40 group-hover/resize:h-full group-hover/resize:bg-accent"
+                          }`}
+                      />
+                    </span>
                   )}
                 </th>
               );

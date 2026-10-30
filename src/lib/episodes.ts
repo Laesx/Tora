@@ -98,14 +98,6 @@ export interface EpisodeBarModel {
   scale: number;
   watchedPct: number;
   strip: StripRun[];
-  /** Unwatched episodes on disk */
-  ready: number;
-  /** Episode `progress + 1` is on disk */
-  nextReady: boolean;
-  /** "Ep 6–8": the run on disk starting right after the progress */
-  readyText: string | null;
-  /** Aired, unwatched episodes that aren't on disk, as capped ranges ("Ep 9, 11–12") */
-  missingText: string | null;
   tooltip: string;
 }
 
@@ -165,8 +157,8 @@ export function episodeBar(anime: AnimeEntry, now = nowSeconds()): EpisodeBarMod
     if (ep > progress) ready++;
     if (total && ep > total) extra++;
   }
+  // "Ep 6–8": the run on disk starting right after the progress
   const nextRun = strip.find((r) => r.kind === "disk" && r.from <= progress + 1 && r.to > progress);
-  const nextReady = Boolean(nextRun);
   const readyText = nextRun
     ? progress + 1 === nextRun.to
       ? `Ep ${nextRun.to}`
@@ -177,6 +169,7 @@ export function episodeBar(anime: AnimeEntry, now = nowSeconds()): EpisodeBarMod
   const lines = [
     `Watched ${progress} / ${total ?? (estimate ? `~${estimate} (estimated total)` : "?")}`,
   ];
+  if (readyText) lines.push(`Ready to watch: ${readyText}`);
   if (missingText) lines.push(`Missing: ${missingText}`);
   else if (ready > 0) lines.push("All aired episodes are on disk");
   if (anime.next_airing_episode && anime.next_airing_at && anime.next_airing_at > now) {
@@ -197,10 +190,6 @@ export function episodeBar(anime: AnimeEntry, now = nowSeconds()): EpisodeBarMod
     scale,
     watchedPct: (Math.min(progress, scale) / scale) * 100,
     strip,
-    ready,
-    nextReady,
-    readyText,
-    missingText,
     tooltip: lines.join("\n"),
   };
 }

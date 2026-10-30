@@ -15,6 +15,7 @@ import { AnimeEntry, AppSettings } from "@/lib/types";
 import { formatLastSynced } from "@/lib/format";
 import { WATCHLIST_TABS } from "@/lib/status";
 import { useAnimeActions } from "@/contexts/animeActions";
+import { KeyHint } from "@/components/KeyHint";
 import { CustomListsChip } from "./CustomListsChip";
 import { VirtualWatchlist, WatchlistNav } from "./VirtualWatchlist";
 import type { WatchlistState } from "./useWatchlist";
@@ -24,10 +25,11 @@ const SORT_GROUPS = Array.from(new Set(SORT_OPTIONS.map((o) => o.group)));
 
 export type ViewMode = AppSettings["view_mode"];
 
-const VIEW_MODES: { id: ViewMode; icon: LucideIcon; title: string }[] = [
-  { id: "grid", icon: LayoutGrid, title: "Poster Grid View" },
-  { id: "compact", icon: Rows, title: "Detailed Cards View" },
-  { id: "table", icon: List, title: "Taiga Classic Dense Table View" },
+/** In switcher order; `key` is the Alt shortcut (useGlobalShortcuts) */
+const VIEW_MODES: { id: ViewMode; icon: LucideIcon; title: string; key: string }[] = [
+  { id: "grid", icon: LayoutGrid, title: "Poster Grid View", key: "Q" },
+  { id: "compact", icon: Rows, title: "Detailed Cards View", key: "W" },
+  { id: "table", icon: List, title: "Taiga Classic Dense Table View", key: "E" },
 ];
 
 interface WatchlistViewProps {
@@ -52,6 +54,8 @@ interface WatchlistViewProps {
   /** Owned by App so the global shortcuts can type into the box and move the selection */
   searchInputRef: React.MutableRefObject<HTMLInputElement | null>;
   navRef: React.Ref<WatchlistNav>;
+  /** Alt held: badges with the Alt+1–6 / Q W E keys on the status tabs and view switcher */
+  showKeyHints: boolean;
 }
 
 /** Anime Watchlist tab: status tabs / custom lists, search, sort, sync, view mode, virtualized list. */
@@ -75,6 +79,7 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
   onSetQuickMenuAnimeId,
   searchInputRef,
   navRef,
+  showKeyHints,
 }) => {
   const { openAnime } = useAnimeActions();
   const toolbarRef = useRef<HTMLDivElement | null>(null);
@@ -110,19 +115,21 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
       {/* Filter & view mode toolbar: stays at the top while the list scrolls */}
       <div
         ref={toolbarRef}
-        className={`sticky top-0 z-30 -mx-6 px-6 pt-6 pb-4 mb-0 flex flex-wrap items-center justify-between gap-4 bg-bg-primary/90 backdrop-blur-md border-b transition-[border-color,box-shadow] ${stuck ? "border-border-subtle shadow-lg shadow-black/10" : "border-transparent"
+        // Table mode: the sticky column header right below is the separator (no scrolled border / shadow)
+        className={`sticky top-0 z-30 -mx-6 px-6 pt-6 pb-4 mb-0 flex flex-wrap items-center justify-between gap-4 bg-bg-primary/90 backdrop-blur-md border-b transition-[border-color,box-shadow] ${stuck && viewMode !== "table" ? "border-border-subtle shadow-lg shadow-black/10" : "border-transparent"
           }`}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Status tabs */}
         <div className="flex flex-wrap items-center gap-1 bg-bg-secondary p-1 rounded-xl border border-border-subtle">
-          {WATCHLIST_TABS.map((tab) => {
+          {WATCHLIST_TABS.map((tab, i) => {
             const active = !w.isSearching && w.customListFilter === null && w.statusFilter === tab.id;
             return (
               <button
                 key={tab.id}
                 onClick={() => w.showStatus(tab.id)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 ${active ? "bg-accent text-white shadow-sm" : "text-text-secondary hover:text-text-primary"
+                title={`${tab.label} (Alt+${i + 1})`}
+                className={`relative px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 ${active ? "bg-accent text-white shadow-sm" : "text-text-secondary hover:text-text-primary"
                   }`}
               >
                 <span>{tab.label}</span>
@@ -132,6 +139,7 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
                 >
                   {w.statusCounts[tab.id] || 0}
                 </span>
+                <KeyHint label={String(i + 1)} visible={showKeyHints} className="top-full mt-1 left-1/2 -translate-x-1/2 z-10" />
               </button>
             );
           })}
@@ -231,15 +239,16 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
 
           {onViewModeChange && (
             <div className="flex items-center bg-bg-secondary p-1 rounded-xl border border-border-subtle">
-              {VIEW_MODES.map(({ id, icon: Icon, title }) => (
+              {VIEW_MODES.map(({ id, icon: Icon, title, key }) => (
                 <button
                   key={id}
                   onClick={() => onViewModeChange(id)}
-                  className={`p-1.5 rounded-lg transition ${viewMode === id ? "bg-accent text-white" : "text-text-muted hover:text-text-primary"
+                  className={`relative p-1.5 rounded-lg transition ${viewMode === id ? "bg-accent text-white" : "text-text-muted hover:text-text-primary"
                     }`}
-                  title={title}
+                  title={`${title} (Alt+${key})`}
                 >
                   <Icon className="w-3.5 h-3.5" />
+                  <KeyHint label={key} visible={showKeyHints} className="top-full mt-1 left-1/2 -translate-x-1/2 z-10" />
                 </button>
               ))}
             </div>

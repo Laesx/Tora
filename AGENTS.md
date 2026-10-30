@@ -64,7 +64,7 @@ Tora/
 │   │   ├── SignOutModal.tsx              # Sign-out confirmation
 │   │   ├── shortcuts.ts                  # `SHORTCUT_GROUPS`: every shortcut shown in the sheet (keep in step with the handlers)
 │   │   ├── ShortcutsModal.tsx            # Keyboard shortcuts sheet (?, sidebar keyboard button, palette command)
-│   │   ├── useCtrlHint.ts                # Ctrl held alone ~400 ms → sidebar shows Ctrl+1–9 badges
+│   │   ├── useModifierHint.ts            # Ctrl / Alt held alone ~400 ms → key badges (sidebar Ctrl+1–9, watchlist Alt+1–6 / Q W E)
 │   │   ├── Toast.tsx                     # `useToastState` (stable `showToast`) + toast view
 │   │   ├── ErrorBoundary.tsx             # Render errors show a panel (Try again / Reload) and are logged; wraps the root and each tab
 │   │   ├── useBrowserGuards.ts           # No native right-click menu (except text fields), Ctrl+J/F/P/R… panels, Alt+←/→ or mouse back/forward
@@ -77,11 +77,11 @@ Tora/
 │   │   ├── useMediaPoll.ts               # 2.5 s player recognition poll (`inFlight` guard), new-session / scrobbled callbacks
 │   │   ├── useAppEvents.ts               # Registers every Tauri listener before the initial load
 │   │   ├── useCustomListsState.ts        # AniList custom lists state, membership maps, counts, `CustomListsContext` value
-│   │   ├── useGlobalShortcuts.ts         # F5, F11 fullscreen, Ctrl+K, Ctrl+1–8 tabs / Ctrl+9 Settings, ?, watchlist type-to-search / arrows / Enter / Ctrl+A, layered Escape
+│   │   ├── useGlobalShortcuts.ts         # F5, F11 fullscreen, Ctrl+K, Ctrl+1–8 tabs / Ctrl+9 Settings, ?, watchlist type-to-search / arrows / Enter / Ctrl+A / Alt+1–6 status tabs / Alt+Q W E views, layered Escape
 │   │   └── paletteCommands.ts            # Ctrl+K Commands tab entries
 │   ├── contexts/                         # React contexts (provided by App)
 │   │   ├── toast.ts                      # `useToast()`; never pass `showToast` as a prop
-│   │   ├── animeActions.ts               # `useAnimeActions()`: open drawer, step, batch update / delete, change status, add, search torrents; never drill these as props
+│   │   ├── animeActions.ts               # `useAnimeActions()`: open drawer, step, batch update / delete, change status, add, search torrents, open a season; never drill these as props
 │   │   ├── customLists.ts                # AniList custom lists context (`useCustomLists`), optimistic membership edit, coverage helper
 │   │   └── titles.ts                     # Display title language (`useAnimeTitle`, `altTitles`, `displayTitle` for plain helpers)
 │   ├── hooks/                            # Generic hooks
@@ -107,12 +107,14 @@ Tora/
 │   │   ├── FloatingQuickMenu.tsx         # Viewport-clamped portal for right-click quick menus (dashboard, schedule)
 │   │   ├── AnimePosterCard.tsx           # Poster card for remote anime (Seasons / Search): opens drawer, quick-add
 │   │   ├── CustomListsPanel.tsx          # Custom-list membership toggles + "hide from status lists" (quick menu rows / drawer chips)
-│   │   ├── EpisodeProgressBar.tsx        # Taiga-style progress bar with on-disk strip, "ready" badge
+│   │   ├── EpisodeProgressBar.tsx        # Taiga-style progress bar with on-disk strip (ready / missing episodes in its tooltip)
+│   │   ├── ProgressStepper.tsx           # −1 / +1 `StepButton`s and the bar flanked by them (watchlist table, detailed cards; grid overlays them on the bar)
+│   │   ├── KeyHint.tsx                   # Key badge shown while a modifier is held (`useModifierHint`)
 │   │   ├── AiringDot.tsx                 # Airing status dot with next-episode countdown
 │   │   └── UpdateCountdown.tsx           # Seconds until the playback auto update (from `update_due_at`, local clock)
 │   ├── features/                         # One folder per tab / surface
 │   │   ├── watchlist/
-│   │   │   ├── WatchlistView.tsx         # Sticky toolbar (status tabs, custom-list chip, search, sort + direction, sync, view mode) + the list
+│   │   │   ├── WatchlistView.tsx         # Sticky toolbar (status tabs, custom-list chip, search, sort + direction, sync, view mode; Alt key badges) + the list
 │   │   │   ├── useWatchlist.ts           # Filter state, sort prefs (`tora.watchlist.prefs`), `searchIndex`, status counts, search groups, `filteredAnime`, `focusAnime`
 │   │   │   ├── sort.ts                   # `SORT_OPTIONS` (grouped keys, natural direction, unknown values last) + `watchlistComparator`
 │   │   │   ├── VirtualWatchlist.tsx      # Viewport-windowed virtual grid/list for Grid, Compact & Table modes (row model with optional status group headers, scroll-to-anime, arrow-key `navRef`, last-updated labels)
@@ -266,7 +268,7 @@ When a filename or media player window title is parsed (`parse_filename` in `src
     - The watch history entry is recorded (`scrobbled_to_tracker = false`) and the change goes through `TrackerSyncService::apply_local_update_with_history`, which pushes to AniList and marks the history row scrobbled only after the push succeeds.
     - The `active_session` lock is only held to decide; it is released before any DB write or `.await`.
 - **Optimistic Episode Stepping (+1 Button) with Debounce**:
-  - In React (`stepEpisode` in `src/app/useEpisodeStepper.ts`, reached through `useAnimeActions()`), clicking `+1` on an anime card applies an instant 0ms optimistic UI update to the badge count.
+  - In React (`stepEpisode` in `src/app/useEpisodeStepper.ts`, reached through `useAnimeActions()`), clicking `+` / `−` next to an anime's progress bar (`components/ProgressStepper.tsx`) applies an instant 0ms optimistic UI update to the badge count.
   - Card sorting position in the watchlist is locked using the stepper's `snapshots` during rapid successive clicks to prevent jarring layout jumps.
   - A debounce timer coalesces repeated clicks, persisting the final state to SQLite and AniList once clicking stops.
   - Active recognition session state (`active_session.matched_current_progress`) is kept in immediate sync when an entry is updated.
@@ -296,7 +298,7 @@ When a filename or media player window title is parsed (`parse_filename` in `src
 - **DOM Virtualization**:
   - Large lists (`VirtualWatchlist.tsx` for the Anime Watchlist across `"grid"`, `"compact"`, and `"table"` modes, and the Indexed Local Episodes table in `LibraryManagerView.tsx`) must remain virtualized so WebView2 only mounts visible rows (+ overscan) and releases decoded cover image bitmaps for off-screen rows.
   - Every virtualized row must be exactly the height the row model says: no wrapping text, no borders (separators are inset shadows), and the list element carries `[overflow-anchor:none]`. Otherwise Chromium scroll anchoring and the re-measure in `useScrollViewport` feed each other and the page locks up.
-  - Table mode uses `table-fixed` with a `<colgroup>` from `useTableColumns` (`tableColumns.ts`): column widths never depend on the mounted rows. Header edges resize (double-click resets), the header's right-click / Columns button shows or hides columns; Title takes the remaining width and, like Quick Actions, can't be hidden. Widths and hidden columns are per-device prefs (`tora.watchlist.columns`), not `AppSettings`.
+  - Table mode uses `table-fixed` with a `<colgroup>` from `useTableColumns` (`tableColumns.ts`): column widths never depend on the mounted rows. Title takes the remaining width and can't be hidden, so the columns after it are anchored to the right edge: each header boundary (Title|Type included) is dragged by resizing the column on its **right** (`startResize`, capped so the title keeps its minimum; double-click resets). Right-clicking the header shows or hides columns. The header is sticky under the toolbar, so the table's wrapper is `overflow-clip` (never a scroll container) and scroll-into-view accounts for the `thead` height. The Season cell opens that season in the Seasons tab. Widths and hidden columns are per-device prefs (`tora.watchlist.columns`), not `AppSettings`.
   - `VirtualWatchlist` virtualizes a row model (optional group header rows + rows of `cols` cards with prefix-sum offsets, `visibleRange` binary search for the first visible row); search results grouped by status go through the same path. Lists scrolling inside `<main>` measure with `useScrollViewport` (`src/hooks/virtual.ts`).
 - **Search (`src/lib/fuzzy.ts`)**:
   - The watchlist search and the command palette both use `searchAnime` over the one `searchIndex` built in `useWatchlist` (`buildAnimeSearchIndex`, rebuilt only when `animeList` changes). Don't add another filter path: an anime picked in the palette must always appear in the watchlist results for the same text.

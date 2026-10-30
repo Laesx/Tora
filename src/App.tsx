@@ -4,6 +4,7 @@ import { toraApi } from "@/lib/api";
 import { applyThemeToDocument } from "@/lib/theme";
 import { plural } from "@/lib/format";
 import { SEASONS, SeasonName } from "@/lib/seasons";
+import { WATCHLIST_TABS } from "@/lib/status";
 import type { TorrentSearchRequest } from "@/lib/torrents";
 import { animeTitle, setCurrentTitleLanguage, TitleLanguageContext } from "@/contexts/titles";
 import { CustomListsContext } from "@/contexts/customLists";
@@ -25,7 +26,7 @@ import { useTrackerSync } from "@/app/useTrackerSync";
 import { useMediaPoll } from "@/app/useMediaPoll";
 import { useAppEvents } from "@/app/useAppEvents";
 import { useGlobalShortcuts } from "@/app/useGlobalShortcuts";
-import { useCtrlHint } from "@/app/useCtrlHint";
+import { useModifierHint } from "@/app/useModifierHint";
 import { useBrowserGuards } from "@/app/useBrowserGuards";
 import { buildPaletteCommands } from "@/app/paletteCommands";
 import { useWatchlist } from "@/features/watchlist/useWatchlist";
@@ -86,7 +87,8 @@ export const App: React.FC = () => {
   const [cmdQuery, setCmdQuery] = useState("");
   const [signOutModalOpen, setSignOutModalOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
-  const showShortcutHints = useCtrlHint();
+  const showShortcutHints = useModifierHint("Control");
+  const showWatchlistKeyHints = useModifierHint("Alt");
   const [isAuthorizingAnilist, setIsAuthorizingAnilist] = useState(false);
   const [libraryRefreshTick, setLibraryRefreshTick] = useState(0);
   // Sync requires an OAuth token; a bare username no longer counts as signed in
@@ -378,6 +380,7 @@ export const App: React.FC = () => {
       setTorrentSearch({ ...req, nonce: Date.now() });
       setActiveTab("torrents");
     },
+    openSeason,
   };
   const animeActions = useMemo<AnimeActions>(() => {
     const latest = () => latestActions.current!;
@@ -390,6 +393,7 @@ export const App: React.FC = () => {
       deleteAnime: (a) => latest().deleteAnime(a),
       addAnime: (entry, status) => latest().addAnime(entry, status),
       searchTorrents: (req) => latest().searchTorrents(req),
+      openSeason: (season, year) => latest().openSeason(season, year),
     };
   }, []);
 
@@ -423,6 +427,13 @@ export const App: React.FC = () => {
     moveSelection: (dir) => watchlistNavRef.current?.move(dir) ?? false,
     enterList: () => watchlistNavRef.current?.enter() ?? false,
     navigate: navigateTo,
+    setViewMode: (mode) => {
+      if (settings) setViewMode(mode);
+    },
+    showStatusTab: (index) => {
+      const tab = WATCHLIST_TABS[index];
+      if (tab) watchlist.showStatus(tab.id);
+    },
     openSettings: () => {
       closeTransientLayers();
       openSettings();
@@ -524,6 +535,7 @@ export const App: React.FC = () => {
                         onSetQuickMenuAnimeId={list.setQuickMenuAnimeId}
                         searchInputRef={watchlistSearchRef}
                         navRef={watchlistNavRef}
+                        showKeyHints={showWatchlistKeyHints}
                       />
                     )}
 

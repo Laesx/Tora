@@ -40,7 +40,7 @@ import { STATUS_INFO } from "@/lib/status";
 import { altTitles, useAnimeTitle, useTitleLanguage } from "@/contexts/titles";
 import { stripSeasonSuffix, torrentSearchFor } from "@/lib/torrents";
 import { episodeBar, episodeTotalLabel } from "@/lib/episodes";
-import { EpisodeProgressBar, ReadyBadge } from "@/components/EpisodeProgressBar";
+import { EpisodeProgressBar } from "@/components/EpisodeProgressBar";
 import { AiringDot } from "@/components/AiringDot";
 import { useToast } from "@/contexts/toast";
 import { useAnimeActions } from "@/contexts/animeActions";
@@ -368,10 +368,7 @@ export const NowPlayingHero: React.FC<NowPlayingHeroProps> = ({
               )}
             </div>
             {entry && bar ? (
-              <div className="flex items-center gap-2 max-w-md">
-                <EpisodeProgressBar bar={bar} className="flex-1 h-2.5 rounded-full" />
-                <ReadyBadge bar={bar} progress={entry.user_progress} />
-              </div>
+              <EpisodeProgressBar bar={bar} className="max-w-md h-2.5 rounded-full" />
             ) : total ? (
               <div className="h-1.5 rounded-full bg-bg-tertiary overflow-hidden max-w-md">
                 <div

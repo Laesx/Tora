@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { AnimeEntry } from "@/lib/types";
 import type { NavDirection } from "@/features/watchlist/VirtualWatchlist";
+import type { ViewMode } from "@/features/watchlist/WatchlistView";
 import { NAV_ITEMS, NavTab, SETTINGS_SHORTCUT_DIGIT } from "./nav";
 import { log } from "@/lib/log";
 
@@ -41,9 +42,16 @@ interface ShortcutState {
   /** Focus the selected card, or select the first one; false when the list is empty */
   enterList: () => boolean;
   navigate: (tab: NavTab) => void;
+  /** Watchlist Alt+Q / W / E */
+  setViewMode: (mode: ViewMode) => void;
+  /** Watchlist Alt+1–6: the status tab at this index of `WATCHLIST_TABS` */
+  showStatusTab: (index: number) => void;
   openSettings: () => void;
   rescanLibrary: () => void;
 }
+
+/** Alt+Q / W / E on the watchlist, in the view switcher's order */
+const VIEW_KEYS: Record<string, ViewMode> = { KeyQ: "grid", KeyW: "compact", KeyE: "table" };
 
 const ARROWS: Record<string, NavDirection> = {
   ArrowLeft: "left",
@@ -55,6 +63,9 @@ const ARROWS: Record<string, NavDirection> = {
 /**
  * F5 rescan (and never reload the webview), F11 fullscreen, Ctrl+K palette, Ctrl+1–8 tabs (sidebar order),
  * Ctrl+9 Settings, ? shortcuts sheet.
+ *
+ * Watchlist (also from its search box): Alt+1–6 status tabs, Alt+Q / W / E poster grid / detailed
+ * cards / table.
  *
  * Watchlist: focus decides what keys do. In the search box keys edit text, except ↓ (moves focus to
  * the selected / first card) and Enter (opens the selected anime, else the top result). On the
@@ -118,6 +129,13 @@ export function useGlobalShortcuts(state: ShortcutState) {
         if (s.signOutOpen) return;
         if (digit === SETTINGS_SHORTCUT_DIGIT) s.openSettings();
         else if (NAV_ITEMS[digit - 1]) s.navigate(NAV_ITEMS[digit - 1].id);
+      } else if (e.altKey && !ctrl && !e.shiftKey && (e.code in VIEW_KEYS || /^(Digit|Numpad)[1-6]$/.test(e.code))) {
+        // By physical key (layouts, and Alt+letter can produce other characters)
+        if (!s.onWatchlist || layerOpen || s.updateModalOpen) return;
+        e.preventDefault();
+        if (e.repeat) return;
+        if (e.code in VIEW_KEYS) s.setViewMode(VIEW_KEYS[e.code]);
+        else s.showStatusTab(Number(e.code.slice(-1)) - 1);
       } else if (ctrl && e.key.toLowerCase() === "k") {
         e.preventDefault();
         s.togglePalette();

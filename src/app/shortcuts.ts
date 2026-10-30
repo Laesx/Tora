@@ -29,6 +29,8 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
   {
     title: "Anime Watchlist",
     items: [
+      { keys: ["Alt+1–6"], label: "Switch status tab (hold Alt to see the keys)" },
+      { keys: ["Alt+Q", "Alt+W", "Alt+E"], label: "Poster grid / detailed cards / table view" },
       { keys: ["A–Z"], label: "Start typing to search every list" },
       { keys: ["↓"], label: "In the search box: move to the results" },
       { keys: ["Enter"], label: "In the search box: open the top result" },
@@ -44,6 +46,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { keys: ["Middle-click"], label: "Play the next episode from disk" },
       { keys: ["Right-click"], label: "Quick menu (applies to the whole selection)" },
       { keys: ["Right-click"], label: "On the table header: show / hide columns" },
+      { keys: ["Drag"], label: "A table header edge: resize the column (double-click resets)" },
       { keys: ["Del"], label: "In the Lists dropdown: delete the highlighted list" },
     ],
   },

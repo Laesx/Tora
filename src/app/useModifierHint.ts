@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 
 /**
- * True while Ctrl is held on its own for `delayMs` (the sidebar then shows its Ctrl+1–9 badges).
- * Any other key or a click hides it, so Ctrl+K, Ctrl+A or Ctrl+click never flash the badges.
+ * True while `modifier` is held on its own for `delayMs`: Ctrl → the sidebar's Ctrl+1–9 badges, Alt →
+ * the watchlist's Alt+1–6 / Q W E badges. Any other key or a click hides it, so Ctrl+K, Ctrl+A,
+ * Alt+Q or Ctrl+click never flash the badges.
  */
-export function useCtrlHint(delayMs = 400): boolean {
+export function useModifierHint(modifier: "Control" | "Alt", delayMs = 400): boolean {
   const [show, setShow] = useState(false);
 
   useEffect(() => {
@@ -15,13 +16,14 @@ export function useCtrlHint(delayMs = 400): boolean {
       setShow(false);
     };
     const onDown = (e: KeyboardEvent) => {
-      if (e.key !== "Control") return hide();
-      if (e.repeat || e.shiftKey || e.altKey || e.metaKey) return;
+      if (e.key !== modifier) return hide();
+      const others = e.shiftKey || e.metaKey || (modifier === "Control" ? e.altKey : e.ctrlKey);
+      if (e.repeat || others) return;
       window.clearTimeout(timer);
       timer = window.setTimeout(() => setShow(true), delayMs);
     };
     const onUp = (e: KeyboardEvent) => {
-      if (e.key === "Control") hide();
+      if (e.key === modifier) hide();
     };
     // Capture phase: inputs that stop propagation (palette, popovers) must still hide it
     window.addEventListener("keydown", onDown, true);
@@ -35,7 +37,7 @@ export function useCtrlHint(delayMs = 400): boolean {
       window.removeEventListener("mousedown", hide, true);
       window.removeEventListener("blur", hide);
     };
-  }, [delayMs]);
+  }, [modifier, delayMs]);
 
   return show;
 }

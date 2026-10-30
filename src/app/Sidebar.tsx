@@ -2,6 +2,7 @@ import React from "react";
 import { ExternalLink, Keyboard, LogIn, LogOut, Search, Settings, User } from "lucide-react";
 import { AppSettings } from "@/lib/types";
 import toraMark from "@/assets/tora-mark.svg";
+import { KeyHint } from "@/components/KeyHint";
 import { NAV_ITEMS, NavTab, SETTINGS_SHORTCUT_DIGIT } from "./nav";
 
 interface SidebarProps {
@@ -40,19 +41,6 @@ const iconButtonClass = (active: boolean) =>
     ? "bg-accent border-accent text-white shadow-sm"
     : "bg-bg-primary border-border-subtle hover:border-accent/50 text-text-muted hover:text-accent"
   }`;
-
-/**
- * Ctrl+N badge (N = the tab's position in NAV_ITEMS, or the Settings digit on the gear). Always mounted and
- * absolutely positioned so showing it never changes the row's size; it fades in while Ctrl is held.
- */
-const TabHint: React.FC<{ digit: number; visible: boolean; className?: string }> = ({ digit, visible, className = "" }) => (
-  <kbd
-    aria-hidden={!visible}
-    className={`absolute pointer-events-none px-1.5 py-0.5 text-[10px] font-mono rounded bg-bg-primary text-text-primary border border-border-subtle shadow-sm whitespace-nowrap transition-opacity duration-200 ${visible ? "opacity-100" : "opacity-0"} ${className}`}
-  >
-    {digit}
-  </kbd>
-);
 
 /** Brand, Ctrl+K button, tab navigation and the AniList account card. */
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -112,7 +100,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             title={`Settings (Ctrl+${SETTINGS_SHORTCUT_DIGIT})`}
           >
             <Settings className="w-4 h-4" />
-            <TabHint digit={SETTINGS_SHORTCUT_DIGIT} visible={showShortcutHints} className="top-full mt-1 right-0 z-10" />
+            <KeyHint label={String(SETTINGS_SHORTCUT_DIGIT)} visible={showShortcutHints} className="top-full mt-1 right-0 z-10" />
           </button>
         </div>
       </div>
@@ -145,7 +133,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   )}
                   {id === "watchlist" && <span className="text-[11px] font-mono opacity-80">{listCount}</span>}
                 </span>
-                <TabHint digit={i + 1} visible={showShortcutHints} className="right-0 top-1/2 -translate-y-1/2" />
+                <KeyHint label={String(i + 1)} visible={showShortcutHints} className="right-0 top-1/2 -translate-y-1/2" />
               </span>
             </button>
             {id === "nowplaying" && (

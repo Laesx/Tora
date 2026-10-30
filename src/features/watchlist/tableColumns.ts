@@ -2,31 +2,34 @@ import { useCallback, useMemo } from "react";
 import { usePrefs } from "@/hooks/usePrefs";
 import type { WatchlistSortKey } from "./sort";
 
-export type TableColumnId = "title" | "format" | "progress" | "score" | "season" | "updated" | "actions";
+export type TableColumnId = "title" | "format" | "progress" | "season" | "updated";
 
 export interface TableColumn {
   id: TableColumnId;
   label: string;
   /** Header click sorts by this key */
   sortKey: WatchlistSortKey | null;
-  /** `null` = takes the remaining width (the title); never hidden or resized */
+  /** `null` = takes the remaining width (the title); never hidden, and resized only through its neighbour */
   defaultWidth: number | null;
   minWidth: number;
   hideable: boolean;
+  /** Its left edge (the boundary with the previous column) can be dragged */
   resizable: boolean;
   /** Header cell padding / alignment (body cells match) */
   className: string;
 }
 
-/** Table columns in display order. Widths are fixed (`table-fixed`) so rows never change height. */
+/**
+ * Table columns in display order. Widths are fixed (`table-fixed`) so rows never change height. The
+ * title fills what is left, so the columns after it are anchored to the table's right edge: a
+ * boundary is dragged by resizing the column on its right.
+ */
 export const TABLE_COLUMNS: TableColumn[] = [
-  { id: "title", label: "Anime Title", sortKey: "title", defaultWidth: null, minWidth: 200, hideable: false, resizable: false, className: "pl-4 pr-3" },
+  { id: "title", label: "Anime Title", sortKey: "title", defaultWidth: null, minWidth: 180, hideable: false, resizable: false, className: "pl-4 pr-3" },
   { id: "format", label: "Type", sortKey: "format", defaultWidth: 84, minWidth: 56, hideable: true, resizable: true, className: "px-3" },
-  { id: "progress", label: "Progress", sortKey: "progress", defaultWidth: 184, minWidth: 110, hideable: true, resizable: true, className: "px-3" },
-  { id: "score", label: "Score", sortKey: "score", defaultWidth: 72, minWidth: 52, hideable: true, resizable: true, className: "px-3" },
+  { id: "progress", label: "Progress", sortKey: "progress", defaultWidth: 210, minWidth: 140, hideable: true, resizable: true, className: "px-3" },
   { id: "season", label: "Season", sortKey: "season", defaultWidth: 116, minWidth: 64, hideable: true, resizable: true, className: "px-3" },
   { id: "updated", label: "Updated", sortKey: "updated", defaultWidth: 124, minWidth: 72, hideable: true, resizable: true, className: "px-3" },
-  { id: "actions", label: "Quick Actions", sortKey: null, defaultWidth: 128, minWidth: 128, hideable: false, resizable: false, className: "px-4 text-right" },
 ];
 
 const COLUMNS_BY_ID = new Map(TABLE_COLUMNS.map((c) => [c.id, c]));

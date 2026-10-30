@@ -17,6 +17,8 @@ export interface AnimeActions {
   addAnime: (entry: AnimeEntry, status: "CURRENT" | "PLANNING") => Promise<void>;
   /** Closes the drawer and opens the Torrents tab on this search */
   searchTorrents: (req: TorrentSearchRequest) => void;
+  /** Closes the drawer and shows this season in the Seasons tab ("SUMMER", 2024) */
+  openSeason: (season: string, year: number) => void;
 }
 
 const missing = () => {
@@ -33,6 +35,7 @@ export const AnimeActionsContext = createContext<AnimeActions>({
   deleteAnime: missing,
   addAnime: missing,
   searchTorrents: missing,
+  openSeason: missing,
 });
 
 export const useAnimeActions = () => useContext(AnimeActionsContext);
