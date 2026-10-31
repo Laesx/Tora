@@ -21,6 +21,7 @@ import {
   AnimeEntry,
   AppInfo,
   AppSettings,
+  ProcessMemory,
   RelationsInfo,
   TrackerPluginDescriptor,
 } from "@/lib/types";
@@ -516,6 +517,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
         {section === "diagnostics" && (
           <>
+            <MemoryPanel />
             <LogsPanel />
             <AnitomyParserPanel />
           </>
@@ -535,6 +537,114 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           />
         )}
       </div>
+    </div>
+  );
+};
+
+const MEMORY_GROUPS: [ProcessMemory["kind"], string, string][] = [
+  ["core", "Core", "tora.exe: library, matcher, sync, torrents"],
+  ["renderer", "Renderer", "Page: JS heap, DOM, decoded images"],
+  ["gpu", "GPU", "Compositor layers and textures"],
+  ["browser", "WebView browser", "WebView2 host process"],
+  ["utility", "Utility", "Network, storage and other services"],
+  ["other", "Other", "Other WebView2 processes"],
+];
+
+/** Chromium's non-standard JS heap counters (WebView2 has them) */
+type PerformanceWithMemory = Performance & { memory?: { usedJSHeapSize: number; totalJSHeapSize: number } };
+
+/**
+ * Settings → Diagnostics: memory of each of Tora's processes, like Task Manager's "Memory" column
+ * but split (Task Manager adds them up under "Tora"). Read on demand, never polled.
+ */
+const MemoryPanel: React.FC = () => {
+  const showToast = useToast();
+  const [processes, setProcesses] = useState<ProcessMemory[] | null>(null);
+  const [page, setPage] = useState<{ heapUsed: number; heapTotal: number; domNodes: number } | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const refresh = async () => {
+    setLoading(true);
+    try {
+      setProcesses(await toraApi.getProcessMemory());
+      const heap = (performance as PerformanceWithMemory).memory;
+      setPage({
+        heapUsed: heap?.usedJSHeapSize ?? 0,
+        heapTotal: heap?.totalJSHeapSize ?? 0,
+        domNodes: document.getElementsByTagName("*").length,
+      });
+    } catch (e) {
+      showToast(String(e), "error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void refresh();
+  }, []);
+
+  const sum = (list: ProcessMemory[], key: "private_working_set" | "private_bytes") =>
+    list.reduce((n, p) => n + p[key], 0);
+  const groups = MEMORY_GROUPS.map(([kind, label, hint]) => {
+    const list = processes?.filter((p) => p.kind === kind) ?? [];
+    return { kind, label: list.length > 1 ? `${label} (${list.length})` : label, hint, list };
+  }).filter((g) => g.list.length > 0);
+
+  return (
+    <div className="bg-bg-secondary border border-border-subtle rounded-2xl p-5 space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="text-sm font-bold text-text-primary">Memory</h3>
+        <button
+          onClick={refresh}
+          disabled={loading}
+          className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-bg-tertiary hover:bg-bg-elevated border border-border-subtle text-text-primary text-xs font-semibold transition disabled:opacity-50"
+        >
+          <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
+          Refresh
+        </button>
+      </div>
+      <p className="text-[11px] text-text-muted">
+        Memory is what Task Manager shows for each process (private working set); committed includes pages
+        Windows moved to disk.
+      </p>
+      {processes && (
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-[11px] text-text-muted text-left">
+              <th className="font-semibold pb-1.5">Process</th>
+              <th className="font-semibold pb-1.5 text-right">Memory</th>
+              <th className="font-semibold pb-1.5 text-right">Committed</th>
+            </tr>
+          </thead>
+          <tbody className="text-text-primary">
+            {groups.map((g) => (
+              <tr key={g.kind} title={`${g.hint}\nPID ${g.list.map((p) => p.pid).join(", ")}`}>
+                <td className="py-1">
+                  {g.label} <span className="text-text-muted">· {g.hint}</span>
+                </td>
+                <td className="py-1 text-right font-mono">{formatBytes(sum(g.list, "private_working_set"))}</td>
+                <td className="py-1 text-right font-mono text-text-secondary">
+                  {formatBytes(sum(g.list, "private_bytes"))}
+                </td>
+              </tr>
+            ))}
+            <tr className="font-bold [&>td]:border-t [&>td]:border-border-subtle">
+              <td className="pt-2">Total</td>
+              <td className="pt-2 text-right font-mono">{formatBytes(sum(processes, "private_working_set"))}</td>
+              <td className="pt-2 text-right font-mono text-text-secondary">
+                {formatBytes(sum(processes, "private_bytes"))}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      )}
+      {page && (
+        <div className="text-[11px] text-text-muted">
+          Page: JS heap {formatBytes(page.heapUsed)} used of {formatBytes(page.heapTotal)} ·{" "}
+          {page.domNodes.toLocaleString()} DOM nodes
+        </div>
+      )}
     </div>
   );
 };

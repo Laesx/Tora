@@ -4,6 +4,7 @@ pub mod detection;
 pub mod discord;
 pub mod library;
 pub mod logging;
+pub mod memory;
 pub mod plugins;
 pub mod sync;
 pub mod torrents;
@@ -1183,6 +1184,37 @@ async fn get_app_info(app: tauri::AppHandle) -> Result<AppInfo, String> {
     .map_err(|e| e.to_string())?
 }
 
+/// Memory of the core and each WebView2 process (Settings → Diagnostics → Memory).
+#[tauri::command]
+async fn get_process_memory(app: tauri::AppHandle) -> Result<Vec<memory::ProcessMemory>, String> {
+    #[cfg(windows)]
+    {
+        // The WebView2 process list is read on the main thread, the counters off it.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if let Some(window) = app.get_webview_window("main") {
+            window
+                .with_webview(move |webview| {
+                    let _ = tx.send(memory::webview_processes(&webview));
+                })
+                .map_err(|e| e.to_string())?;
+        }
+        let webview = rx.await.unwrap_or_default();
+        tokio::task::spawn_blocking(move || {
+            std::iter::once((std::process::id(), "core"))
+                .chain(webview)
+                .filter_map(|(pid, kind)| memory::process_memory(pid, kind))
+                .collect()
+        })
+        .await
+        .map_err(|e| e.to_string())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        Ok(Vec::new())
+    }
+}
+
 /// The last `lines` lines of the log file (Settings → Diagnostics, "Copy recent log").
 #[tauri::command]
 async fn get_recent_logs(app: tauri::AppHandle, lines: usize) -> Result<String, String> {
@@ -1934,6 +1966,15 @@ pub fn run() {
 
             Ok(())
         })
+        .on_window_event(|window, event| {
+            // Minimizing sends a 0×0 resize, restoring the real size
+            #[cfg(windows)]
+            if let tauri::WindowEvent::Resized(_) = event {
+                if let Some(webview) = window.app_handle().get_webview_window(window.label()) {
+                    memory::set_low_memory_target(&webview, window.is_minimized().unwrap_or(false));
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             get_anime_list,
             get_anime_entries,
@@ -1984,6 +2025,7 @@ pub fn run() {
             get_stats,
             get_app_info,
             get_recent_logs,
+            get_process_memory,
             check_relations_update,
             get_relations_info,
             get_changelog,

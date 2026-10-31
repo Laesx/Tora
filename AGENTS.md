@@ -170,6 +170,12 @@ Tora/
 │   │   └── tora-mark.svg                 # Brand mark (sidebar); same art as the app icon (`design/icons/tora-mark.svg` → `src-tauri/icons`)
 │   └── styles/
 │       └── index.css                     # Tailwind CSS v4 stylesheets, custom theme variables & scrollbars
+├── scripts/
+│   ├── mem-snapshot.ps1                  # Per-process memory / CPU of a running Tora (core + each WebView2 process), `-Watch`, `-Csv`, `-PassThru`
+│   └── bench/
+│       ├── mem-compare.ps1               # Release-builds the working tree (and `-Ref <git ref>`, cached by hash), runs mem-tour on each, prints averages + diff
+│       ├── mem-tour.ps1                  # One build on the bench data: DevTools-driven tour of every tab, memory per phase (start / tours / settled / minimized / restored)
+│       └── bench-data.py                 # Signed-out copy of the library for benchmarks (%APPDATA%\ToraBenchPristine)
 └── src-tauri/                            # Tauri v2 Rust Backend & Native C++ Bindings
     ├── Cargo.toml                        # Rust dependencies (rusqlite bundled, tokio, rayon, reqwest, tauri v2)
     ├── build.rs                          # Compiles vendored C++ `anitomy` (/std:c++latest) & `anisthesia` (/std:c++20)
@@ -183,6 +189,7 @@ Tora/
     └── src/
         ├── data_migration.rs             # Moves data from the old `app.tora.anime` identifier's folders (runs in `run()` before the builder)
         ├── logging.rs                    # `tauri-plugin-log` setup (`%APPDATA%\Tora\logs\tora.log`, rotated), panic hook, log tail
+        ├── memory.rs                     # Per-process memory (core + WebView2 processes) for Diagnostics, WebView2 low memory target while minimized
         ├── lib.rs                        # Tauri state (`AppState`), async commands, background monitor & media poll loop, WebView2 accelerator keys off (release)
         ├── discord.rs                    # Discord Rich Presence worker thread ("Watching <anime>", cover, episode, AniList + GitHub buttons)
         ├── main.rs                       # Tauri binary entrypoint
@@ -338,6 +345,13 @@ When a filename or media player window title is parsed (`parse_filename` in `src
 - **Levels**: `error` = a bug or lost work, `warn` = a failed operation that the user may notice (sync, network, file), `info` = one line per meaningful event (startup, pull summary, scan, session start/end, scrobble, downloads), `debug` = detail (each AniList request, watcher batches).
 - **Never log** the AniList token, GraphQL variables, request bodies, notes or file contents; titles and paths are fine. Hot paths (the 2.5 s recognition poll, per-file matching, per-release evaluation) log only state changes, never every pass.
 - Settings → Diagnostics → Logs shows the folder, opens it and copies the last 200 lines (`get_recent_logs`).
+
+### 7c. Memory & CPU Profiling
+- Tora is `tora.exe` (core) plus WebView2 browser / renderer / GPU / utility processes; Task Manager adds them up under "Tora". Always say which process grew. Compare **release** builds only (debug runs Vite, React dev mode and DevTools).
+- `scripts/mem-snapshot.ps1` (outside the app: private working set = Task Manager's "Memory", committed, working set, CPU s / CPU % per process; `-Watch 5 -Count 12 -Csv mem.csv -Tag …`) and Settings → Diagnostics → Memory (`get_process_memory` in `memory.rs`: `ICoreWebView2Environment8::GetProcessInfos` on the main thread, `K32GetProcessMemoryInfo` off it; plus the JS heap and DOM node count) report the same numbers. Read on demand, never polled.
+- **Regressions**: `scripts/bench/mem-compare.ps1 [-Ref <commit/tag>] [-Rounds N]` builds release exes with the `ToraBench` identifier (`--config`, `--no-bundle`, into `src-tauri\target\bench`; ref exes cached by commit hash, built in a temporary worktree), then `mem-tour.ps1` runs each on a fresh copy of `%APPDATA%\ToraBenchPristine` (`bench-data.py`: signed out, no torrent auto-download / refresh, no Discord, no update checks) with a cold WebView2 profile, drives Ctrl+1–8 + scrolling over the DevTools protocol and records each phase. Bench builds never read or write `%APPDATA%\Tora`.
+- Renderer grew → DevTools on a release build: set `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222` before starting it, open `edge://inspect` (Memory heap snapshots, Performance monitor). GPU grew → composited layers (DevTools Layers, Rendering → Layer borders). `tora.exe` grew → VMMap, `wpr -start Heap` / WPA, `samply record` for CPU.
+- While the window is minimized WebView2 runs at `COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW` (`memory::set_low_memory_target` from `on_window_event`: minimizing is a 0×0 resize), back to normal on restore.
 
 ### 8. Tracker Sync Service (`src-tauri/src/sync/mod.rs`)
 - **Single entry point**: Every user-state mutation (`update_anime_entry`, `batch_update_anime_entries`, `add_or_upsert_anime`, `delete_anime_entry` / `batch_delete_anime_entries`, scrobbling) and every pull (startup, manual "Sync from AniList" button, post-OAuth) goes through `TrackerSyncService`. **Never** call `TrackerPlugin::save_list_entry` / `delete_list_entry` / `fetch_user_list` or write user fields directly from commands.

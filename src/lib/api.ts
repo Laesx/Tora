@@ -30,6 +30,7 @@ import {
   FansubOverride,
   ParsedQuery,
   PriorityConfig,
+  ProcessMemory,
   SearchFeed,
   SettingsBackupInfo,
   TorrentBoard,
@@ -239,6 +240,9 @@ export const toraApi = {
 
   /** The last `lines` lines of tora.log */
   getRecentLogs: (lines: number) => invoke<string>("get_recent_logs", { lines }),
+
+  /** Memory of tora.exe and each WebView2 process (core first) */
+  getProcessMemory: () => invoke<ProcessMemory[]>("get_process_memory"),
 
   /** Download anime-relations from GitHub; the new `last_modified` when it was newer (also emits `relations-updated`). */
   checkRelationsUpdate: () => invoke<string | null>("check_relations_update"),

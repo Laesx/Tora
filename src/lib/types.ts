@@ -613,6 +613,18 @@ export interface AppInfo {
   log_dir: string;
 }
 
+/** One of Tora's processes: the core (tora.exe) or a WebView2 process */
+export interface ProcessMemory {
+  kind: "core" | "browser" | "renderer" | "gpu" | "utility" | "other";
+  pid: number;
+  /** What Task Manager's "Memory" column shows */
+  private_working_set: number;
+  /** Committed private memory (includes pages swapped out) */
+  private_bytes: number;
+  /** Full working set (includes shared DLL pages) */
+  working_set: number;
+}
+
 export interface TrackerPluginDescriptor {
   id: string;
   name: string;
