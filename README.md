@@ -87,7 +87,7 @@ Tora uses the same detection and parsing libraries as Taiga, so recognition shou
 What you give up:
 
 - **Fewer trackers.** Only AniList for now (no MyAnimeList or Kitsu).
-- **Heavier.** Tora runs on WebView2, so it uses more memory than Taiga. (Around 300MB total)
+- **Heavier.** Tora runs on Tauri, so it uses more memory than Taiga. (Around 200MB total)
 
 
 ## Roadmap
