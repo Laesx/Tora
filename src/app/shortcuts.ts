@@ -3,7 +3,7 @@
  * ? or the sidebar keyboard button). Add an entry here whenever a handler gains a shortcut.
  */
 export interface Shortcut {
-  /** Alternatives; each is a combo whose keys are joined with "+" (e.g. "Ctrl+K") */
+  /** Alternatives; each is a combo whose keys are joined with "+" (e.g. "Ctrl+S") */
   keys: string[];
   label: string;
 }
@@ -17,9 +17,11 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
   {
     title: "Anywhere",
     items: [
-      { keys: ["Ctrl+K"], label: "Quick Jump (command palette)" },
+      { keys: ["Ctrl+S"], label: "Quick Jump (command palette)" },
       { keys: ["Ctrl+1–8"], label: "Go to a sidebar tab (hold Ctrl to see the numbers)" },
       { keys: ["Ctrl+9"], label: "Open Settings" },
+      { keys: ["Alt+←", "Mouse back"], label: "Go back to the previous page (tab, anime, view)" },
+      { keys: ["Alt+→", "Mouse forward"], label: "Go forward again" },
       { keys: ["F5"], label: "Rescan library folders" },
       { keys: ["F11"], label: "Toggle fullscreen" },
       { keys: ["?"], label: "Show keyboard shortcuts" },

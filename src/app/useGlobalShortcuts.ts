@@ -35,6 +35,8 @@ interface ShortcutState {
   closeSettings: () => void;
   closeQuickMenu: () => void;
   closeDrawer: () => void;
+  goBack: () => void;
+  goForward: () => void;
   openAnime: (anime: AnimeEntry) => void;
   setSelectedAnimeIds: (ids: number[]) => void;
   /** Move the selection (and focus) between cards; false when there is no card that way */
@@ -60,9 +62,13 @@ const ARROWS: Record<string, NavDirection> = {
   ArrowDown: "down",
 };
 
+/** Back / forward wait while a window above the page is open (the drawer is part of the page) */
+const modalOpen = (s: ShortcutState) =>
+  s.paletteOpen || s.signOutOpen || s.shortcutsOpen || s.settingsOpen || s.updateModalOpen;
+
 /**
- * F5 rescan (and never reload the webview), F11 fullscreen, Ctrl+K palette, Ctrl+1–8 tabs (sidebar order),
- * Ctrl+9 Settings, ? shortcuts sheet.
+ * F5 rescan (and never reload the webview), F11 fullscreen, Ctrl+S palette, Ctrl+1–8 tabs (sidebar order),
+ * Ctrl+9 Settings, ? shortcuts sheet, Alt+← / → and mouse back / forward through the page history.
  *
  * Watchlist (also from its search box): Alt+1–6 status tabs, Alt+Q / W / E poster grid / detailed
  * cards / table.
@@ -122,6 +128,15 @@ export function useGlobalShortcuts(state: ShortcutState) {
       } else if (e.key === "F11") {
         e.preventDefault();
         if (!e.repeat) void toggleFullscreen();
+      } else if (
+        (e.altKey && !ctrl && !e.shiftKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) ||
+        e.key === "BrowserBack" ||
+        e.key === "BrowserForward"
+      ) {
+        e.preventDefault();
+        if (e.repeat || modalOpen(s)) return;
+        if (e.key === "ArrowLeft" || e.key === "BrowserBack") s.goBack();
+        else s.goForward();
       } else if (ctrl && !e.altKey && !e.shiftKey && /^(Digit|Numpad)[1-9]$/.test(e.code)) {
         // By physical key, so it works on every keyboard layout and inside text fields
         e.preventDefault();
@@ -136,7 +151,7 @@ export function useGlobalShortcuts(state: ShortcutState) {
         if (e.repeat) return;
         if (e.code in VIEW_KEYS) s.setViewMode(VIEW_KEYS[e.code]);
         else s.showStatusTab(Number(e.code.slice(-1)) - 1);
-      } else if (ctrl && e.key.toLowerCase() === "k") {
+      } else if (ctrl && e.key.toLowerCase() === "s") {
         e.preventDefault();
         s.togglePalette();
       } else if (ctrl && e.key.toLowerCase() === "a" && listFocused) {
@@ -195,7 +210,22 @@ export function useGlobalShortcuts(state: ShortcutState) {
         else if (searchFocused) searchInput?.blur();
       }
     };
+    // Mouse buttons 4 / 5 (back / forward); mousedown is cancelled too so the webview never navigates
+    const handleMouse = (e: MouseEvent) => {
+      if (e.button !== 3 && e.button !== 4) return;
+      e.preventDefault();
+      const s = ref.current;
+      if (e.type !== "mouseup" || modalOpen(s)) return;
+      if (e.button === 3) s.goBack();
+      else s.goForward();
+    };
     window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
+    window.addEventListener("mousedown", handleMouse);
+    window.addEventListener("mouseup", handleMouse);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("mousedown", handleMouse);
+      window.removeEventListener("mouseup", handleMouse);
+    };
   }, []);
 }

@@ -20,6 +20,8 @@ import { AiringDot } from "@/components/AiringDot";
 import { useAnimeActions } from "@/contexts/animeActions";
 import { importProgress, useAniListHistory } from "@/contexts/anilistHistory";
 import { plural } from "@/lib/format";
+import { useNavCapture } from "@/app/navigation";
+import { useNavigation } from "@/contexts/navigation";
 import { PeriodPicker } from "./PeriodPicker";
 import { HistoryPeriod, HistoryRequest, periodBounds, periodIsFuture, periodLabel, shiftPeriod } from "./period";
 import { TimelineDay, episodesLabel, splitWatchThroughs, watchThroughLabel } from "./timeline";
@@ -29,7 +31,7 @@ interface HistoryViewProps {
   animeList: AnimeEntry[];
   /** Changes whenever a new history row may exist (scrobble / list update) */
   refreshKey: unknown;
-  /** Show a period (from Stats): applied whenever its nonce changes */
+  /** Show a period (from Stats) or restore the view (Back): applied whenever its nonce changes */
   request: HistoryRequest | null;
   onRequestHandled: () => void;
 }
@@ -117,25 +119,29 @@ const AniListBadge: React.FC = () => (
  */
 export const HistoryView: React.FC<HistoryViewProps> = ({ animeList, refreshKey, request, onRequestHandled }) => {
   const { openAnime } = useAnimeActions();
+  const { remember } = useNavigation();
   const titleOf = useAnimeTitle();
   const anilist = useAniListHistory();
   const showSources = anilist.enabled || anilist.hasData;
-  const [rows, setRows] = useState<HistoryRow[]>([]);
-  const [hasMore, setHasMore] = useState(false);
+  const [rows, setRows] = useState<HistoryRow[]>(request?.cache?.rows ?? []);
+  const [hasMore, setHasMore] = useState(request?.cache?.hasMore ?? false);
   const [loading, setLoading] = useState(false);
-  const [filter, setFilter] = useState("");
-  const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState(request?.search ?? "");
+  const [search, setSearch] = useState(request?.search?.trim() ?? "");
   const [sourceChoice, setSource] = useState<HistorySource>(request?.source ?? "all");
   const source: HistorySource = showSources ? sourceChoice : "local";
-  const [animeFilter, setAnimeFilter] = useState<{ id: number; title: string } | null>(null);
+  const [animeFilter, setAnimeFilter] = useState<{ id: number; title: string } | null>(request?.anime ?? null);
   const [refreshing, setRefreshing] = useState(false);
   const [period, setPeriod] = useState<HistoryPeriod | null>(request?.period ?? null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   // Pages past the first were loaded: background updates leave them alone instead of resetting
-  const pagedRef = useRef(false);
+  const pagedRef = useRef((request?.cache?.rows.length ?? 0) > PAGE_SIZE);
   // Only the newest request may write rows
   const requestRef = useRef(0);
+  // Rows restored by Back were loaded for this query: the next load for it is skipped
+  const restoredKeyRef = useRef<string | null>(null);
+  const queryKey = (src: HistorySource, q: string, p: HistoryPeriod | null) => JSON.stringify([src, q, p]);
 
   useEffect(() => {
     const t = setTimeout(() => setSearch(filter.trim()), SEARCH_DEBOUNCE_MS);
@@ -147,16 +153,32 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ animeList, refreshKey,
     setSearch("");
   };
 
-  // Stats asked for a period: show it on its own (no title search, no anime timeline)
+  // Stats asked for a period: show it on its own (no title search, no anime timeline). Back restores
+  // the search, timeline and loaded rows too.
   useEffect(() => {
     if (!request) return;
+    const q = request.search ?? "";
     setPeriod(request.period);
     setSource(request.source);
-    clearSearch();
-    setAnimeFilter(null);
+    setFilter(q);
+    setSearch(q.trim());
+    setAnimeFilter(request.anime ?? null);
     setPickerOpen(false);
+    if (request.cache) {
+      ++requestRef.current;
+      setLoading(false);
+      setRows(request.cache.rows);
+      setHasMore(request.cache.hasMore);
+      pagedRef.current = request.cache.rows.length > PAGE_SIZE;
+      restoredKeyRef.current = queryKey(showSources ? request.source : "local", q.trim(), request.period);
+    }
     onRequestHandled();
   }, [request?.nonce]);
+
+  useNavCapture("history", () => ({
+    view: { tab: "history", source: sourceChoice, period, search: filter, anime: animeFilter },
+    cache: { tab: "history", rows, hasMore },
+  }));
 
   const load = useCallback(
     async (append: HistoryRow | null) => {
@@ -186,6 +208,9 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ animeList, refreshKey,
   );
 
   useEffect(() => {
+    const restored = restoredKeyRef.current;
+    restoredKeyRef.current = null;
+    if (restored === queryKey(source, search, period)) return;
     pagedRef.current = false;
     void load(null);
   }, [load, refreshKey]);
@@ -437,7 +462,11 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ animeList, refreshKey,
                       <div className="text-xs font-semibold text-text-primary truncate">
                         <button
                           disabled={h.anime_id === null}
-                          onClick={() => h.anime_id !== null && setAnimeFilter({ id: h.anime_id, title })}
+                          onClick={() => {
+                            if (h.anime_id === null) return;
+                            remember();
+                            setAnimeFilter({ id: h.anime_id, title });
+                          }}
                           title="Show every episode of this anime"
                           className="hover:underline disabled:no-underline focus:outline-none text-left"
                         >

@@ -168,6 +168,13 @@ export function useWatchlist({
     setFocusRequest((prev) => ({ id: entry.id, nonce: (prev?.nonce ?? 0) + 1 }));
   };
 
+  /** Back: the status tab / custom list and search text the watchlist had */
+  const restoreView = (status: string, customList: string | null, search: string) => {
+    setStatusFilter(status);
+    setCustomListFilter(customList);
+    setSearchQuery(search);
+  };
+
   return {
     statusFilter,
     customListFilter,
@@ -187,6 +194,7 @@ export function useWatchlist({
     showStatus,
     showCustomList,
     focusAnime,
+    restoreView,
   };
 }
 

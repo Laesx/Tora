@@ -38,9 +38,18 @@ import { useAnimeTitle } from "@/contexts/titles";
 import { useToast } from "@/contexts/toast";
 import { useAnimeActions } from "@/contexts/animeActions";
 import { usePrefs } from "@/hooks/usePrefs";
+import { useNavCapture } from "@/app/navigation";
+
+/** Back restores this week (`weekStart` = its Monday, ms) */
+export interface ScheduleRequest {
+  weekStart: number;
+  nonce: number;
+}
 
 interface ScheduleViewProps {
   animeList: AnimeEntry[];
+  request: ScheduleRequest | null;
+  onRequestHandled: () => void;
 }
 
 type Scope = "list" | "all";
@@ -89,10 +98,12 @@ type MenuState =
 /** Weekly airing timetable (Mon–Sun, local time) from AniList's airing schedule. */
 export const ScheduleView: React.FC<ScheduleViewProps> = ({
   animeList,
+  request,
+  onRequestHandled,
 }) => {
   const showToast = useToast();
   const { openAnime, addAnime } = useAnimeActions();
-  const [start, setStart] = useState(() => weekStart());
+  const [start, setStart] = useState(() => (request ? new Date(request.weekStart) : weekStart()));
   const [prefs, updatePrefs] = usePrefs<SchedulePrefs>(PREFS_KEY, DEFAULT_PREFS, (stored) =>
     // Values from older versions (e.g. the removed "hide_planning") fall back to "all"
     stored.listStatus === "watching" ? stored : { ...stored, listStatus: "all" }
@@ -107,6 +118,17 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({
   const requestIdRef = useRef(0);
   const todayRef = useRef<HTMLElement | null>(null);
   const scrolledForRef = useRef<string | null>(null);
+
+  // Back: that week, at the scroll position it had (no jump to today)
+  useEffect(() => {
+    if (!request) return;
+    const restored = new Date(request.weekStart);
+    setStart((prev) => (prev.getTime() === restored.getTime() ? prev : restored));
+    scrolledForRef.current = `${prefs.layout}-${weekBounds(restored).from}`;
+    onRequestHandled();
+  }, [request?.nonce]);
+
+  useNavCapture("schedule", () => ({ view: { tab: "schedule", weekStart: start.getTime() } }));
 
   // Each scope has its own status filter: My list keeps (and persists) `prefs.listStatus`, while
   // All anime starts at "All" every time it's selected, so leaving it restores My list's choice

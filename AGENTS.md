@@ -59,7 +59,7 @@ Tora/
 │   ├── App.tsx                           # Wiring only: app state hooks, context providers, tab switch, drawer / palette / modals
 │   ├── app/                              # App shell and app-wide state
 │   │   ├── nav.ts                        # `NavTab`, `NAV_ITEMS` (the 8 tabs: sidebar rows, Ctrl+1–8, palette "Go to"), `SETTINGS_SHORTCUT_DIGIT` (Settings is a modal, not a tab)
-│   │   ├── Sidebar.tsx                   # Brand, Ctrl+K + shortcuts + Settings (modal) buttons, tab navigation (Ctrl+N badges while Ctrl is held), AniList account card
+│   │   ├── Sidebar.tsx                   # Brand + version, ← → (back / forward) and Settings (modal) buttons, Quick Jump (Ctrl+S) bar, tab navigation (Ctrl+N badges while Ctrl is held), keyboard shortcuts row, AniList account card
 │   │   ├── NowPlayingBanner.tsx          # Live playback strip above every tab except Now Playing
 │   │   ├── SignOutModal.tsx              # Sign-out confirmation
 │   │   ├── shortcuts.ts                  # `SHORTCUT_GROUPS`: every shortcut shown in the sheet (keep in step with the handlers)
@@ -78,10 +78,13 @@ Tora/
 │   │   ├── useAppEvents.ts               # Registers every Tauri listener before the initial load
 │   │   ├── useCustomListsState.ts        # AniList custom lists state, membership maps, counts, `CustomListsContext` value
 │   │   ├── useAniListHistory.ts          # AniList activity import state (`anilist-history-*` events), actions, import modal open state
-│   │   ├── useGlobalShortcuts.ts         # F5, F11 fullscreen, Ctrl+K, Ctrl+1–8 tabs / Ctrl+9 Settings, ?, watchlist type-to-search / arrows / Enter / Ctrl+A / Alt+1–6 status tabs / Alt+Q W E views, layered Escape
-│   │   └── paletteCommands.ts            # Ctrl+K Commands tab entries
+│   │   ├── useGlobalShortcuts.ts         # F5, F11 fullscreen, Ctrl+S, Ctrl+1–8 tabs / Ctrl+9 Settings, ?, Alt+← / → and mouse back / forward, watchlist type-to-search / arrows / Enter / Ctrl+A / Alt+1–6 status tabs / Alt+Q W E views, layered Escape
+│   │   ├── navigation.ts                 # Back / forward model: `NavView` (typed per tab), `NavCache`, `NavLocation`, `useNavCapture` registry, `sameLocation`
+│   │   ├── useNavHistory.ts              # Back / forward stacks (10 entries each, cache kept on the newest 3, equal entries skipped)
+│   │   └── paletteCommands.ts            # Ctrl+S Commands tab entries
 │   ├── contexts/                         # React contexts (provided by App)
 │   │   ├── toast.ts                      # `useToast()`; never pass `showToast` as a prop
+│   │   ├── navigation.ts                 # `useNavigation().remember()`: a view changing its own "page" (History → anime timeline)
 │   │   ├── animeActions.ts               # `useAnimeActions()`: open drawer, step, batch update / delete, change status, add, search torrents, open a season; never drill these as props
 │   │   ├── customLists.ts                # AniList custom lists context (`useCustomLists`), optimistic membership edit, coverage helper
 │   │   ├── anilistHistory.ts             # AniList activity import context (`useAniListHistory`), `importProgress`
@@ -129,7 +132,7 @@ Tora/
 │   │   │   └── DeleteCustomListModal.tsx # Confirmation before deleting an AniList custom list
 │   │   ├── detail/AnimeDetailModal.tsx   # Slide-over drawer for editing progress, score, notes, custom folder & synonyms
 │   │   ├── palette/
-│   │   │   ├── CommandPalette.tsx        # Ctrl+K keyboard palette: Anime / Commands tabs, recents, AniList row, Right-arrow anime actions
+│   │   │   ├── CommandPalette.tsx        # Ctrl+S keyboard palette: Anime / Commands tabs, recents, AniList row, Right-arrow anime actions
 │   │   │   └── animeActions.ts           # Keyboard action list for one anime (palette → Right arrow)
 │   │   ├── nowplaying/
 │   │   │   ├── NowPlayingView.tsx        # Now Playing tab: hero while playing, dashboard when idle
@@ -290,6 +293,13 @@ When a filename or media player window title is parsed (`parse_filename` in `src
 - Release builds turn off WebView2 browser accelerator keys (`disable_browser_accelerator_keys` in `lib.rs` setup: Ctrl+J downloads, Ctrl+F / P / R / U, zoom, DevTools); keys still reach the page. Debug builds keep them for DevTools.
 - `useBrowserGuards` blocks the native context menu outside text fields, the same Ctrl shortcuts (dev builds), Alt+← / → and mouse back / forward. Custom right-click menus use React `onContextMenu` as before.
 - F11 toggles fullscreen (`useGlobalShortcuts`, `core:window:allow-set-fullscreen`).
+
+### 5c. Back / Forward Navigation (`src/app/navigation.ts`, `useNavHistory.ts`)
+- An in-app history like a browser's (no router, no `history.pushState`): the sidebar ← / → buttons, Alt+← / →, mouse back / forward and the palette's Go Back / Go Forward. They wait while a modal, the palette or Settings is open; the drawer is part of the page.
+- A location is the active tab's `NavView` (small, serializable, typed per tab) + the open drawer + `<main>`'s scroll, plus an optional `NavCache` (History rows, Search results) that only the newest 3 entries keep. Tabs still unmount; nothing else is kept.
+- **Every jump pushes first**: App's handlers call `remember()` before changing the tab or opening a different anime (sidebar, Ctrl+1–8, palette, drawer → Seasons / Torrents, Stats → History / Watchlist, new playback session → Now Playing…). A view changing its own page calls `useNavigation().remember()` (History → anime timeline). Closing the drawer drops the entry its opening added.
+- Views report their state with `useNavCapture(tab, …)` (the Watchlist's lives in App) and take it back through their existing request prop (`SeasonRequest.filter`, `HistoryRequest.search / anime / cache`, `SearchRequest.cache`, `TorrentsRequest`, `ScheduleRequest`). A new tab with state to restore needs a `NavView` variant, a capture and a case in App's `applyLocation`.
+- Scroll is restored on animation frames until the view is tall enough (≤ 90 frames); user scroll input stops it. An account switch clears the history.
 
 ### 6. Database Performance & In-Memory Matching (`src-tauri/src/db/mod.rs`)
 - Use the cached `AnimeMatcherIndex` (`db.matcher_index()`) for any matching (library scans, torrent RSS evaluation, playback recognition). It is built from the stored `normalized_titles_json` (keep that column correct on every title/synonym write) and cached until `matcher_generation` changes; an SQLite `update_hook` bumps the generation on any write to `anime_entries` or `title_aliases`, so writers never invalidate manually. Do not call the uncached `build_matcher_index()` in hot paths. The recognition poll only re-matches an unmatched session when the generation changed.

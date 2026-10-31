@@ -36,6 +36,7 @@ import { useToast } from "@/contexts/toast";
 import { useAnimeActions } from "@/contexts/animeActions";
 import { usePrefs } from "@/hooks/usePrefs";
 import { useScrollViewport, visibleRange } from "@/hooks/virtual";
+import { useNavCapture } from "@/app/navigation";
 
 interface SeasonsViewProps {
   animeList: AnimeEntry[];
@@ -48,7 +49,8 @@ interface SeasonsViewProps {
   onSeasonRequestHandled?: () => void;
 }
 
-export type SeasonRequest = SeasonKey & { nonce: number };
+/** `filter` is set when Back restores the view (otherwise the filter is kept) */
+export type SeasonRequest = SeasonKey & { filter?: string; nonce: number };
 
 type SortKey = "popularity" | "start" | "score" | "title";
 type SortDir = "asc" | "desc";
@@ -182,16 +184,19 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
         ? prev
         : { season: seasonRequest.season, year: seasonRequest.year }
     );
+    if (seasonRequest.filter !== undefined) setFilter(seasonRequest.filter);
     onSeasonRequestHandled?.();
   }, [seasonRequest?.nonce]);
   const [result, setResult] = useState<SeasonResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [cachedSeasons, setCachedSeasons] = useState<CachedSeason[]>([]);
-  const [filter, setFilter] = useState("");
+  const [filter, setFilter] = useState(seasonRequest?.filter ?? "");
   const [prefs, updatePrefs] = usePrefs<SeasonPrefs>(PREFS_KEY, DEFAULT_PREFS);
   const [pickerOpen, setPickerOpen] = useState(false);
   const requestIdRef = useRef(0);
+
+  useNavCapture("seasons", () => ({ view: { tab: "seasons", season: selected.season, year: selected.year, filter } }));
 
   const refreshCachedSeasons = () => {
     toraApi

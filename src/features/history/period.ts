@@ -1,5 +1,6 @@
 // History periods: a local day, month, season (broadcast quarter), year or a range of months.
 import { SEASONS, SeasonName, seasonLabel, shiftSeason } from "@/lib/seasons";
+import type { HistoryRow, HistorySource } from "@/lib/types";
 
 /** `month` is 0–11 */
 export interface MonthKey {
@@ -117,9 +118,15 @@ export function periodLabel(p: HistoryPeriod): string {
   }
 }
 
-/** Open History on a period (from Stats); `nonce` makes a repeat of the same request apply again. */
+/**
+ * Open History on a period (from Stats), or restore it (Back: search, anime timeline and the rows it had
+ * loaded); `nonce` makes a repeat of the same request apply again.
+ */
 export interface HistoryRequest {
-  period: HistoryPeriod;
-  source: "all" | "local";
+  period: HistoryPeriod | null;
+  source: HistorySource;
+  search?: string;
+  anime?: { id: number; title: string } | null;
+  cache?: { rows: HistoryRow[]; hasMore: boolean };
   nonce: number;
 }

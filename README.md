@@ -67,7 +67,7 @@
 
 - History and stats (activity heatmap, streaks, backlog).
 - Grid, compact and table list views.
-- `Ctrl+K` command palette.
+- `Ctrl+S` command palette.
 - 6 themes plus custom accent colors.
 
 <!-- ![History](docs/screenshots/history.jpg) -->

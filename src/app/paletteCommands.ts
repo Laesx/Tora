@@ -1,4 +1,4 @@
-import { Download, HardDrive, Keyboard, LayoutGrid, List, ListChecks, Palette, RefreshCw, Rows, ScrollText, Settings, Shuffle } from "lucide-react";
+import { ArrowLeft, ArrowRight, Download, HardDrive, Keyboard, LayoutGrid, List, ListChecks, Palette, RefreshCw, Rows, ScrollText, Settings, Shuffle } from "lucide-react";
 import { THEME_PRESETS } from "@/lib/theme";
 import type { PaletteCommand } from "@/features/palette/CommandPalette";
 import type { ViewMode } from "@/features/watchlist/WatchlistView";
@@ -6,6 +6,9 @@ import { NAV_ITEMS, NavTab, SETTINGS_SHORTCUT_DIGIT } from "./nav";
 
 interface PaletteCommandDeps {
   navigate: (tab: NavTab) => void;
+  /** Null when there is nowhere to go (the command is left out) */
+  goBack: (() => void) | null;
+  goForward: (() => void) | null;
   openSettings: () => void;
   openTorrentSettings: () => void;
   rescanLibrary: () => void;
@@ -20,7 +23,7 @@ interface PaletteCommandDeps {
   setTheme: (themeId: string, accent: string) => void;
 }
 
-/** Every command in the Ctrl+K Commands tab, in display order. */
+/** Every command in the Ctrl+S Commands tab, in display order. */
 export function buildPaletteCommands(d: PaletteCommandDeps): PaletteCommand[] {
   return [
     ...NAV_ITEMS.map((item, i) => ({
@@ -31,6 +34,8 @@ export function buildPaletteCommands(d: PaletteCommandDeps): PaletteCommand[] {
       shortcut: `Ctrl+${i + 1}`,
       run: () => d.navigate(item.id),
     })),
+    ...(d.goBack ? [{ id: "go-back", label: "Go Back", keywords: ["previous", "history", "return"], icon: ArrowLeft, shortcut: "Alt+←", run: d.goBack }] : []),
+    ...(d.goForward ? [{ id: "go-forward", label: "Go Forward", keywords: ["next", "history"], icon: ArrowRight, shortcut: "Alt+→", run: d.goForward }] : []),
     { id: "settings", label: "Open Settings", keywords: ["preferences", "options"], icon: Settings, shortcut: `Ctrl+${SETTINGS_SHORTCUT_DIGIT}`, run: d.openSettings },
     { id: "torrent-settings", label: "Torrent settings", keywords: ["qbittorrent", "download folder", "refresh interval", "torrents"], icon: Settings, run: d.openTorrentSettings },
     { id: "rescan-library", label: "Rescan All Library Folders", keywords: ["scan", "refresh", "files", "disk"], icon: HardDrive, shortcut: "F5", run: d.rescanLibrary },

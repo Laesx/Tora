@@ -1,5 +1,5 @@
 import React from "react";
-import { ExternalLink, Keyboard, LogIn, LogOut, Search, Settings, User } from "lucide-react";
+import { ArrowLeft, ArrowRight, ExternalLink, Keyboard, LogIn, LogOut, Search, Settings, User } from "lucide-react";
 import { AppSettings } from "@/lib/types";
 import toraMark from "@/assets/tora-mark.svg";
 import { KeyHint } from "@/components/KeyHint";
@@ -8,6 +8,11 @@ import { NAV_ITEMS, NavTab, SETTINGS_SHORTCUT_DIGIT } from "./nav";
 interface SidebarProps {
   activeTab: NavTab;
   onNavigate: (tab: NavTab) => void;
+  /** Where Back / Forward lead (tooltips); null = nowhere, the button is disabled */
+  backLabel: string | null;
+  forwardLabel: string | null;
+  onBack: () => void;
+  onForward: () => void;
   onOpenSettings: () => void;
   settingsOpen: boolean;
   onOpenPalette: () => void;
@@ -35,17 +40,25 @@ const navClass = (active: boolean) =>
   `w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${active ? "bg-accent text-white shadow-sm" : "text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
   }`;
 
-/** Square icon buttons next to the brand (keyboard shortcuts, settings) */
+/** Square icon button next to the brand (settings) */
 const iconButtonClass = (active: boolean) =>
   `p-2 rounded-xl border transition shrink-0 cursor-pointer ${active
     ? "bg-accent border-accent text-white shadow-sm"
     : "bg-bg-primary border-border-subtle hover:border-accent/50 text-text-muted hover:text-accent"
   }`;
 
-/** Brand, Ctrl+K button, tab navigation and the AniList account card. */
+/** Back / Forward halves of the pill next to the brand */
+const navArrowClass =
+  "p-1.5 text-text-muted hover:text-accent hover:bg-bg-tertiary transition cursor-pointer disabled:opacity-40 disabled:pointer-events-none";
+
+/** Brand, Back / Forward, Ctrl+S button, tab navigation, keyboard shortcuts and the AniList account card. */
 export const Sidebar: React.FC<SidebarProps> = ({
   activeTab,
   onNavigate,
+  backLabel,
+  forwardLabel,
+  onBack,
+  onForward,
   onOpenSettings,
   settingsOpen,
   onOpenPalette,
@@ -65,17 +78,17 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onVersionClick,
 }) => (
   <aside className="w-60 bg-bg-secondary border-r border-border-subtle flex flex-col justify-between shrink-0">
-    <div className="p-4 space-y-5">
-      {/* Brand, keyboard shortcuts & settings */}
-      <div className="flex items-center justify-between px-1">
-        <div className="flex items-center gap-2.5">
+    <div className="p-4 space-y-4">
+      {/* Brand + version, Back / Forward, Settings */}
+      <div className="flex items-center justify-between gap-2 px-0.5">
+        <div className="flex items-center gap-2.5 min-w-0">
           <img src={toraMark} alt="" className="w-9 h-9 shrink-0" draggable={false} />
-          <div className="font-extrabold text-sm tracking-tight text-text-primary flex items-center gap-1.5">
-            TORA
+          <div className="flex flex-col items-start gap-0.5 min-w-0">
+            <span className="font-extrabold text-sm leading-none tracking-tight text-text-primary">TORA</span>
             <button
               onClick={onVersionClick}
               disabled={updateChecking}
-              className={`relative text-[10px] font-mono px-1.5 py-0.2 rounded bg-accent/15 text-accent hover:bg-accent/25 transition cursor-pointer disabled:cursor-default ${updateChecking ? "animate-pulse" : ""}`}
+              className={`relative text-[10px] leading-4 font-mono px-1.5 rounded bg-accent/15 text-accent hover:bg-accent/25 transition cursor-pointer disabled:cursor-default ${updateChecking ? "animate-pulse" : ""}`}
               title={updateDot ? "What's new: open the changelog" : updateChecking ? "Checking for updates…" : "Check for updates"}
             >
               v{version || "…"}
@@ -86,14 +99,26 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </div>
         </div>
 
-        <div className="flex items-center gap-1.5">
-          <button
-            onClick={onOpenShortcuts}
-            className={iconButtonClass(false)}
-            title="Keyboard shortcuts (?)"
-          >
-            <Keyboard className="w-4 h-4" />
-          </button>
+        <div className="flex items-center gap-1.5 shrink-0">
+          <div className="flex items-center rounded-xl border border-border-subtle bg-bg-primary overflow-hidden">
+            <button
+              onClick={onBack}
+              disabled={!backLabel}
+              className={navArrowClass}
+              title={backLabel ? `Back to ${backLabel} (Alt+←)` : "Back (Alt+←)"}
+            >
+              <ArrowLeft className="w-4 h-4" />
+            </button>
+            <span className="w-px self-stretch bg-border-subtle" />
+            <button
+              onClick={onForward}
+              disabled={!forwardLabel}
+              className={navArrowClass}
+              title={forwardLabel ? `Forward to ${forwardLabel} (Alt+→)` : "Forward (Alt+→)"}
+            >
+              <ArrowRight className="w-4 h-4" />
+            </button>
+          </div>
           <button
             onClick={onOpenSettings}
             className={`relative ${iconButtonClass(settingsOpen)}`}
@@ -105,16 +130,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </div>
       </div>
 
-      {/* Ctrl+K */}
+      {/* Ctrl+S: the main way around the app */}
       <button
         onClick={onOpenPalette}
-        className="w-full flex items-center justify-between px-3 py-2 rounded-xl bg-bg-primary border border-border-subtle hover:border-accent/50 text-xs text-text-muted hover:text-text-primary transition"
+        className="w-full flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl bg-bg-primary border border-border-subtle hover:border-accent/50 text-[13px] text-text-secondary hover:text-text-primary transition cursor-pointer"
       >
-        <span className="flex items-center gap-2">
-          <Search className="w-3.5 h-3.5 text-accent" />
-          Quick Jump...
+        <span className="flex items-center gap-2.5 min-w-0">
+          <Search className="w-4 h-4 text-accent shrink-0" />
+          <span className="truncate font-medium">Quick Jump</span>
         </span>
-        <kbd className="px-1.5 py-0.5 text-[10px] font-mono rounded bg-bg-tertiary text-text-secondary">Ctrl+K</kbd>
+        <kbd className="shrink-0 px-1.5 py-0.5 text-[10px] font-mono rounded bg-bg-tertiary text-text-secondary">Ctrl+S</kbd>
       </button>
 
       <nav className="space-y-1">
@@ -146,8 +171,19 @@ export const Sidebar: React.FC<SidebarProps> = ({
       </nav>
     </div>
 
-    {/* AniList account */}
-    <div className="p-3">
+    <div className="p-3 space-y-2">
+      <button
+        onClick={onOpenShortcuts}
+        className="w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-semibold text-text-secondary hover:bg-bg-tertiary hover:text-text-primary transition cursor-pointer"
+      >
+        <span className="flex items-center gap-2.5">
+          <Keyboard className="w-4 h-4" />
+          Shortcuts
+        </span>
+        <kbd className="px-1.5 py-0.5 text-[10px] font-mono rounded bg-bg-tertiary text-text-secondary">?</kbd>
+      </button>
+
+      {/* AniList account */}
       {isSignedIn && settings ? (
         <div className="flex items-center justify-between gap-2 p-2 rounded-xl bg-bg-primary border border-border-subtle">
           <button

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 /**
  * True while `modifier` is held on its own for `delayMs`: Ctrl → the sidebar's Ctrl+1–9 badges, Alt →
- * the watchlist's Alt+1–6 / Q W E badges. Any other key or a click hides it, so Ctrl+K, Ctrl+A,
+ * the watchlist's Alt+1–6 / Q W E badges. Any other key or a click hides it, so Ctrl+S, Ctrl+A,
  * Alt+Q or Ctrl+click never flash the badges.
  */
 export function useModifierHint(modifier: "Control" | "Alt", delayMs = 400): boolean {

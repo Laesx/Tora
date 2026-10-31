@@ -5,26 +5,30 @@ import { toraApi } from "@/lib/api";
 import { AnimePosterCard } from "@/components/AnimePosterCard";
 import { useToast } from "@/contexts/toast";
 import { useAnimeActions } from "@/contexts/animeActions";
+import { useNavCapture } from "@/app/navigation";
+
+/**
+ * Query handed over from another view (e.g. Enter in the Seasons filter), searched when it arrives
+ * or the tab mounts again; Back also restores the results it had (`cache`), without a request.
+ */
+export interface SearchRequest {
+  query: string;
+  cache?: { results: AnimeEntry[]; searched: string };
+  nonce: number;
+}
 
 interface SearchViewProps {
   animeList: AnimeEntry[];
-  /** Query handed over from another view (e.g. Enter in the Seasons filter); searched on change */
-  initialQuery: string;
-  /** Changes with every hand-over, so handing over the same query searches again */
-  searchRequestId?: number;
+  request: SearchRequest | null;
 }
 
-export const SearchView: React.FC<SearchViewProps> = ({
-  animeList,
-  initialQuery,
-  searchRequestId,
-}) => {
+export const SearchView: React.FC<SearchViewProps> = ({ animeList, request }) => {
   const { addAnime, openAnime } = useAnimeActions();
   const showToast = useToast();
-  const [query, setQuery] = useState(initialQuery);
-  const [searched, setSearched] = useState("");
+  const [query, setQuery] = useState(request?.query ?? "");
+  const [searched, setSearched] = useState(request?.cache?.searched ?? "");
   const [loading, setLoading] = useState(false);
-  const [results, setResults] = useState<AnimeEntry[]>([]);
+  const [results, setResults] = useState<AnimeEntry[]>(request?.cache?.results ?? []);
   const requestIdRef = useRef(0);
 
   const listById = useMemo(
@@ -50,9 +54,20 @@ export const SearchView: React.FC<SearchViewProps> = ({
   };
 
   useEffect(() => {
-    setQuery(initialQuery);
-    runSearch(initialQuery);
-  }, [initialQuery, searchRequestId]);
+    if (!request) return;
+    setQuery(request.query);
+    if (request.cache) {
+      ++requestIdRef.current;
+      setLoading(false);
+      setResults(request.cache.results);
+      setSearched(request.cache.searched);
+    } else runSearch(request.query);
+  }, [request?.nonce]);
+
+  useNavCapture("search", () => ({
+    view: { tab: "search", query },
+    cache: searched ? { tab: "search", results, searched } : undefined,
+  }));
 
   return (
     <div className="p-6 space-y-5 max-w-7xl mx-auto">

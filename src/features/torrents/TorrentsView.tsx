@@ -24,17 +24,26 @@ import { FeedsPanel } from "./FeedsPanel";
 import { FiltersPanel } from "./FiltersPanel";
 import { useToast } from "@/contexts/toast";
 import { useAnimeActions } from "@/contexts/animeActions";
+import { useNavCapture } from "@/app/navigation";
 
 interface TorrentsViewProps {
   animeList: AnimeEntry[];
-  /** Search handed over from elsewhere (drawer, quick menu, palette); a new `nonce` searches again */
-  searchRequest: (TorrentSearchRequest & { nonce: number }) | null;
+  /** Search handed over from elsewhere (drawer, quick menu, palette) or restored by Back; a new `nonce` applies again */
+  searchRequest: TorrentsRequest | null;
   onRefreshAnimeList: () => Promise<void> | void;
   /** Opens Settings → Torrents (app, download folder, refresh interval) */
   onOpenSettings: () => void;
 }
 
 type SubTab = "releases" | "feeds" | "filters";
+export type TorrentsSubTab = SubTab;
+
+/** `search: null` = the feeds; `subTab` defaults to Releases */
+export interface TorrentsRequest {
+  search: TorrentSearchRequest | null;
+  subTab?: SubTab;
+  nonce: number;
+}
 
 // View state kept for the session while the tab is unmounted (the feed data itself is cached in the backend).
 const memory = {
@@ -87,16 +96,17 @@ export const TorrentsView: React.FC<TorrentsViewProps> = ({
 }) => {
   const { openAnime } = useAnimeActions();
   const showToast = useToast();
-  const [subTab, setSubTabState] = useState<SubTab>(memory.subTab);
   const [feedIds, setFeedIdsState] = useState<number[] | null>(memory.feedIds);
   const [search, setSearchState] = useState<TorrentSearchRequest | null>(() => {
     if (searchRequest && searchRequest.nonce !== memory.lastNonce) {
       memory.lastNonce = searchRequest.nonce;
-      memory.search = { query: searchRequest.query, animeId: searchRequest.animeId };
-      memory.subTab = "releases";
+      memory.search = searchRequest.search;
+      memory.subTab = searchRequest.subTab ?? "releases";
     }
     return memory.search;
   });
+  // After `search`, which applies a hand-over to `memory.subTab`
+  const [subTab, setSubTabState] = useState<SubTab>(memory.subTab);
   const [searchText, setSearchText] = useState(search?.query ?? "");
   const [showDiscarded, setShowDiscarded] = useState(memory.showDiscarded);
   const [showUnmatched, setShowUnmatched] = useState(memory.showUnmatched);
@@ -212,9 +222,11 @@ export const TorrentsView: React.FC<TorrentsViewProps> = ({
   useEffect(() => {
     if (!searchRequest || searchRequest.nonce === memory.lastNonce) return;
     memory.lastNonce = searchRequest.nonce;
-    setSubTab("releases");
-    setSearch({ query: searchRequest.query, animeId: searchRequest.animeId });
+    setSubTab(searchRequest.subTab ?? "releases");
+    setSearch(searchRequest.search);
   }, [searchRequest]);
+
+  useNavCapture("torrents", () => ({ view: { tab: "torrents", subTab, search } }));
 
   // List changes (progress, new files) only re-run selection on the cached feeds
   const prevAnimeListRef = useRef(animeList);
