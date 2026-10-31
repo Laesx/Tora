@@ -33,7 +33,7 @@ export const STATUS_INFO: Record<string, ListStatusInfo> = Object.fromEntries(
 
 export const statusLabel = (status: string) => STATUS_INFO[status]?.label ?? status;
 
-/** Watchlist status tabs; Rewatching has none of its own (All Anime and search show it) */
+/** Watchlist status tabs */
 export const WATCHLIST_TABS = [
   ...["CURRENT", "PLANNING", "COMPLETED", "PAUSED", "DROPPED"].map((id) => ({ id, label: STATUS_INFO[id].label })),
   { id: "ALL", label: "All Anime" },

@@ -25,6 +25,9 @@ interface WatchlistInputs {
   titleOf: (a: AnimeEntry) => string;
 }
 
+/** Rewatching shows under the Watching tab */
+const tabOf = (status: string) => (status === "REPEATING" ? "CURRENT" : status);
+
 /** Watchlist filter state (status tab / custom list / search / sort) and the list it selects. */
 export function useWatchlist({
   animeList,
@@ -57,7 +60,8 @@ export function useWatchlist({
     const counts: Record<string, number> = { ALL: animeList.length };
     for (const a of animeList) {
       if (hiddenFromStatusIds.has(a.id)) continue;
-      counts[a.user_status] = (counts[a.user_status] || 0) + 1;
+      const tab = tabOf(a.user_status);
+      counts[tab] = (counts[tab] || 0) + 1;
     }
     return counts;
   }, [animeList, hiddenFromStatusIds]);
@@ -124,7 +128,7 @@ export function useWatchlist({
       .filter((a) => {
         if (statusFilter === "ALL") return true;
         if (hiddenFromStatusIds.has(a.id)) return false;
-        return (stepSnapshots[a.id]?.initialStatus ?? a.user_status) === statusFilter;
+        return tabOf(stepSnapshots[a.id]?.initialStatus ?? a.user_status) === statusFilter;
       })
       .sort(compareBySort);
   }, [
@@ -160,8 +164,8 @@ export function useWatchlist({
     if (!query) {
       setCustomListFilter(null);
       setStatusFilter(
-        WATCHLIST_TABS.some((t) => t.id === entry.user_status) && !hiddenFromStatusIds.has(entry.id)
-          ? entry.user_status
+        WATCHLIST_TABS.some((t) => t.id === tabOf(entry.user_status)) && !hiddenFromStatusIds.has(entry.id)
+          ? tabOf(entry.user_status)
           : "ALL"
       );
     }

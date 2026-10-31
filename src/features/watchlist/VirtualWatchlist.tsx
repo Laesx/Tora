@@ -21,7 +21,7 @@ import { AnimeEntry } from "@/lib/types";
 import { formatCountdown, formatExactTime, formatRelativeTime } from "@/lib/format";
 import { getOptimizedCoverUrl } from "@/lib/covers";
 import { AnimeQuickMenu } from "@/components/AnimeQuickMenu";
-import { LIST_STATUSES } from "@/lib/status";
+import { LIST_STATUSES, STATUS_INFO } from "@/lib/status";
 import { displayTitle, useAnimeTitle } from "@/contexts/titles";
 import { playLocalEpisode } from "@/lib/anime";
 import { seasonName } from "@/lib/seasons";
@@ -616,10 +616,11 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
               )}
             </div>
 
-            {/* Top Right: pending-sync dot */}
-            {anime.sync_pending && (
-              <PendingSyncDot className="mt-1.5 shrink-0 ring-2 ring-black/60" />
-            )}
+            {/* Top Right: pending-sync dot, rewatch chip */}
+            <div className="flex items-center gap-1.5 shrink-0 h-5">
+              {anime.sync_pending && <PendingSyncDot className="ring-2 ring-black/60" />}
+              <RewatchChip anime={anime} variant="cover" />
+            </div>
           </div>
 
           {/* Bottom Overlay: Progress, and the AniList average + your score on the right */}
@@ -731,8 +732,11 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
               >
                 {titleOf(anime)}
               </h3>
-              <span className="px-2 py-0.5 rounded bg-bg-tertiary text-[10px] font-mono text-text-secondary shrink-0">
-                {anime.format}
+              <span className="flex items-center gap-1.5 shrink-0">
+                <RewatchChip anime={anime} variant="pill" />
+                <span className="px-2 py-0.5 rounded bg-bg-tertiary text-[10px] font-mono text-text-secondary">
+                  {anime.format}
+                </span>
               </span>
             </div>
             {(anime.studios[0] || anime.updated_at > 0) && (
@@ -804,6 +808,7 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
                   {anime.sync_pending && (
                     <PendingSyncDot className="inline-block mr-1.5 align-middle" />
                   )}
+                  <RewatchChip anime={anime} variant="inline" />
                   {titleOf(anime)}
                 </div>
                 <div className="text-[10px] text-text-muted truncate">
@@ -1156,6 +1161,30 @@ function PendingSyncDot({ className = "" }: { className?: string }) {
       aria-label="Waiting to sync to AniList"
       className={`w-2 h-2 rounded-full bg-amber-400 shrink-0 ${className}`}
     />
+  );
+}
+
+const REWATCH_STYLES = {
+  cover: "h-5 px-2 rounded-md bg-black text-violet-400 text-[10px] font-mono font-semibold",
+  pill: "px-2 py-0.5 rounded bg-violet-500/15 text-violet-400 text-[10px] font-semibold",
+  inline: "mr-1.5 align-middle text-violet-400 text-[10px] font-mono font-bold",
+};
+
+function RewatchChip({ anime, variant }: { anime: AnimeEntry; variant: keyof typeof REWATCH_STYLES }) {
+  if (anime.user_status !== "REPEATING") return null;
+  const { icon: Icon } = STATUS_INFO.REPEATING;
+  const n = anime.user_repeats + 1;
+  const label = `Rewatch #${n}`;
+  const text = variant === "pill" ? (n >= 2 ? label : "Rewatch") : n >= 2 ? `#${n}` : null;
+  return (
+    <span
+      title={label}
+      aria-label={label}
+      className={`inline-flex items-center gap-1 shrink-0 whitespace-nowrap ${REWATCH_STYLES[variant]}`}
+    >
+      <Icon className={variant === "pill" ? "w-3 h-3" : "w-2.5 h-2.5"} />
+      {text}
+    </span>
   );
 }
 
