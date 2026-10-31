@@ -481,15 +481,15 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center pt-20 bg-black/70 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-start justify-center pt-16 bg-black/70 backdrop-blur-sm"
       onClick={onClose}
     >
       <div
-        className="w-full max-w-xl bg-bg-secondary border border-border-subtle rounded-2xl shadow-2xl overflow-hidden flex flex-col"
+        className="w-full max-w-2xl bg-bg-secondary border border-border-subtle rounded-2xl shadow-2xl overflow-hidden flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center gap-3 px-4 py-3.5 border-b border-border-subtle">
-          <Search className="w-4 h-4 text-accent shrink-0" />
+        <div className="flex items-center gap-3.5 px-5 py-4 border-b border-border-subtle">
+          <Search className="w-5 h-5 text-accent shrink-0" />
           <input
             ref={inputRef}
             type="text"
@@ -502,7 +502,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
             placeholder={
               tab === "anime" ? "Jump to an anime in your list..." : "Run a command..."
             }
-            className="flex-1 bg-transparent text-xs text-text-primary focus:outline-none"
+            className="flex-1 bg-transparent text-base text-text-primary focus:outline-none placeholder:text-text-muted"
           />
           {query && (
             <button
@@ -513,13 +513,13 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
               className="p-1 rounded text-text-muted hover:text-text-primary"
               title="Clear"
             >
-              <X className="w-4 h-4" />
+              <X className="w-5 h-5" />
             </button>
           )}
         </div>
 
         {/* Tabs (Tab / Shift+Tab) */}
-        <div className="flex items-center gap-1 px-3 pt-2 text-[11px] font-semibold">
+        <div className="flex items-center gap-1.5 px-4 pt-2.5 text-xs font-semibold">
           {(["anime", "commands"] as PaletteTab[]).map((t) => {
             const count = tabCount(t);
             return (
@@ -530,37 +530,37 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
                   setMenu(null);
                   inputRef.current?.focus();
                 }}
-                className={`px-2.5 py-1 rounded-lg transition flex items-center gap-1.5 ${tab === t
+                className={`px-3 py-1.5 rounded-lg transition flex items-center gap-1.5 ${tab === t
                   ? "bg-accent/20 text-accent"
                   : "text-text-muted hover:text-text-primary"
                   }`}
               >
                 {t === "anime" ? "Anime" : "Commands"}
                 {count !== null && (
-                  <span className="font-mono text-[10px] opacity-80">{count}</span>
+                  <span className="font-mono text-xs opacity-80">{count}</span>
                 )}
               </button>
             );
           })}
         </div>
 
-        <div ref={listRef} className="max-h-96 overflow-y-auto p-2 text-xs">
+        <div ref={listRef} className="max-h-[32rem] overflow-y-auto p-2.5 text-sm">
           {menuActions && menuAnime ? (
             <>
               {/* Breadcrumb: which anime (and submenu) these actions belong to */}
-              <div className="flex items-center gap-2.5 px-2.5 pb-2 mb-1 border-b border-border-subtle">
+              <div className="flex items-center gap-3 px-3 pb-2.5 mb-1.5 border-b border-border-subtle">
                 <img
                   src={getOptimizedCoverUrl(menuAnime.cover_image, "medium")}
                   alt=""
-                  className="w-6 h-8 object-cover rounded shrink-0"
+                  className="w-8 h-11 object-cover rounded shrink-0"
                 />
-                <div className="min-w-0 flex items-center gap-1 text-text-muted">
+                <div className="min-w-0 flex items-center gap-1.5 text-sm text-text-muted">
                   <span className="font-semibold text-text-primary truncate">
                     {titleOf(menuAnime)}
                   </span>
                   {menuTrail.map((label) => (
                     <span key={label} className="flex items-center gap-1 shrink-0">
-                      <ChevronRight className="w-3 h-3" />
+                      <ChevronRight className="w-4 h-4" />
                       {label}
                     </span>
                   ))}
@@ -591,7 +591,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
             section.items.length === 0 ? null : (
               <div key={si} className={si > 0 ? "pt-1.5" : ""}>
                 {section.title && (
-                  <div className="px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-text-muted">
+                  <div className="px-3 py-1.5 text-xs font-semibold uppercase tracking-wider text-text-muted">
                     {section.title}
                   </div>
                 )}
@@ -612,7 +612,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
                         setActiveIndex(index);
                         openMenu(item.anime);
                       }}
-                      className={`flex items-center justify-between gap-2 px-3 py-2 rounded-xl cursor-pointer ${active
+                      className={`flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-xl cursor-pointer ${active
                         ? "bg-accent/15 ring-1 ring-accent/40"
                         : ""
                         }`}
@@ -621,9 +621,9 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
                       {active && (
                         <span className="flex items-center gap-1.5 shrink-0 text-text-muted">
                           {item.kind === "anime" && (
-                            <ChevronRight className="w-3.5 h-3.5" aria-label="Actions" />
+                            <ChevronRight className="w-4 h-4" aria-label="Actions" />
                           )}
-                          <CornerDownLeft className="w-3.5 h-3.5" />
+                          <CornerDownLeft className="w-4 h-4" />
                         </span>
                       )}
                     </div>
@@ -637,7 +637,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
         </div>
 
         {/* Controls */}
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-2 border-t border-border-subtle bg-bg-primary/40 text-[10px] text-text-muted">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 px-5 py-2.5 border-t border-border-subtle bg-bg-primary/40 text-xs text-text-muted">
           <KeyHint keys={["↑", "↓"]} label="Navigate" />
           {menuActions ? (
             <>
@@ -683,7 +683,7 @@ function ActionRow({
       data-index={index}
       onMouseMove={onHover}
       onClick={onRun}
-      className={`flex items-center justify-between gap-2 px-3 py-2 rounded-xl ${action.disabled ? "opacity-40 cursor-default" : "cursor-pointer"
+      className={`flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-xl ${action.disabled ? "opacity-40 cursor-default" : "cursor-pointer"
         } ${active
           ? action.danger
             ? "bg-red-500/15 ring-1 ring-red-500/40"
@@ -691,20 +691,20 @@ function ActionRow({
           : ""
         }`}
     >
-      <span className="flex items-center gap-2.5 min-w-0">
+      <span className="flex items-center gap-3 min-w-0">
         <Icon
-          className={`w-4 h-4 shrink-0 ${action.danger ? "text-red-400" : action.iconClass ?? "text-text-muted"}`}
+          className={`w-5 h-5 shrink-0 ${action.danger ? "text-red-400" : action.iconClass ?? "text-text-muted"}`}
         />
-        <span className={`truncate ${action.danger ? "text-red-400" : "text-text-primary"}`}>
+        <span className={`truncate text-sm ${action.danger ? "text-red-400" : "text-text-primary"}`}>
           {confirming ? "Press Enter again to delete" : action.label}
         </span>
       </span>
       <span className="flex items-center gap-1.5 shrink-0 text-text-muted">
-        {action.hint && <span className="font-mono text-[10px]">{action.hint}</span>}
+        {action.hint && <span className="font-mono text-xs">{action.hint}</span>}
         {action.children ? (
-          <ChevronRight className="w-3.5 h-3.5" />
+          <ChevronRight className="w-4 h-4" />
         ) : (
-          active && !action.disabled && <CornerDownLeft className="w-3.5 h-3.5" />
+          active && !action.disabled && <CornerDownLeft className="w-4 h-4" />
         )}
       </span>
     </div>
@@ -724,9 +724,9 @@ function PaletteRow({
   const titleLanguage = useTitleLanguage();
   if (item.kind === "anilist") {
     return (
-      <div className="flex items-center gap-2.5 min-w-0">
-        <Globe className="w-4 h-4 text-accent shrink-0" />
-        <span className="truncate text-text-primary">
+      <div className="flex items-center gap-3.5 min-w-0">
+        <Globe className="w-5 h-5 text-accent shrink-0" />
+        <span className="truncate text-sm text-text-primary">
           Search AniList for <span className="font-semibold">"{rawQuery}"</span>
         </span>
       </div>
@@ -737,18 +737,18 @@ function PaletteRow({
     const Icon = item.command.icon;
     return (
       <div className="flex items-center justify-between gap-2.5 min-w-0 flex-1">
-        <span className="flex items-center gap-2.5 min-w-0">
+        <span className="flex items-center gap-3 min-w-0">
           {item.recent ? (
-            <History className="w-4 h-4 text-text-muted shrink-0" />
+            <History className="w-5 h-5 text-text-muted shrink-0" />
           ) : (
-            <Icon className="w-4 h-4 text-accent shrink-0" />
+            <Icon className="w-5 h-5 text-accent shrink-0" />
           )}
-          <span className="truncate text-text-primary">
+          <span className="truncate text-sm text-text-primary">
             <Highlight text={item.command.label} query={query} />
           </span>
         </span>
         {item.command.shortcut && (
-          <kbd className="px-1.5 py-0.5 text-[10px] font-mono rounded bg-bg-tertiary text-text-secondary shrink-0">
+          <kbd className="px-2 py-0.5 text-xs font-mono rounded bg-bg-tertiary text-text-secondary shrink-0">
             {item.command.shortcut}
           </kbd>
         )}
@@ -759,25 +759,25 @@ function PaletteRow({
   const a = item.anime;
   const altTitle = altTitles(a, titleLanguage)[0] ?? null;
   return (
-    <div className="flex items-center gap-2.5 min-w-0">
+    <div className="flex items-center gap-3.5 min-w-0">
       <div className="relative shrink-0">
         <img
           src={getOptimizedCoverUrl(a.cover_image, "medium")}
           alt=""
           loading="lazy"
           decoding="async"
-          className="w-7 h-10 object-cover rounded"
+          className="w-9 h-12 object-cover rounded-md"
         />
         <AiringDot anime={a} size="sm" onCover className="absolute -top-0.5 -left-0.5" />
         {item.recent && (
-          <History className="absolute -bottom-1 -right-1 w-3 h-3 p-px rounded-full bg-bg-secondary text-text-muted" />
+          <History className="absolute -bottom-1 -right-1 w-3.5 h-3.5 p-px rounded-full bg-bg-secondary text-text-muted" />
         )}
       </div>
       <div className="min-w-0">
-        <div className="font-semibold text-text-primary truncate">
+        <div className="text-sm font-semibold text-text-primary truncate">
           <Highlight text={titleOf(a)} query={query} />
         </div>
-        <div className="text-[10px] text-text-muted truncate">
+        <div className="text-xs text-text-muted truncate">
           <span className="font-mono">
             {statusLabel(a.user_status)} • Ep {a.user_progress}/{a.episodes ?? "?"}
           </span>
@@ -819,7 +819,7 @@ function KeyHint({ keys, label }: { keys: string[]; label: string }) {
       {keys.map((k) => (
         <kbd
           key={k}
-          className="min-w-[18px] text-center px-1 py-px font-mono rounded bg-bg-tertiary text-text-secondary"
+          className="min-w-[20px] text-center px-1.5 py-0.5 font-mono text-xs rounded bg-bg-tertiary text-text-secondary"
         >
           {k}
         </kbd>
