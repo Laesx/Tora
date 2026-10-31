@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.5.0
+
+### History
+- **AniList activity import** (opt-in, Settings → Tracker): bring in your AniList episode history, newest first, paced for AniList's rate limit. It pauses on errors, resumes on its own at startup, and stays up to date after each sync. Tora's own history always wins when both know an episode.
+- History has **All / AniList / Local** sections, title search (with a clear button) and loads as you scroll.
+- **Period picker**: jump to a day, month, season or year, or shift-click a range. Months are shaded by episodes watched.
+- Per-anime **episode timeline**: one compact row per day, split into watch-throughs, so rewatches are easy to tell apart.
+- **Stats** can include AniList-only episodes, and clicking a heatmap day or month bar opens that period in History.
+
+### Navigation
+- **Back / forward** like a browser: sidebar arrows, **Alt+←/→**, mouse back/forward buttons, or Quick Jump. Each step restores the tab's state, the open anime panel and your scroll position.
+- Reworked sidebar header: version under the name, Back / Forward and Settings beside it, Quick Jump as a full-width bar.
+- Quick Jump now opens with **Ctrl+S**.
+
+### Watchlist and details list
+- Fixed the **black screen when scrolling the table**; rows are now a fixed height.
+- Table columns keep their widths: resize them by dragging a header edge (double-click resets), hide them with a right-click on the header. Saved per device.
+- The table header stays pinned, and the Season cell opens that season in Seasons.
+- **−/+ buttons** next to the progress bar in the table and detailed cards (on hover in the poster grid).
+- Detailed cards show the next airing and genres instead of the synopsis.
+- **Alt+1–6** switch status tabs and **Alt+Q/W/E** switch views (hold Alt to see the keys).
+- Scores are shown and edited in your **AniList score format** (100, 10, 5 stars, smileys…).
+
+### Stability and diagnostics
+- A crash in one tab shows a message with *Try again* / *Reload* instead of a blank window.
+- Log file in `%APPDATA%\Tora\logs`; Settings → Diagnostics → Logs opens it.
+- Settings → Diagnostics → **Memory** shows what Tora and each WebView2 process use.
+- Lower memory while the window is minimized.
+- Tora's data folder is now `%APPDATA%\Tora`; existing data is moved automatically.
+
+
 ## v0.3.0
 
 > [!WARNING]
