@@ -19,6 +19,12 @@ interface AnimePosterCardProps {
   onOpen: (anime: AnimeEntry) => void;
   onAdd: (anime: AnimeEntry, status: "CURRENT" | "PLANNING") => void;
   onContextMenu?: (anime: AnimeEntry, e: React.MouseEvent) => void;
+  /** Selectable grids (Seasons) take over the click; without this a click opens the drawer */
+  onClick?: (anime: AnimeEntry, e: React.MouseEvent) => void;
+  onDoubleClick?: (anime: AnimeEntry, e: React.MouseEvent) => void;
+  selected?: boolean;
+  /** Greyed out ("Not interested") */
+  dimmed?: boolean;
 }
 
 /** Poster card for remote anime (Seasons / Search): whole card opens the drawer, quick-add when not in the list. */
@@ -29,6 +35,10 @@ export const AnimePosterCard: React.FC<AnimePosterCardProps> = ({
   onOpen,
   onAdd,
   onContextMenu,
+  onClick,
+  onDoubleClick,
+  selected = false,
+  dimmed = false,
 }) => {
   const titleOf = useAnimeTitle();
   const status = listEntry ? STATUS_INFO[listEntry.user_status] : null;
@@ -36,7 +46,8 @@ export const AnimePosterCard: React.FC<AnimePosterCardProps> = ({
 
   return (
     <div
-      onClick={() => onOpen(anime)}
+      onClick={(e) => (onClick ? onClick(anime, e) : onOpen(anime))}
+      onDoubleClick={onDoubleClick ? (e) => onDoubleClick(anime, e) : undefined}
       onContextMenu={
         onContextMenu
           ? (e) => {
@@ -46,7 +57,10 @@ export const AnimePosterCard: React.FC<AnimePosterCardProps> = ({
           }
           : undefined
       }
-      className="group bg-bg-primary border border-border-subtle rounded-xl overflow-hidden flex flex-col hover:border-accent/60 transition shadow-sm cursor-pointer"
+      className={`group rounded-xl overflow-hidden flex flex-col transition shadow-sm cursor-pointer ${selected
+        ? "bg-accent/10 border border-accent ring-2 ring-accent/40"
+        : "bg-bg-primary border border-border-subtle hover:border-accent/60"
+        } ${dimmed ? "opacity-50 hover:opacity-100" : ""}`}
     >
       <div
         className={`relative w-full bg-bg-tertiary overflow-hidden ${imageHeight ? "" : "aspect-[3/4]"}`}
@@ -105,7 +119,7 @@ export const AnimePosterCard: React.FC<AnimePosterCardProps> = ({
         </div>
 
         {!listEntry && (
-          <div className="grid grid-cols-2 gap-1.5">
+          <div className="grid grid-cols-2 gap-1.5" onDoubleClick={(e) => e.stopPropagation()}>
             <button
               onClick={(e) => {
                 e.stopPropagation();

@@ -140,6 +140,30 @@ export function useAnimeList(showToast: ShowToast, titleOf: (a: AnimeEntry) => s
     [applyDelta, showToast, titleOf]
   );
 
+  /** `addAnime` for a selection: one optimistic update and one toast, stored one at a time */
+  const addAnimeBatch = useCallback(
+    async (entries: AnimeEntry[], status: "CURRENT" | "PLANNING") => {
+      if (entries.length === 0) return;
+      if (entries.length === 1) return addAnime(entries[0], status);
+      const updatedAt = Math.floor(Date.now() / 1000);
+      const optimistic = entries.map((e) => ({ ...e, user_status: status, updated_at: updatedAt }));
+      applyDelta(optimistic);
+      showToast(
+        `Added ${entries.length} anime to ${status === "CURRENT" ? "Watching" : "Planning"}`,
+        "success"
+      );
+      for (const entry of optimistic) {
+        try {
+          applyDelta([await toraApi.addOrUpsertAnime(entry)]);
+        } catch (err) {
+          setAnimeList((prev) => prev.filter((a) => a.id !== entry.id));
+          showToast(String(err), "error");
+        }
+      }
+    },
+    [addAnime, applyDelta, showToast]
+  );
+
   return {
     animeList,
     setAnimeList,
@@ -159,6 +183,7 @@ export function useAnimeList(showToast: ShowToast, titleOf: (a: AnimeEntry) => s
     batchDelete,
     batchUpdate,
     addAnime,
+    addAnimeBatch,
   };
 }
 

@@ -36,6 +36,7 @@ import { useScoreFormat } from "@/contexts/scoreFormat";
 import { formatScore, SCORE_SCALES } from "@/lib/scores";
 import { useScrollViewport, visibleRange } from "@/hooks/virtual";
 import { useNow } from "@/hooks/useNow";
+import { useClickSelection } from "@/hooks/useClickSelection";
 import type { SortDir, WatchlistSortKey } from "./sort";
 import { TABLE_COLUMNS, TableColumn, TableColumnId, clampColumnWidth, useTableColumns } from "./tableColumns";
 
@@ -129,7 +130,7 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
   const scoreIcon = SCORE_SCALES[scoreFormat].numeric;
   const containerRef = useRef<HTMLDivElement | null>(null);
   const menuWrapperRef = useRef<HTMLDivElement | null>(null);
-  const lastClickedIdRef = useRef<number | null>(null);
+  const { click: clickSelect, lastClickedIdRef } = useClickSelection(items, onSetSelectedAnimeIds);
   // One shared tick for every "last updated" label
   const now = useNow(60_000);
 
@@ -175,44 +176,9 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
       if (quickMenuAnimeId !== null) {
         onSetQuickMenuAnimeId(null);
       }
-
-      const isCtrlOrCmd = e.ctrlKey || e.metaKey;
-      const isShift = e.shiftKey;
-
-      if (isShift && lastClickedIdRef.current !== null) {
-        const startIdx = items.findIndex(
-          (a) => a.id === lastClickedIdRef.current
-        );
-        const endIdx = items.findIndex((a) => a.id === anime.id);
-        if (startIdx !== -1 && endIdx !== -1) {
-          const low = Math.min(startIdx, endIdx);
-          const high = Math.max(startIdx, endIdx);
-          const rangeIds = items.slice(low, high + 1).map((a) => a.id);
-          onSetSelectedAnimeIds((prev) => {
-            if (isCtrlOrCmd) {
-              return Array.from(new Set([...prev, ...rangeIds]));
-            }
-            return rangeIds;
-          });
-          return;
-        }
-      }
-
-      if (isCtrlOrCmd) {
-        onSetSelectedAnimeIds((prev) =>
-          prev.includes(anime.id)
-            ? prev.filter((id) => id !== anime.id)
-            : [...prev, anime.id]
-        );
-        lastClickedIdRef.current = anime.id;
-        return;
-      }
-
-      // First single click selects the item
-      onSetSelectedAnimeIds([anime.id]);
-      lastClickedIdRef.current = anime.id;
+      clickSelect(e, anime.id);
     },
-    [items, quickMenuAnimeId, onSetQuickMenuAnimeId, onSetSelectedAnimeIds]
+    [clickSelect, quickMenuAnimeId, onSetQuickMenuAnimeId]
   );
 
   const handleItemDoubleClick = useCallback(

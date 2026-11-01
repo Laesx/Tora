@@ -97,6 +97,11 @@ export const toraApi = {
   // The list owner's AniList score format ("POINT_10_DECIMAL", …); pulls keep it current
   getScoreFormat: () => invoke<string>("get_score_format"),
 
+  // Seasons "Not interested": local only, never sent to AniList
+  getNotInterested: () => invoke<number[]>("get_not_interested"),
+  setNotInterested: (animeIds: number[], hidden: boolean) =>
+    invoke<void>("set_not_interested", { animeIds, hidden }),
+
   // Add to / remove from custom lists or toggle "hidden from status lists"; queued and pushed like any edit
   setAnimeCustomLists: (change: CustomListChange) =>
     invoke<CustomListsState>("set_anime_custom_lists", { change }),

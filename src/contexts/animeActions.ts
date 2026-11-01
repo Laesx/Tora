@@ -17,6 +17,8 @@ export interface AnimeActions {
   deleteAnime: (anime: AnimeEntry) => Promise<void>;
   /** Adds a remote (Seasons / Search / Schedule) anime with an instant optimistic update */
   addAnime: (entry: AnimeEntry, status: "CURRENT" | "PLANNING") => Promise<void>;
+  /** `addAnime` for a selection, with one summary toast */
+  addAnimeBatch: (entries: AnimeEntry[], status: "CURRENT" | "PLANNING") => Promise<void>;
   /** Closes the drawer and opens the Torrents tab on this search */
   searchTorrents: (req: TorrentSearchRequest) => void;
   /** Closes the drawer and shows this season in the Seasons tab ("SUMMER", 2024) */
@@ -37,6 +39,7 @@ export const AnimeActionsContext = createContext<AnimeActions>({
   batchDelete: missing,
   deleteAnime: missing,
   addAnime: missing,
+  addAnimeBatch: missing,
   searchTorrents: missing,
   openSeason: missing,
 });

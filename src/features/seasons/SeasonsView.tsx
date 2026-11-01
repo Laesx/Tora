@@ -1,6 +1,7 @@
 import React, {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -12,8 +13,11 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  LayoutGrid,
   RefreshCw,
+  Rows,
   Search,
+  X,
 } from "lucide-react";
 import { AnimeEntry, CachedSeason, SeasonalAnime, SeasonResult } from "@/lib/types";
 import { toraApi } from "@/lib/api";
@@ -36,7 +40,11 @@ import { useToast } from "@/contexts/toast";
 import { useAnimeActions } from "@/contexts/animeActions";
 import { usePrefs } from "@/hooks/usePrefs";
 import { useScrollViewport, visibleRange } from "@/hooks/virtual";
+import { useClickSelection } from "@/hooks/useClickSelection";
 import { useNavCapture } from "@/app/navigation";
+import { EXTENDED_CARD_HEIGHT, SeasonExtendedCard } from "./SeasonExtendedCard";
+import { SeasonTagFilter } from "./SeasonTagFilter";
+import { matchesTagFilters, TagFilterState } from "./tagFilters";
 
 interface SeasonsViewProps {
   animeList: AnimeEntry[];
@@ -55,6 +63,7 @@ export type SeasonRequest = SeasonKey & { filter?: string; nonce: number };
 type SortKey = "popularity" | "start" | "score" | "title";
 type SortDir = "asc" | "desc";
 type GroupBy = "none" | "status";
+type SeasonViewMode = "grid" | "extended";
 
 const SORT_OPTIONS: { id: SortKey; label: string; defaultDir: SortDir }[] = [
   { id: "popularity", label: "Popularity", defaultDir: "desc" },
@@ -87,12 +96,21 @@ const STATUS_GROUPS: { id: string; label: string; statuses: string[]; dot: strin
 const PREFS_KEY = "tora.seasons.prefs";
 const HEADER_ROW_HEIGHT = 44;
 const GRID_GAP = 16;
+/** Below this width the extended view shows one card per row */
+const EXTENDED_TWO_COLUMNS_WIDTH = 960;
+const NOT_INTERESTED_GROUP = "not-interested";
 
 interface SeasonPrefs {
   sortKey: SortKey;
   sortDir: SortDir;
   groupBy: GroupBy;
   formats: string[];
+  viewMode: SeasonViewMode;
+  onlyNotOnList: boolean;
+  /** Genre / tag names an anime must have */
+  includeTags: string[];
+  /** Genre / tag names an anime must not have */
+  excludeTags: string[];
 }
 
 const DEFAULT_PREFS: SeasonPrefs = {
@@ -100,6 +118,10 @@ const DEFAULT_PREFS: SeasonPrefs = {
   sortDir: "desc",
   groupBy: "status",
   formats: DEFAULT_FORMATS,
+  viewMode: "grid",
+  onlyNotOnList: false,
+  includeTags: [],
+  excludeTags: [],
 };
 
 function formatUpdated(fetchedAt: number): string {
@@ -155,7 +177,7 @@ function compareItems(
 }
 
 type GridRow =
-  | { kind: "header"; key: string; label: string; count: number; dot: string }
+  | { kind: "header"; key: string; groupId: string; label: string; count: number; dot: string }
   | { kind: "cards"; key: string; items: SeasonalAnime[] };
 
 export const SeasonsView: React.FC<SeasonsViewProps> = ({
@@ -167,7 +189,7 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
   onSeasonRequestHandled,
 }) => {
   const showToast = useToast();
-  const { openAnime, addAnime } = useAnimeActions();
+  const { openAnime, addAnime, addAnimeBatch } = useAnimeActions();
   const titleOf = useAnimeTitle();
   const nowSeason = useMemo(() => currentSeason(), []);
   const [menu, setMenu] = useState<{ anime: SeasonalAnime; x: number; y: number } | null>(null);
@@ -194,6 +216,10 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
   const [filter, setFilter] = useState(seasonRequest?.filter ?? "");
   const [prefs, updatePrefs] = usePrefs<SeasonPrefs>(PREFS_KEY, DEFAULT_PREFS);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [tagFilterOpen, setTagFilterOpen] = useState(false);
+  const [notInterested, setNotInterested] = useState<Set<number>>(() => new Set());
+  const [showNotInterested, setShowNotInterested] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const requestIdRef = useRef(0);
 
   useNavCapture("seasons", () => ({ view: { tab: "seasons", season: selected.season, year: selected.year, filter } }));
@@ -236,35 +262,18 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
 
   useEffect(() => {
     refreshCachedSeasons();
+    toraApi
+      .getNotInterested()
+      .then((ids) => setNotInterested(new Set(ids)))
+      .catch(() => { });
   }, []);
 
   // The previous season stays on screen (dimmed) until the next one arrives, so the page never
   // collapses to the spinner and back (which also toggled the scrollbar and shifted the layout).
   useEffect(() => {
     loadSeason(selected, false);
+    setSelectedIds([]);
   }, [selected.season, selected.year]);
-
-  // ←/→ move between seasons when no field is focused
-  useEffect(() => {
-    if (!keyboardEnabled || pickerOpen || menu) return;
-    const onKey = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement | null;
-      if (
-        target &&
-        (target.tagName === "INPUT" ||
-          target.tagName === "TEXTAREA" ||
-          target.tagName === "SELECT" ||
-          target.isContentEditable)
-      ) {
-        return;
-      }
-      if (e.ctrlKey || e.altKey || e.metaKey) return;
-      if (e.key === "ArrowLeft") setSelected((s) => shiftSeason(s, -1));
-      if (e.key === "ArrowRight") setSelected((s) => shiftSeason(s, 1));
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [keyboardEnabled, pickerOpen, menu]);
 
   const listById = useMemo(
     () => new Map(animeList.map((a) => [a.id, a])),
@@ -285,23 +294,138 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
     return items
       .filter((it) => !knownFormats.has(it.format) || enabled.has(it.format))
       .filter((it) => matchesFilter(it, needle))
+      .filter((it) => !prefs.onlyNotOnList || !listById.has(it.id))
+      .filter((it) => matchesTagFilters(it, prefs.includeTags, prefs.excludeTags))
       .sort((a, b) => compareItems(a, b, prefs.sortKey, prefs.sortDir, titleOf));
-  }, [items, filter, prefs, knownFormats, titleOf]);
+  }, [items, filter, prefs, knownFormats, titleOf, listById]);
+
+  // An anime on the list never counts as hidden, so adding one brings it back
+  const isHidden = useCallback(
+    (id: number) => notInterested.has(id) && !listById.has(id),
+    [notInterested, listById]
+  );
+  const hiddenItems = useMemo(() => visible.filter((it) => isHidden(it.id)), [visible, isHidden]);
 
   const groups = useMemo(() => {
-    if (prefs.groupBy === "none") {
-      return [{ id: "all", label: "", dot: "", items: visible }];
+    const shown = visible.filter((it) => !isHidden(it.id));
+    const out =
+      prefs.groupBy === "none"
+        ? [{ id: "all", label: "", dot: "", count: shown.length, items: shown }]
+        : STATUS_GROUPS.map((g) => {
+          const groupItems = shown.filter((it) => {
+            const entry = listById.get(it.id);
+            return g.statuses.length === 0 ? !entry : !!entry && g.statuses.includes(entry.user_status);
+          });
+          return { id: g.id, label: g.label, dot: g.dot, count: groupItems.length, items: groupItems };
+        }).filter((g) => g.items.length > 0);
+    if (hiddenItems.length > 0) {
+      out.push({
+        id: NOT_INTERESTED_GROUP,
+        label: "Not interested",
+        dot: "bg-text-muted",
+        count: hiddenItems.length,
+        items: showNotInterested ? hiddenItems : [],
+      });
     }
-    return STATUS_GROUPS.map((g) => ({
-      id: g.id,
-      label: g.label,
-      dot: g.dot,
-      items: visible.filter((it) => {
-        const entry = listById.get(it.id);
-        return g.statuses.length === 0 ? !entry : !!entry && g.statuses.includes(entry.user_status);
-      }),
-    })).filter((g) => g.items.length > 0);
-  }, [visible, prefs.groupBy, listById]);
+    return out;
+  }, [visible, prefs.groupBy, listById, isHidden, hiddenItems, showNotInterested]);
+
+  /** Every displayed card in display order */
+  const displayed = useMemo(() => groups.flatMap((g) => g.items), [groups]);
+
+  // ---------------------------------------------------------------- selection
+
+  const { click: clickSelect, lastClickedIdRef } = useClickSelection(displayed, setSelectedIds);
+  const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+  // A selected card that a filter or a collapsed group took away is out of every action
+  const selectedItems = useMemo(
+    () => displayed.filter((it) => selectedSet.has(it.id)),
+    [displayed, selectedSet]
+  );
+
+  const handleCardClick = useCallback(
+    (anime: AnimeEntry, e: React.MouseEvent) => {
+      e.stopPropagation();
+      clickSelect(e, anime.id);
+    },
+    [clickSelect]
+  );
+
+  const handleCardDoubleClick = useCallback(
+    (anime: AnimeEntry, e: React.MouseEvent) => {
+      e.stopPropagation();
+      // Ctrl / Shift clicks edit the selection; two in a row are not an "open"
+      if (e.ctrlKey || e.metaKey || e.shiftKey) return;
+      openAnime(anime);
+    },
+    [openAnime]
+  );
+
+  // Right-clicking outside the selection selects only that card; inside, the menu acts on all of it
+  const handleCardContextMenu = useCallback(
+    (anime: AnimeEntry, e: React.MouseEvent) => {
+      if (!selectedSet.has(anime.id)) {
+        setSelectedIds([anime.id]);
+        lastClickedIdRef.current = anime.id;
+      }
+      setMenu({ anime: anime as SeasonalAnime, x: e.clientX, y: e.clientY });
+    },
+    [selectedSet, lastClickedIdRef]
+  );
+
+  const clearSelection = useCallback(() => setSelectedIds([]), []);
+
+  const handleSetNotInterested = useCallback(
+    (targets: AnimeEntry[], hidden: boolean) => {
+      if (targets.length === 0) return;
+      const ids = targets.map((a) => a.id);
+      const apply = (hide: boolean) =>
+        setNotInterested((prev) => {
+          const next = new Set(prev);
+          for (const id of ids) {
+            if (hide) next.add(id);
+            else next.delete(id);
+          }
+          return next;
+        });
+      apply(hidden);
+      const subject = targets.length === 1 ? `"${titleOf(targets[0])}"` : `${targets.length} anime`;
+      showToast(hidden ? `Marked ${subject} as not interested` : `Brought back ${subject}`, "info");
+      toraApi.setNotInterested(ids, hidden).catch((err) => {
+        apply(!hidden);
+        showToast(String(err), "error");
+      });
+    },
+    [showToast, titleOf]
+  );
+
+  // ---------------------------------------------------------------- genre / tag filters
+
+  const includeSet = useMemo(() => new Set(prefs.includeTags), [prefs.includeTags]);
+  const excludeSet = useMemo(() => new Set(prefs.excludeTags), [prefs.excludeTags]);
+  const tagState = useCallback(
+    (name: string): TagFilterState =>
+      includeSet.has(name) ? "include" : excludeSet.has(name) ? "exclude" : null,
+    [includeSet, excludeSet]
+  );
+  // show only → hide → off
+  const cycleTag = useCallback(
+    (name: string) => {
+      const without = (list: string[]) => list.filter((n) => n !== name);
+      const state = tagState(name);
+      updatePrefs({
+        includeTags: state === null ? [...prefs.includeTags, name] : without(prefs.includeTags),
+        excludeTags: state === "include" ? [...prefs.excludeTags, name] : without(prefs.excludeTags),
+      });
+    },
+    [tagState, prefs.includeTags, prefs.excludeTags, updatePrefs]
+  );
+  const removeTag = (name: string) =>
+    updatePrefs({
+      includeTags: prefs.includeTags.filter((n) => n !== name),
+      excludeTags: prefs.excludeTags.filter((n) => n !== name),
+    });
+  const activeTags = [...prefs.includeTags, ...prefs.excludeTags];
 
   // ---------------------------------------------------------------- virtualized grid
 
@@ -314,12 +438,19 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
   } = useScrollViewport(gridRef, scrollContainerRef);
 
   const layout = useMemo(() => {
+    if (prefs.viewMode === "extended") {
+      return {
+        cols: gridWidth >= EXTENDED_TWO_COLUMNS_WIDTH ? 2 : 1,
+        imageHeight: 0,
+        rowHeight: EXTENDED_CARD_HEIGHT + GRID_GAP,
+      };
+    }
     const cols = gridWidth >= 960 ? 5 : gridWidth >= 720 ? 4 : gridWidth >= 480 ? 3 : 2;
     const cardWidth = Math.max(120, (gridWidth - (cols - 1) * GRID_GAP) / cols);
     const imageHeight = Math.round(cardWidth * (4 / 3));
     const cardHeight = imageHeight + POSTER_CARD_FOOTER_HEIGHT + 2; // + 1px borders
     return { cols, imageHeight, rowHeight: cardHeight + GRID_GAP };
-  }, [gridWidth]);
+  }, [gridWidth, prefs.viewMode]);
 
   const rows = useMemo(() => {
     const out: { row: GridRow; top: number; height: number }[] = [];
@@ -327,7 +458,7 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
     for (const g of groups) {
       if (g.label) {
         out.push({
-          row: { kind: "header", key: `h-${g.id}`, label: g.label, count: g.items.length, dot: g.dot },
+          row: { kind: "header", key: `h-${g.id}`, groupId: g.id, label: g.label, count: g.count, dot: g.dot },
           top,
           height: HEADER_ROW_HEIGHT,
         });
@@ -352,6 +483,161 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
     return rows.list.slice(start, end);
   }, [rows, scrollTop, gridTop, viewportHeight, layout.rowHeight]);
 
+  // ---------------------------------------------------------------- keyboard
+
+  // The target card can change group in the same update, so it is scrolled to after the render
+  const pendingRevealRef = useRef<number | null>(null);
+
+  const selectAndReveal = (id: number) => {
+    setSelectedIds([id]);
+    lastClickedIdRef.current = id;
+    pendingRevealRef.current = id;
+  };
+
+  useLayoutEffect(() => {
+    const id = pendingRevealRef.current;
+    if (id === null) return;
+    pendingRevealRef.current = null;
+    const gridEl = gridRef.current;
+    const scrollEl = scrollContainerRef.current;
+    const idx = rows.list.findIndex((r) => r.row.kind === "cards" && r.row.items.some((a) => a.id === id));
+    if (!gridEl || !scrollEl || idx === -1) return;
+    const entry = rows.list[idx];
+    // Moving into the first row of a group also reveals its header
+    const prev = rows.list[idx - 1];
+    const rowTop = prev?.row.kind === "header" ? prev.top : entry.top;
+    const gridTopInScroll =
+      gridEl.getBoundingClientRect().top - scrollEl.getBoundingClientRect().top + scrollEl.scrollTop;
+    const margin = 8;
+    const top = gridTopInScroll + rowTop - margin;
+    const bottom = gridTopInScroll + entry.top + entry.height + margin;
+    if (top < scrollEl.scrollTop) scrollEl.scrollTop = Math.max(0, top);
+    else if (bottom > scrollEl.scrollTop + scrollEl.clientHeight) scrollEl.scrollTop = bottom - scrollEl.clientHeight;
+  });
+
+  const selectionAnchor = () =>
+    lastClickedIdRef.current !== null && selectedSet.has(lastClickedIdRef.current)
+      ? lastClickedIdRef.current
+      : selectedIds[selectedIds.length - 1] ?? null;
+
+  /** ←/→ one card in display order, ↑/↓ one row (group headers are skipped) */
+  const moveSelection = (dir: "left" | "right" | "up" | "down") => {
+    const anchorId = selectionAnchor();
+    const idx = displayed.findIndex((a) => a.id === anchorId);
+    if (idx === -1) {
+      if (displayed.length > 0) selectAndReveal(displayed[0].id);
+      return;
+    }
+    if (dir === "left" || dir === "right") {
+      const target = displayed[idx + (dir === "right" ? 1 : -1)];
+      if (target) selectAndReveal(target.id);
+      return;
+    }
+    const cardRows = rows.list.flatMap((r) => (r.row.kind === "cards" ? [r.row.items] : []));
+    const from = cardRows.findIndex((cards) => cards.some((a) => a.id === anchorId));
+    const cards = cardRows[from + (dir === "down" ? 1 : -1)];
+    if (!cards) return;
+    const col = cardRows[from].findIndex((a) => a.id === anchorId);
+    selectAndReveal(cards[Math.min(col, cards.length - 1)].id);
+  };
+
+  /** P / W / X: act on the selection, then select the anime after it (worked out now: the cards may jump groups) */
+  const triage = (action: (notOnList: SeasonalAnime[]) => void) => {
+    const targets = selectedItems;
+    if (targets.length === 0) return;
+    const lastIdx = displayed.findIndex((a) => a.id === targets[targets.length - 1].id);
+    const next =
+      displayed.slice(lastIdx + 1).find((a) => !selectedSet.has(a.id)) ??
+      displayed.slice(0, lastIdx).reverse().find((a) => !selectedSet.has(a.id));
+    const notOnList = targets.filter((a) => !listById.has(a.id));
+    if (notOnList.length === 0) {
+      showToast(
+        targets.length === 1 ? `"${titleOf(targets[0])}" is already on your list` : "These are already on your list",
+        "info"
+      );
+    } else {
+      action(notOnList);
+    }
+    if (next) selectAndReveal(next.id);
+    else setSelectedIds([]);
+  };
+
+  const handleKeyDown = (e: KeyboardEvent) => {
+    const target = e.target as HTMLElement | null;
+    if (
+      target &&
+      (target.tagName === "INPUT" ||
+        target.tagName === "TEXTAREA" ||
+        target.tagName === "SELECT" ||
+        target.isContentEditable)
+    ) {
+      return;
+    }
+    if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && (e.code === "KeyQ" || e.code === "KeyW")) {
+      e.preventDefault();
+      updatePrefs({ viewMode: e.code === "KeyQ" ? "grid" : "extended" });
+      return;
+    }
+    if (e.ctrlKey && !e.altKey && !e.metaKey && e.key.toLowerCase() === "a") {
+      e.preventDefault();
+      setSelectedIds(displayed.map((a) => a.id));
+      return;
+    }
+    if (e.ctrlKey || e.altKey || e.metaKey) return;
+
+    const hasSelection = selectedItems.length > 0;
+    switch (e.key) {
+      case "ArrowLeft":
+      case "ArrowRight":
+        e.preventDefault();
+        if (hasSelection) moveSelection(e.key === "ArrowRight" ? "right" : "left");
+        else setSelected((s) => shiftSeason(s, e.key === "ArrowRight" ? 1 : -1));
+        return;
+      case "ArrowUp":
+      case "ArrowDown":
+        if (!hasSelection && e.key === "ArrowUp") return;
+        e.preventDefault();
+        moveSelection(e.key === "ArrowDown" ? "down" : "up");
+        return;
+      case "Enter":
+        // A focused button keeps its own Enter
+        if (selectedItems.length === 1 && target?.tagName !== "BUTTON") {
+          e.preventDefault();
+          openAnime(selectedItems[0]);
+        }
+        return;
+      case "Escape":
+        if (selectedIds.length > 0) setSelectedIds([]);
+        return;
+    }
+    if (e.repeat || !hasSelection) return;
+    switch (e.key.toLowerCase()) {
+      case "p":
+        e.preventDefault();
+        triage((notOnList) => void addAnimeBatch(notOnList, "PLANNING"));
+        return;
+      case "w":
+        e.preventDefault();
+        triage((notOnList) => void addAnimeBatch(notOnList, "CURRENT"));
+        return;
+      case "x":
+        e.preventDefault();
+        // Undo only when everything it applies to is already hidden
+        triage((notOnList) => handleSetNotInterested(notOnList, !notOnList.every((a) => isHidden(a.id))));
+        return;
+    }
+  };
+
+  const handleKeyDownRef = useRef(handleKeyDown);
+  handleKeyDownRef.current = handleKeyDown;
+
+  useEffect(() => {
+    if (!keyboardEnabled || pickerOpen || tagFilterOpen || menu) return;
+    const onKey = (e: KeyboardEvent) => handleKeyDownRef.current(e);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [keyboardEnabled, pickerOpen, tagFilterOpen, menu]);
+
   // ---------------------------------------------------------------- season navigation
 
   const quickSeasons = useMemo(() => {
@@ -375,7 +661,13 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
     !!result && (result.season !== selected.season || result.year !== selected.year);
 
   return (
-    <div className="p-6 space-y-5 max-w-7xl mx-auto">
+    <div
+      className="p-6 space-y-5 max-w-7xl mx-auto"
+      onClick={(e) => {
+        // Clicking empty space deselects, like the watchlist
+        if (!(e.target as Element).closest("button, input, select, form, a")) clearSelection();
+      }}
+    >
       <div className="bg-bg-secondary border border-border-subtle rounded-2xl p-5 space-y-4">
         {/* Season header: arrows + picker, quick chips, refresh */}
         <div className="flex flex-wrap items-center gap-3">
@@ -522,6 +814,24 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
             <option value="status">Group: List status</option>
             <option value="none">Group: None</option>
           </select>
+
+          <div className="flex items-center bg-bg-primary p-1 rounded-xl border border-border-subtle">
+            {(
+              [
+                { id: "grid", icon: LayoutGrid, title: "Poster grid (Alt+Q)" },
+                { id: "extended", icon: Rows, title: "Extended info: synopsis, tags, prequel (Alt+W)" },
+              ] as const
+            ).map(({ id, icon: Icon, title }) => (
+              <button
+                key={id}
+                onClick={() => updatePrefs({ viewMode: id })}
+                title={title}
+                className={`p-1.5 rounded-lg transition ${prefs.viewMode === id ? "bg-accent text-white" : "text-text-muted hover:text-text-primary"}`}
+              >
+                <Icon className="w-3.5 h-3.5" />
+              </button>
+            ))}
+          </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-1.5">
@@ -546,9 +856,49 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
               </button>
             );
           })}
+
+          <span className="w-px h-4 mx-1 bg-border-subtle" />
+
+          <button
+            onClick={() => updatePrefs({ onlyNotOnList: !prefs.onlyNotOnList })}
+            className={`px-2.5 py-1 rounded-full text-[11px] font-semibold border transition ${prefs.onlyNotOnList
+              ? "bg-accent/15 text-accent border-accent/40"
+              : "bg-bg-primary text-text-muted border-border-subtle hover:text-text-secondary"
+              }`}
+          >
+            Not on my list
+          </button>
+
+          <SeasonTagFilter
+            items={items}
+            tagState={tagState}
+            activeCount={activeTags.length}
+            onCycle={cycleTag}
+            onClear={() => updatePrefs({ includeTags: [], excludeTags: [] })}
+            open={tagFilterOpen}
+            onOpenChange={setTagFilterOpen}
+          />
+
+          {activeTags.map((name) => (
+            <button
+              key={name}
+              onClick={() => removeTag(name)}
+              title="Remove this filter"
+              className={`px-2 py-1 rounded-full text-[11px] font-semibold flex items-center gap-1 transition ${includeSet.has(name)
+                ? "bg-emerald-500/20 text-emerald-400"
+                : "bg-rose-500/20 text-rose-400"
+                }`}
+            >
+              {includeSet.has(name) ? name : `Not ${name}`}
+              <X className="w-3 h-3" />
+            </button>
+          ))}
+
           {result && (
             <span className="ml-auto text-[11px] text-text-muted">
-              {visible.length} of {items.length} titles
+              {selectedItems.length > 1 && `${selectedItems.length} selected · `}
+              {visible.length - hiddenItems.length} of {items.length} titles
+              {hiddenItems.length > 0 && ` · ${hiddenItems.length} not interested`}
             </span>
           )}
         </div>
@@ -590,11 +940,23 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
                   className="absolute left-0 right-0 flex items-end pb-2"
                   style={{ top, height }}
                 >
-                  <h2 className="text-xs font-bold uppercase tracking-wider text-text-secondary flex items-center gap-2">
-                    <span className={`w-2 h-2 rounded-full ${row.dot}`} />
-                    {row.label}
-                    <span className="text-text-muted font-medium">{row.count}</span>
-                  </h2>
+                  {row.groupId === NOT_INTERESTED_GROUP ? (
+                    <button
+                      onClick={() => setShowNotInterested((v) => !v)}
+                      className="text-xs font-bold uppercase tracking-wider text-text-secondary hover:text-text-primary flex items-center gap-2 transition"
+                    >
+                      <span className={`w-2 h-2 rounded-full ${row.dot}`} />
+                      {row.label}
+                      <span className="text-text-muted font-medium">{row.count}</span>
+                      <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showNotInterested ? "rotate-180" : ""}`} />
+                    </button>
+                  ) : (
+                    <h2 className="text-xs font-bold uppercase tracking-wider text-text-secondary flex items-center gap-2">
+                      <span className={`w-2 h-2 rounded-full ${row.dot}`} />
+                      {row.label}
+                      <span className="text-text-muted font-medium">{row.count}</span>
+                    </h2>
+                  )}
                 </div>
               ) : (
                 <div
@@ -607,19 +969,39 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
                     gridTemplateColumns: `repeat(${layout.cols}, minmax(0, 1fr))`,
                   }}
                 >
-                  {row.items.map((item) => (
-                    <AnimePosterCard
-                      key={item.id}
-                      anime={item}
-                      listEntry={listById.get(item.id)}
-                      imageHeight={layout.imageHeight}
-                      onOpen={openAnime}
-                      onAdd={addAnime}
-                      onContextMenu={(anime, e) =>
-                        setMenu({ anime: anime as SeasonalAnime, x: e.clientX, y: e.clientY })
-                      }
-                    />
-                  ))}
+                  {row.items.map((item) =>
+                    prefs.viewMode === "extended" ? (
+                      <SeasonExtendedCard
+                        key={item.id}
+                        anime={item}
+                        listEntry={listById.get(item.id)}
+                        listById={listById}
+                        selected={selectedSet.has(item.id)}
+                        notInterested={isHidden(item.id)}
+                        tagState={tagState}
+                        onCycleTag={cycleTag}
+                        onClick={handleCardClick}
+                        onDoubleClick={handleCardDoubleClick}
+                        onContextMenu={handleCardContextMenu}
+                        onAdd={addAnime}
+                        onSetNotInterested={handleSetNotInterested}
+                      />
+                    ) : (
+                      <AnimePosterCard
+                        key={item.id}
+                        anime={item}
+                        listEntry={listById.get(item.id)}
+                        imageHeight={layout.imageHeight}
+                        selected={selectedSet.has(item.id)}
+                        dimmed={isHidden(item.id)}
+                        onOpen={openAnime}
+                        onAdd={addAnime}
+                        onClick={handleCardClick}
+                        onDoubleClick={handleCardDoubleClick}
+                        onContextMenu={handleCardContextMenu}
+                      />
+                    )
+                  )}
                 </div>
               )
             )}
@@ -635,6 +1017,11 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
           onClose={closeMenu}
           onOpen={openAnime}
           onAdd={addAnime}
+          selection={selectedSet.has(menu.anime.id) ? selectedItems : undefined}
+          listById={listById}
+          onClearSelection={clearSelection}
+          isNotInterested={isHidden}
+          onSetNotInterested={handleSetNotInterested}
         />
       )}
     </div>

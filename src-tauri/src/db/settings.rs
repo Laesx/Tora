@@ -17,9 +17,11 @@ pub const TORRENT_PRIORITY_KEY: &str = "torrent_priority";
 pub const TORRENT_FANSUBS_KEY: &str = "torrent_fansubs";
 pub const TORRENT_BOARD_OPTIONS_KEY: &str = "torrent_board_options";
 pub const TORRENT_SEARCH_FEEDS_KEY: &str = "torrent_search_feeds";
+/// AniList ids hidden from the Seasons view ("Not interested"): a JSON array, local only.
+pub const SEASONS_NOT_INTERESTED_KEY: &str = "seasons_not_interested";
 
 /// Every key a backup snapshots (and a restore writes back).
-const BACKED_UP_KEYS: [&str; 7] = [
+const BACKED_UP_KEYS: [&str; 8] = [
     MAIN_SETTINGS_KEY,
     TORRENT_FEEDS_KEY,
     TORRENT_FILTERS_KEY,
@@ -27,6 +29,7 @@ const BACKED_UP_KEYS: [&str; 7] = [
     TORRENT_FANSUBS_KEY,
     TORRENT_BOARD_OPTIONS_KEY,
     TORRENT_SEARCH_FEEDS_KEY,
+    SEASONS_NOT_INTERESTED_KEY,
 ];
 /// Account fields a restore never takes from the backup: an old token may be expired or belong to an
 /// account other than the list owner.
@@ -397,6 +400,14 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_includes_not_interested() {
+        let db = Database::open_in_memory().unwrap();
+        db.set_not_interested(&[1], true).unwrap();
+        let snapshot = db.current_snapshot().unwrap();
+        assert!(snapshot.values.contains_key(SEASONS_NOT_INTERESTED_KEY));
+    }
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(

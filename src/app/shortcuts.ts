@@ -67,8 +67,19 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
   {
     title: "Seasons",
     items: [
-      { keys: ["←", "→"], label: "Previous / next season" },
+      { keys: ["←", "→"], label: "Previous / next anime; with nothing selected, previous / next season" },
+      { keys: ["↑", "↓"], label: "Row above / below (↓ with nothing selected: the first anime)" },
+      { keys: ["Enter"], label: "Open the selected anime" },
       { keys: ["Enter"], label: "In the filter box: search AniList for the text" },
+      { keys: ["Esc"], label: "Deselect" },
+      { keys: ["Ctrl+A"], label: "Select every anime in the view" },
+      { keys: ["Ctrl+Click"], label: "Add to / remove from the selection" },
+      { keys: ["Shift+Click"], label: "Select a range" },
+      { keys: ["Double-click"], label: "Open details" },
+      { keys: ["Right-click"], label: "Quick menu (applies to the whole selection)" },
+      { keys: ["Alt+Q", "Alt+W"], label: "Poster grid / extended info view" },
+      { keys: ["P", "W"], label: "Add the selection to Planning / Watching, then go to the next anime" },
+      { keys: ["X"], label: "Not interested (or undo), then go to the next anime" },
     ],
   },
 ];

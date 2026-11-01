@@ -7,13 +7,17 @@ import {
   Clock,
   Copy,
   ExternalLink,
+  Eye,
+  EyeOff,
   Info,
+  Play,
   Plus,
   Trash2,
   Tv,
 } from "lucide-react";
 import { AnimeEntry } from "@/lib/types";
 import { toraApi } from "@/lib/api";
+import { openExternal } from "@/lib/anime";
 import { LIST_STATUSES } from "@/lib/status";
 import { STATUS_INFO } from "@/lib/status";
 import { useAnimeTitle } from "@/contexts/titles";
@@ -30,6 +34,14 @@ interface SeasonAnimeMenuProps {
   onClose: () => void;
   onOpen: (anime: AnimeEntry) => void;
   onAdd: (anime: AnimeEntry, status: "CURRENT" | "PLANNING") => void;
+  /** Seasons: with 2+ anime here the menu acts on all of them */
+  selection?: AnimeEntry[];
+  /** Seasons: list entries by id, to split a selection into list / not on list */
+  listById?: Map<number, AnimeEntry>;
+  onClearSelection?: () => void;
+  /** Seasons: "Not interested" rows */
+  isNotInterested?: (id: number) => boolean;
+  onSetNotInterested?: (targets: AnimeEntry[], hidden: boolean) => void;
 }
 
 const itemClass =
@@ -43,8 +55,13 @@ export const SeasonAnimeMenu: React.FC<SeasonAnimeMenuProps> = ({
   onClose,
   onOpen,
   onAdd,
+  selection,
+  listById,
+  onClearSelection,
+  isNotInterested,
+  onSetNotInterested,
 }) => {
-  const { changeStatus, deleteAnime } = useAnimeActions();
+  const { addAnimeBatch, batchDelete, batchUpdate, changeStatus, deleteAnime } = useAnimeActions();
   const showToast = useToast();
   const titleOf = useAnimeTitle();
   const ref = useRef<HTMLDivElement | null>(null);
@@ -122,6 +139,116 @@ export const SeasonAnimeMenu: React.FC<SeasonAnimeMenuProps> = ({
   };
 
   const status = listEntry ? STATUS_INFO[listEntry.user_status] : null;
+  const hidden = isNotInterested?.(anime.id) ?? false;
+
+  if (selection && selection.length > 1) {
+    const inList = selection.flatMap((a) => listById?.get(a.id) ?? []);
+    const notInList = selection.filter((a) => !listById?.has(a.id));
+    // Undo is offered only when there is nothing left to hide
+    const allHidden = notInList.length > 0 && notInList.every((a) => isNotInterested?.(a.id));
+    const runBatch = (action: () => void) => () => {
+      onClose();
+      onClearSelection?.();
+      action();
+    };
+
+    return createPortal(
+      <div
+        ref={ref}
+        style={{ position: "fixed", top: position.top, left: position.left, zIndex: 100 }}
+        className="w-60 rounded-xl bg-bg-secondary/95 backdrop-blur-md border border-border-subtle shadow-2xl py-1.5 text-xs select-none max-h-[calc(100vh-24px)] overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+        }}
+      >
+        <div className="px-3 py-1.5 border-b border-border-subtle">
+          <div className="font-bold text-text-primary">{selection.length} anime selected</div>
+          <div className="text-[10px] text-text-muted font-mono mt-0.5">
+            {inList.length} on list • {notInList.length} not on list
+          </div>
+        </div>
+
+        <div className="py-1">
+          {notInList.length > 0 && (
+            <>
+              <button onClick={runBatch(() => addAnimeBatch(notInList, "CURRENT"))} className={itemClass}>
+                <span className="flex items-center gap-2">
+                  <Plus className="w-3.5 h-3.5 text-accent" />
+                  <span>Add {notInList.length} to Watching</span>
+                </span>
+              </button>
+              <button onClick={runBatch(() => addAnimeBatch(notInList, "PLANNING"))} className={itemClass}>
+                <span className="flex items-center gap-2">
+                  <Clock className="w-3.5 h-3.5 text-sky-400" />
+                  <span>Add {notInList.length} to Planning</span>
+                </span>
+              </button>
+              {onSetNotInterested && (
+                <button onClick={runBatch(() => onSetNotInterested(notInList, !allHidden))} className={itemClass}>
+                  <span className="flex items-center gap-2">
+                    {allHidden ? (
+                      <Eye className="w-3.5 h-3.5 text-text-muted" />
+                    ) : (
+                      <EyeOff className="w-3.5 h-3.5 text-text-muted" />
+                    )}
+                    <span>{allHidden ? `Undo not interested (${notInList.length})` : `Not interested (${notInList.length})`}</span>
+                  </span>
+                </button>
+              )}
+            </>
+          )}
+
+          {inList.length > 0 && (
+            <>
+              <button onClick={() => setStatusOpen((o) => !o)} className={itemClass}>
+                <span className="flex items-center gap-2">
+                  <Tv className="w-3.5 h-3.5 text-accent" />
+                  <span>Move {inList.length} to List...</span>
+                </span>
+                {statusOpen ? (
+                  <ChevronDown className="w-3.5 h-3.5 text-text-muted" />
+                ) : (
+                  <ChevronRight className="w-3.5 h-3.5 text-text-muted" />
+                )}
+              </button>
+              {statusOpen && (
+                <div className="mx-2 my-1 p-1.5 rounded-lg bg-bg-primary border border-border-subtle grid grid-cols-2 gap-1">
+                  {LIST_STATUSES.map((st) => {
+                    const Icon = st.icon;
+                    return (
+                      <button
+                        key={st.id}
+                        onClick={runBatch(() =>
+                          batchUpdate(
+                            { anime_ids: inList.map((a) => a.id), user_status: st.id },
+                            `Moved ${inList.length} anime to ${st.label}`
+                          )
+                        )}
+                        className="flex items-center gap-1.5 px-2 py-1 rounded text-[11px] text-left text-text-secondary hover:bg-bg-secondary hover:text-text-primary transition cursor-pointer"
+                      >
+                        <Icon className={`w-3 h-3 shrink-0 ${st.color}`} />
+                        <span className="truncate">{st.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              <button
+                onClick={runBatch(() => batchDelete(inList))}
+                className="w-full flex items-center gap-2 px-3 py-1.5 text-left text-xs text-red-400 hover:bg-red-500/15 transition cursor-pointer"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Remove {inList.length} from List</span>
+              </button>
+            </>
+          )}
+        </div>
+      </div>,
+      document.body
+    );
+  }
 
   return createPortal(
     <div
@@ -208,6 +335,18 @@ export const SeasonAnimeMenu: React.FC<SeasonAnimeMenuProps> = ({
                 <span>Add to Planning</span>
               </span>
             </button>
+            {onSetNotInterested && (
+              <button onClick={run(() => onSetNotInterested([anime], !hidden))} className={itemClass}>
+                <span className="flex items-center gap-2">
+                  {hidden ? (
+                    <Eye className="w-3.5 h-3.5 text-text-muted" />
+                  ) : (
+                    <EyeOff className="w-3.5 h-3.5 text-text-muted" />
+                  )}
+                  <span>{hidden ? "Undo not interested" : "Not interested"}</span>
+                </span>
+              </button>
+            )}
           </>
         )}
       </div>
@@ -229,6 +368,18 @@ export const SeasonAnimeMenu: React.FC<SeasonAnimeMenuProps> = ({
             <span>Open on AniList</span>
           </span>
         </button>
+
+        {onSetNotInterested && anime.trailer_url && (
+          <button
+            onClick={run(() => void openExternal(anime.trailer_url!, showToast))}
+            className={itemClass}
+          >
+            <span className="flex items-center gap-2">
+              <Play className="w-3.5 h-3.5 text-text-muted" />
+              <span>Watch Trailer</span>
+            </span>
+          </button>
+        )}
 
         <button onClick={handleCopyTitle} className={itemClass}>
           <span className="flex items-center gap-2">

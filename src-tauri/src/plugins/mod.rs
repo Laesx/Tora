@@ -179,8 +179,17 @@ pub struct MediaRanking {
     pub context: String,
 }
 
-/// Non-essential metadata shown by the Now Playing hero. Written only by season fetches (or one
-/// fetch for media that have none yet); never refreshed by playback.
+/// The anime a media directly continues (AniList `PREQUEL` relation), for the Seasons extended view.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MediaPrequel {
+    pub id: i64,
+    pub title_romaji: String,
+    pub title_english: Option<String>,
+    pub title_native: Option<String>,
+}
+
+/// Non-essential metadata shown by the Now Playing hero and the Seasons view. Written only by season
+/// fetches (or one fetch for media that have none yet); never refreshed by playback.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct MediaMetadata {
     pub mean_score: Option<u32>,
@@ -188,6 +197,9 @@ pub struct MediaMetadata {
     pub tags: Vec<MediaTag>,
     pub studios: Vec<StudioRef>,
     pub rankings: Vec<MediaRanking>,
+    /// `None` only in payloads stored before this field existed (`fetch_season` refreshes those once)
+    #[serde(default)]
+    pub prequels: Option<Vec<MediaPrequel>>,
 }
 
 /// One media of a seasonal listing (or of `media_metadata`): full metadata plus the fields only the

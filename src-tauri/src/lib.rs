@@ -146,6 +146,26 @@ async fn get_score_format(state: State<'_, AppState>) -> Result<String, String> 
 }
 
 #[tauri::command]
+async fn get_not_interested(state: State<'_, AppState>) -> Result<Vec<i64>, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || db.not_interested_ids())
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn set_not_interested(
+    state: State<'_, AppState>,
+    anime_ids: Vec<i64>,
+    hidden: bool,
+) -> Result<(), String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || db.set_not_interested(&anime_ids, hidden))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 async fn set_anime_custom_lists(
     state: State<'_, AppState>,
     change: CustomListChange,
@@ -1982,6 +2002,8 @@ pub fn run() {
             batch_update_anime_entries,
             get_custom_lists,
             get_score_format,
+            get_not_interested,
+            set_not_interested,
             set_anime_custom_lists,
             create_custom_list,
             delete_custom_list,

@@ -543,6 +543,7 @@ export const App: React.FC = () => {
     batchDelete: list.batchDelete,
     deleteAnime: list.deleteAnime,
     addAnime: list.addAnime,
+    addAnimeBatch: list.addAnimeBatch,
     searchTorrents: (req) => {
       remember();
       setSelectedAnime(null);
@@ -562,6 +563,7 @@ export const App: React.FC = () => {
       batchDelete: (targets) => latest().batchDelete(targets),
       deleteAnime: (a) => latest().deleteAnime(a),
       addAnime: (entry, status) => latest().addAnime(entry, status),
+      addAnimeBatch: (entries, status) => latest().addAnimeBatch(entries, status),
       searchTorrents: (req) => latest().searchTorrents(req),
       openSeason: (season, year) => latest().openSeason(season, year),
     };
@@ -733,7 +735,15 @@ export const App: React.FC = () => {
                             <SeasonsView
                               animeList={animeList}
                               scrollContainerRef={mainScrollRef}
-                              keyboardEnabled={!selectedAnime && !cmdOpen && !signOutModalOpen && !shortcutsOpen && !settingsOpen}
+                              keyboardEnabled={
+                                !selectedAnime &&
+                                !cmdOpen &&
+                                !signOutModalOpen &&
+                                !shortcutsOpen &&
+                                !settingsOpen &&
+                                !updater.promptOpen &&
+                                !updater.changelogOpen
+                              }
                               onGlobalSearch={openGlobalSearch}
                               seasonRequest={seasonRequest}
                               onSeasonRequestHandled={() => setSeasonRequest(null)}

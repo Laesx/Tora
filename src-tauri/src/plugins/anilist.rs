@@ -1,7 +1,7 @@
 use crate::db::AnimeEntry;
 use crate::plugins::{
     ActivityMedia, ActivityPage, ActivityPageQuery, AiringScheduleItem, AiringSchedulePage,
-    BoxFuture, MediaMetadata, MediaRanking, MediaTag, RemoteListActivity, ACTIVITY_PAGE_SIZE,
+    BoxFuture, MediaMetadata, MediaPrequel, MediaRanking, MediaTag, RemoteListActivity, ACTIVITY_PAGE_SIZE,
     RemoteEntryState, RemoteListMembership, RemoteListSnapshot, SeasonPage, SeasonalAnime, StudioRef,
     TrackerEntryUpdate, TrackerError, TrackerPlugin, TrackerPluginDescriptor, TrackerUserProfile,
     MEDIA_DETAILS_CHUNK,
@@ -683,6 +683,20 @@ const SEASON_EXTRA_FIELDS: &str = r#"
             }
         }
     }
+    relations {
+        edges {
+            relationType(version: 2)
+            node {
+                id
+                type
+                title {
+                    romaji
+                    english
+                    native
+                }
+            }
+        }
+    }
 "#;
 
 fn opt_u32(v: Option<&Value>) -> Option<u32> {
@@ -751,6 +765,30 @@ fn parse_seasonal_media(m: &Value) -> Option<SeasonalAnime> {
                 .collect()
         })
         .unwrap_or_default();
+    let text = |v: Option<&Value>| v.and_then(|v| v.as_str()).map(|s| s.to_string());
+    let prequels = m
+        .get("relations")
+        .and_then(|r| r.get("edges"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter(|e| e.get("relationType").and_then(|v| v.as_str()) == Some("PREQUEL"))
+                .filter_map(|e| {
+                    let node = e.get("node")?;
+                    if node.get("type").and_then(|v| v.as_str()) != Some("ANIME") {
+                        return None;
+                    }
+                    let title = node.get("title")?;
+                    Some(MediaPrequel {
+                        id: node.get("id")?.as_i64()?,
+                        title_romaji: title.get("romaji")?.as_str()?.to_string(),
+                        title_english: text(title.get("english")),
+                        title_native: text(title.get("native")),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     Some(SeasonalAnime {
         entry,
         popularity: opt_u32(m.get("popularity")),
@@ -760,6 +798,7 @@ fn parse_seasonal_media(m: &Value) -> Option<SeasonalAnime> {
             tags,
             studios,
             rankings,
+            prequels: Some(prequels),
         },
     })
 }
@@ -1834,9 +1873,23 @@ mod tests {
             "studioEdges": { "edges": [
                 { "isMain": true, "node": { "id": 11, "name": "Studio A", "isAnimationStudio": true } },
                 { "isMain": false, "node": { "id": 12, "name": "Producer B", "isAnimationStudio": false } }
+            ] },
+            "relations": { "edges": [
+                { "relationType": "PREQUEL", "node": { "id": 4, "type": "ANIME", "title": { "romaji": "Show S1", "english": "Show One", "native": null } } },
+                { "relationType": "PREQUEL", "node": { "id": 3, "type": "MANGA", "title": { "romaji": "Show Manga" } } },
+                { "relationType": "SEQUEL", "node": { "id": 6, "type": "ANIME", "title": { "romaji": "Show S3" } } }
             ] }
         });
         let item = parse_seasonal_media(&media).unwrap();
+        assert_eq!(
+            item.metadata.prequels,
+            Some(vec![MediaPrequel {
+                id: 4,
+                title_romaji: "Show S1".into(),
+                title_english: Some("Show One".into()),
+                title_native: None,
+            }])
+        );
         assert_eq!(item.entry.start_date.as_deref(), Some("2026-07-04"));
         assert_eq!(item.entry.end_date.as_deref(), Some("2026-09"));
         assert_eq!(item.entry.studios, vec!["Studio A".to_string()]);

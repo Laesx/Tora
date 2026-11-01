@@ -1533,6 +1533,20 @@ fn run_data_migrations(conn: &mut Connection) -> Result<(), String> {
     tx.commit().map_err(|e| e.to_string())
 }
 
+fn read_not_interested(conn: &Connection) -> Result<Vec<i64>, String> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT value_json FROM app_settings WHERE key = ?1",
+            params![settings::SEASONS_NOT_INTERESTED_KEY],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    Ok(raw
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default())
+}
+
 fn put_media_metadata_tx(conn: &Connection, fetched_at: i64, item: &SeasonalAnime) -> Result<(), String> {
     let json = serde_json::to_string(item).map_err(|e| e.to_string())?;
     conn.prepare_cached(
@@ -3265,6 +3279,32 @@ impl Database {
         Ok(true)
     }
 
+    /// AniList ids the user hid from the Seasons view (unreadable JSON reads as none).
+    pub fn not_interested_ids(&self) -> Result<Vec<i64>, String> {
+        let conn = self.reader()?;
+        read_not_interested(&conn)
+    }
+
+    /// Hides these ids from the Seasons view, or brings them back. Local only, never pushed.
+    pub fn set_not_interested(&self, ids: &[i64], hidden: bool) -> Result<(), String> {
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let mut stored = read_not_interested(&tx)?;
+        stored.retain(|id| !ids.contains(id));
+        if hidden {
+            stored.extend_from_slice(ids);
+            stored.sort_unstable();
+            stored.dedup();
+        }
+        let json = serde_json::to_string(&stored).map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT OR REPLACE INTO app_settings (key, value_json) VALUES (?1, ?2)",
+            params![settings::SEASONS_NOT_INTERESTED_KEY, json],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())
+    }
+
     pub fn set_list_owner(&self, user_id: i64) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
@@ -3313,6 +3353,12 @@ impl Database {
             // The new account's format arrives with its first pull
             tx.execute("DELETE FROM app_settings WHERE key = ?1", params![SCORE_FORMAT_KEY])
                 .map_err(|e| e.to_string())?;
+            // Choices about what to watch belong to the person, like the list
+            tx.execute(
+                "DELETE FROM app_settings WHERE key = ?1",
+                params![settings::SEASONS_NOT_INTERESTED_KEY],
+            )
+            .map_err(|e| e.to_string())?;
             tx.commit().map_err(|e| e.to_string())?;
             discarded as usize
         };
@@ -4946,6 +4992,20 @@ mod tests {
         assert_eq!(db.get_custom_lists().unwrap().members.len(), 1);
         db.reset_for_account_switch(7).unwrap();
         assert_eq!(db.get_custom_lists().unwrap(), CustomListsState::default());
+    }
+
+    #[test]
+    fn not_interested_set_unset_and_account_switch() {
+        let db = Database::open_in_memory().expect("db");
+        assert!(db.not_interested_ids().unwrap().is_empty());
+        db.set_not_interested(&[5, 3], true).unwrap();
+        db.set_not_interested(&[3, 9], true).unwrap();
+        assert_eq!(db.not_interested_ids().unwrap(), vec![3, 5, 9]);
+        db.set_not_interested(&[5, 42], false).unwrap();
+        assert_eq!(db.not_interested_ids().unwrap(), vec![3, 9]);
+
+        db.reset_for_account_switch(7).unwrap();
+        assert!(db.not_interested_ids().unwrap().is_empty());
     }
 
     #[test]

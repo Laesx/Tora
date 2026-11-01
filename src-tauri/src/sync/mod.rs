@@ -1696,13 +1696,16 @@ impl TrackerSyncService {
                 .blocking(move |db| db.get_season_cache(&key, year))
                 .await?
             {
+                // Stored before prequels existed: one background refresh, even for a past season
+                let outdated = items.iter().any(|m| m.metadata.prequels.is_none());
+                let stale = outdated || season_cache_is_stale(past, fetched_at, now);
                 return Ok(SeasonResult {
                     season,
                     year,
                     fetched_at,
                     items,
                     from_cache: true,
-                    stale: season_cache_is_stale(past, fetched_at, now),
+                    stale,
                 });
             }
         }
@@ -2347,7 +2350,10 @@ mod tests {
                     .map(|e| SeasonalAnime {
                         entry: e.clone(),
                         popularity: Some(1000 - e.id as u32),
-                        metadata: Default::default(),
+                        metadata: crate::plugins::MediaMetadata {
+                            prequels: Some(vec![]),
+                            ..Default::default()
+                        },
                     })
                     .collect();
                 Ok(crate::plugins::SeasonPage {
@@ -2579,6 +2585,27 @@ mod tests {
         );
 
         assert!(svc.fetch_season("AUTUMN", 2025, false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn season_cached_without_prequels_refreshes_once() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let mock = Arc::new(MockTracker::default());
+        *mock.season_media.lock().unwrap() = vec![test_entry(1, "Show")];
+        let (svc, _events) = service(db.clone(), mock.clone());
+
+        // A payload written before the field existed reads as `None`, past season or not
+        let old = SeasonalAnime {
+            entry: test_entry(1, "Show"),
+            popularity: Some(1),
+            metadata: Default::default(),
+        };
+        db.put_season_cache("SUMMER", 2025, 1_000, &[old]).unwrap();
+        assert!(svc.fetch_season("SUMMER", 2025, false).await.unwrap().stale);
+
+        // The refresh the frontend then runs stores it, and it isn't stale again
+        svc.fetch_season("SUMMER", 2025, true).await.unwrap();
+        assert!(!svc.fetch_season("SUMMER", 2025, false).await.unwrap().stale);
     }
 
     #[test]

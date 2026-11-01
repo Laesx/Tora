@@ -93,6 +93,14 @@ export interface MediaRanking {
   context: string;
 }
 
+/** The anime a media directly continues (AniList `PREQUEL` relation). */
+export interface MediaPrequel {
+  id: number;
+  title_romaji: string;
+  title_english: string | null;
+  title_native: string | null;
+}
+
 /** Non-essential metadata; written by season fetches, fetched once for media without any. */
 export interface MediaMetadata {
   mean_score: number | null;
@@ -100,6 +108,8 @@ export interface MediaMetadata {
   tags: MediaTag[];
   studios: StudioRef[];
   rankings: MediaRanking[];
+  /** `null` only on media stored before this field existed (the season refreshes itself once) */
+  prequels: MediaPrequel[] | null;
 }
 
 /** One anime of a seasonal listing / of the media metadata store (never a list entry by itself). */

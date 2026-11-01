@@ -33,6 +33,12 @@ export function altTitles(a: TitledMedia, lang: TitleLanguage): string[] {
   return out;
 }
 
+/** The Romaji / English counterparts of the displayed title (the native one only when it isn't shown here). */
+export function secondaryTitles(a: TitledMedia, lang: TitleLanguage): string[] {
+  const native = a.title_native?.trim();
+  return altTitles(a, lang).filter((t) => t !== native);
+}
+
 export const TitleLanguageContext = createContext<TitleLanguage>("romaji");
 
 // Mirror of the provided language for plain (non-React) helpers that build toasts.

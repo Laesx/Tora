@@ -1,7 +1,7 @@
 # AGENTS.md — Tora (虎) Developer & AI Agent Guide
 
 ## Project Overview
-**Tora (虎)** is a fast, modern desktop anime library manager and episode tracker inspired by **Taiga**, built with **Tauri v2** (Rust backend + native C++23/20 FFI bindings + React 19 / TypeScript / Tailwind CSS v4 frontend).
+**Tora (虎)** is a fast, modern desktop anime library manager and episode tracker inspired by **Taiga**, built with **Tauri v2** (Rust backend + native C++23/20 FFI bindings + React 18 / TypeScript / Tailwind CSS v3 frontend).
 
 Core capabilities:
 - **Real-time Media Player Detection (`erengy/anisthesia`)**: Native Win32 window, process, and UI Automation inspection via direct C++20 FFI bindings with active playback session tracking, already-seen episode countdown suppression, and automatic scrobbling.
@@ -17,7 +17,7 @@ Core capabilities:
 
 ## Tech Stack & Prerequisites
 - **OS / Toolchain**: Windows 10/11 with **MSVC Build Tools (Visual Studio 2022)** supporting `/std:c++latest` (C++23) and `/std:c++20`.
-- **Frontend**: Node.js + `pnpm`, React 19, TypeScript, Vite 6, Tailwind CSS v4, Lucide icons.
+- **Frontend**: Node.js + `pnpm`, React 18, TypeScript, Vite 6, Tailwind CSS v3, Lucide icons.
 - **Backend**: Rust (Edition 2021), Tauri v2, `rusqlite` (`bundled` SQLite with WAL mode), `reqwest`, `tokio`, `rayon`, `cc` (for C++ FFI compilation), Win32 API (`kernel32` IOCP / directory change notifications, `oleacc.lib`, `uiautomationcore.lib`).
 
 ---
@@ -54,8 +54,8 @@ cargo check --manifest-path src-tauri/Cargo.toml
 
 ```text
 Tora/
-├── src/                                  # React 19 + TypeScript Frontend (import with the `@/` alias = `src/`; same-folder files with `./`)
-│   ├── main.tsx                          # React 19 entrypoint & root provider
+├── src/                                  # React 18 + TypeScript Frontend (import with the `@/` alias = `src/`; same-folder files with `./`)
+│   ├── main.tsx                          # React 18 entrypoint & root provider
 │   ├── App.tsx                           # Wiring only: app state hooks, context providers, tab switch, drawer / palette / modals
 │   ├── app/                              # App shell and app-wide state
 │   │   ├── nav.ts                        # `NavTab`, `NAV_ITEMS` (the 8 tabs: sidebar rows, Ctrl+1–8, palette "Go to"), `SETTINGS_SHORTCUT_DIGIT` (Settings is a modal, not a tab)
@@ -92,6 +92,7 @@ Tora/
 │   │   └── titles.ts                     # Display title language (`useAnimeTitle`, `altTitles`, `displayTitle` for plain helpers)
 │   ├── hooks/                            # Generic hooks
 │   │   ├── virtual.ts                    # `useScrollViewport` (list width / top / scroll / viewport height) + `visibleRange` (binary search)
+│   │   ├── useClickSelection.ts          # Click / Ctrl / Shift selection over a list (watchlist, Seasons)
 │   │   ├── useNow.ts                     # Unix-seconds tick for relative labels ("3 days ago")
 │   │   └── usePrefs.ts                   # Per-device view prefs in localStorage (guarded, laid over defaults)
 │   ├── lib/                              # Plain helpers, no React state
@@ -138,7 +139,11 @@ Tora/
 │   │   │   ├── NowPlayingView.tsx        # Now Playing tab: hero while playing, dashboard when idle
 │   │   │   ├── NowPlayingHero.tsx        # Playing anime hero (cover → AniList, metadata, studios/genres/tags links, episodes, link prompt)
 │   │   │   └── NowPlayingDashboard.tsx   # Idle: watch stats, continue watching (next ep on disk), recently started/finished airing
-│   │   ├── seasons/SeasonsView.tsx       # Cached seasonal browser (chips, ‹ ›, picker, sort/group/format filters, virtualized grid)
+│   │   ├── seasons/
+│   │   │   ├── SeasonsView.tsx           # Cached seasonal browser (chips, ‹ ›, picker, sort/group/format filters, selection + keyboard triage, "Not interested" group, virtualized grid / extended rows)
+│   │   │   ├── SeasonExtendedCard.tsx    # Extended view card: both titles, facts, prequel + list status, synopsis, genre / tag chips, trailer, actions
+│   │   │   ├── SeasonTagFilter.tsx       # "Genres & tags" popover (show only / hide / off)
+│   │   │   └── tagFilters.ts             # Relevant tags, include / exclude matching, the season's genre / tag options
 │   │   ├── schedule/
 │   │   │   ├── ScheduleView.tsx          # Weekly airing timetable (columns / agenda layouts, countdowns, my list / all anime, format/country/status filters, inferred breaks, "next episode ready" play, right-click add)
 │   │   │   └── schedule.ts               # Airing schedule helpers (Mon–Sun local weeks, bounds, day/time labels, country labels, `detectBreaks`)
@@ -169,7 +174,7 @@ Tora/
 │   ├── assets/
 │   │   └── tora-mark.svg                 # Brand mark (sidebar); same art as the app icon (`design/icons/tora-mark.svg` → `src-tauri/icons`)
 │   └── styles/
-│       └── index.css                     # Tailwind CSS v4 stylesheets, custom theme variables & scrollbars
+│       └── index.css                     # Tailwind CSS v3 stylesheets, custom theme variables & scrollbars
 ├── scripts/
 │   ├── mem-snapshot.ps1                  # Per-process memory / CPU of a running Tora (core + each WebView2 process), `-Watch`, `-Csv`, `-PassThru`
 │   └── bench/
@@ -352,6 +357,7 @@ When a filename or media player window title is parsed (`parse_filename` in `src
 - **Regressions**: `scripts/bench/mem-compare.ps1 [-Ref <commit/tag>] [-Rounds N]` builds release exes with the `ToraBench` identifier (`--config`, `--no-bundle`, into `src-tauri\target\bench`; ref exes cached by commit hash, built in a temporary worktree), then `mem-tour.ps1` runs each on a fresh copy of `%APPDATA%\ToraBenchPristine` (`bench-data.py`: signed out, no torrent auto-download / refresh, no Discord, no update checks) with a cold WebView2 profile, drives Ctrl+1–8 + scrolling over the DevTools protocol and records each phase. Bench builds never read or write `%APPDATA%\Tora`.
 - Renderer grew → DevTools on a release build: set `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222` before starting it, open `edge://inspect` (Memory heap snapshots, Performance monitor). GPU grew → composited layers (DevTools Layers, Rendering → Layer borders). `tora.exe` grew → VMMap, `wpr -start Heap` / WPA, `samply record` for CPU.
 - While the window is minimized WebView2 runs at `COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW` (`memory::set_low_memory_target` from `on_window_event`: minimizing is a 0×0 resize), back to normal on restore.
+- DO NOT RUN THIS WHEN BUILDING FEATURES. Only do it when the user specifically mentions a regression or when he specifically says he wants to check performance.
 
 ### 8. Tracker Sync Service (`src-tauri/src/sync/mod.rs`)
 - **Single entry point**: Every user-state mutation (`update_anime_entry`, `batch_update_anime_entries`, `add_or_upsert_anime`, `delete_anime_entry` / `batch_delete_anime_entries`, scrobbling) and every pull (startup, manual "Sync from AniList" button, post-OAuth) goes through `TrackerSyncService`. **Never** call `TrackerPlugin::save_list_entry` / `delete_list_entry` / `fetch_user_list` or write user fields directly from commands.
@@ -362,7 +368,8 @@ When a filename or media player window title is parsed (`parse_filename` in `src
 - **Pulls must stay diff-only and must never rematch the library**: `merge_remote_list` writes nothing for unchanged entries, uses targeted UPDATEs for changed ones, rewrites `normalized_titles_json` only when titles/synonyms change, and only touches `local_episodes.watched` for entries whose progress changed. Heavy metadata (`fetch_media_details`) is fetched only for new entries. Episode matching after a pull is limited to `rematch_ids` (new or retitled entries) via `match_unmatched_episodes_for_ids` in a background task that emits `library-changed`. **Never** call `rematch_all_local_episodes()` from a pull.
 - **Invariants**: every `anime_entries` row has an `anilist_id`; there is no seed data. A signed-in AniList OAuth token is required for any push/pull.
 - **Account ownership**: the local list belongs to one AniList account, `Database::list_owner()` (an `app_settings` key kept out of `AppSettings` so frontend saves can't overwrite it). Edits and deletes are **always** queued (`sync_pending` / tombstones), signed in or not, and only sent while signed in, so signed-out changes reach AniList on the owner's next sign-in. Every sign-in goes through `TrackerSyncService::sign_in` (OAuth callback and `verify_tracker_account`): same owner keeps the list; a **different** account runs `Database::reset_for_account_switch` (wipes entries, queue, watch history and title aliases; keeps library folders, indexed files, settings, torrent rules and public caches), emits `tracker-account-switched` and imports fresh. `sign_out` flushes the queue before clearing the token and keeps the owner. Every pull resolves the token's account first (`TrackerPlugin::viewer_id`) and stops before flushing or merging if it differs from the owner or the stored user.
-- **Seasons** (`TrackerSyncService::fetch_season`): public data, no token. All pages of `Page.media(season, seasonYear)` (50/page, `hasNextPage`) go through the shared rate limiter. Each media (`SeasonalAnime`: full metadata + popularity + `MediaMetadata` tags/studios with ids/rankings/mean score/favourites) is upserted into `media_metadata` (one row per AniList id); `seasonal_cache` stores only the season's ordered id list. Browsing never writes `anime_entries`; list status in the Seasons view comes from the local list by id. Cached past seasons are only refetched on demand; current/upcoming ones are flagged `stale` after 24h and refreshed in the background by the frontend.
+- **Seasons** (`TrackerSyncService::fetch_season`): public data, no token. All pages of `Page.media(season, seasonYear)` (50/page, `hasNextPage`) go through the shared rate limiter. Each media (`SeasonalAnime`: full metadata + popularity + `MediaMetadata` tags/studios with ids/rankings/mean score/favourites) is upserted into `media_metadata` (one row per AniList id); `seasonal_cache` stores only the season's ordered id list. Browsing never writes `anime_entries`; list status in the Seasons view comes from the local list by id. Cached past seasons are only refetched on demand; current/upcoming ones are flagged `stale` after 24h and refreshed in the background by the frontend. `MediaMetadata.prequels` (direct anime `PREQUEL` relations, for the extended view) is `None` only in payloads stored before the field existed: such a season is flagged `stale` once, past or not, so opening it upgrades it.
+- **Seasons pruning** (frontend, `features/seasons/`): selection is local to `SeasonsView` (`useClickSelection`, cleared on season change) because cards are usually not list entries; a click selects and a double-click opens, while Search and Schedule cards still open on one click. ← / → move the selection, or switch seasons with nothing selected. P / W only add anime not on the list, so a key can't change an existing status. "Not interested" (`Database::not_interested_ids` / `set_not_interested`) is the `seasons_not_interested` `app_settings` key: local only, never pushed, backed up, cleared by `reset_for_account_switch`; an anime on the list never counts as hidden. Filters and the view mode are per-device prefs (`tora.seasons.prefs`). Extended cards have a fixed height (`EXTENDED_CARD_HEIGHT`) and the virtualization rules above apply.
 - **Airing schedule** (`TrackerSyncService::fetch_airing_schedule`): public data, no token. All pages of `Page.airingSchedules(airingAt_greater, airingAt_lesser)` for one `[from, to)` range (a local Mon–Sun week computed by the frontend, ≤ 8 days) go through the shared rate limiter; media carry only the light `MEDIA_LIST_FRAGMENT` fields (adult media dropped) plus the item's `country` (`countryOfOrigin`). Opening or adding a non-list anime from the schedule first swaps the light media for `media_metadata` (`getMediaMetadata`). "No episode this week" breaks are inferred in the frontend (`detectBreaks`, from list entries' `next_airing_at`) and never stored. Each range is cached as one row in `airing_schedule_cache`; ranges that already ended are never stale, others are flagged `stale` after 6h and refreshed in the background by the frontend. Browsing **never** writes `anime_entries` or `media_metadata`; list state comes from the local list by id.
 - **Media metadata** (`TrackerSyncService::media_metadata`, used by the Now Playing hero): served from `media_metadata`. Only a media with no row is fetched (once, `fetch_media_metadata`, through the rate limiter); playback **never** refreshes it — season fetches are the only refresh path.
 - **Airing dates**: `start_date` / `end_date` (fuzzy `YYYY[-MM[-DD]]`) are part of the light `MEDIA_LIST_FRAGMENT` and compared in `merge_remote_list`, so pulls keep them current without extra requests.
