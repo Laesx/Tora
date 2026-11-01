@@ -240,6 +240,8 @@ fn clean_opt(value: Option<&str>) -> Option<String> {
 /// - status must be one of [`VALID_STATUSES`];
 /// - progress = explicit or current + delta, clamped to `[0, episodes]` when the total is known;
 ///   `mark_completed_progress` sets it to the total; score is clamped to `0..=100`;
+/// - a Manual/Batch status change that leaves progress alone moves it too: entering REPEATING → 0,
+///   entering COMPLETED → the total (when known);
 /// - dates must be `YYYY-MM-DD` (empty clears);
 /// - when progress changes and the caller did not explicitly change the status (always for Scrobble/Step):
 ///   reaching the total → COMPLETED, else PLANNING with progress ≥ 1 → CURRENT;
@@ -286,6 +288,21 @@ pub fn normalize_change(
     if change.mark_completed_progress {
         if let Some(t) = total {
             progress = t as i64;
+        }
+    }
+    // The modal always re-sends the old progress, so that counts as leaving it alone
+    let progress_untouched =
+        change.progress.map_or(true, |p| p == old_progress) && change.progress_delta.is_none();
+    if progress_untouched && matches!(change.source, ChangeSource::Manual | ChangeSource::Batch) {
+        match requested_status.as_deref() {
+            Some(s) if s == current.user_status => {}
+            Some(STATUS_REPEATING) if !change.mark_completed_progress => progress = 0,
+            Some(STATUS_COMPLETED) => {
+                if let Some(t) = total {
+                    progress = t as i64;
+                }
+            }
+            _ => {}
         }
     }
     progress = progress.max(0);
@@ -1991,6 +2008,77 @@ mod tests {
         assert_eq!(st.user_repeats, 2);
         assert_eq!(st.user_completed_at.as_deref(), Some(TODAY));
         assert_eq!(st.user_started_at.as_deref(), Some("2020-01-01"));
+    }
+
+    fn status_change(status: &str, progress: Option<u32>, source: ChangeSource) -> UserStateChange {
+        UserStateChange {
+            anime_id: 1,
+            status: Some(status.into()),
+            progress,
+            source,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn entering_repeating_resets_progress() {
+        let mut cur = entry("COMPLETED", 12, Some(12));
+        cur.user_repeats = 1;
+        cur.user_started_at = Some("2020-01-01".into());
+        cur.user_completed_at = Some("2020-03-01".into());
+        // Progress omitted (menus) and the old progress re-sent (modal)
+        for progress in [None, Some(12)] {
+            let change = status_change("REPEATING", progress, ChangeSource::Manual);
+            let st = normalize_change(&cur, &change, TODAY).unwrap();
+            assert_eq!(st.user_status, "REPEATING");
+            assert_eq!(st.user_progress, 0);
+            assert_eq!(st.user_repeats, 1);
+            assert_eq!(st.user_started_at.as_deref(), Some("2020-01-01"));
+            assert_eq!(st.user_completed_at.as_deref(), Some("2020-03-01"));
+        }
+        let change = status_change("REPEATING", None, ChangeSource::Batch);
+        assert_eq!(normalize_change(&cur, &change, TODAY).unwrap().user_progress, 0);
+
+        // Already rewatching: saving keeps the progress
+        let change = status_change("REPEATING", Some(5), ChangeSource::Manual);
+        let st = normalize_change(&entry("REPEATING", 5, Some(12)), &change, TODAY).unwrap();
+        assert_eq!(st.user_progress, 5);
+
+        // An explicit different progress wins
+        let change = status_change("REPEATING", Some(3), ChangeSource::Manual);
+        assert_eq!(normalize_change(&cur, &change, TODAY).unwrap().user_progress, 3);
+    }
+
+    #[test]
+    fn entering_completed_fills_progress() {
+        let cur = entry("CURRENT", 0, Some(12));
+        for progress in [None, Some(0)] {
+            let change = status_change("COMPLETED", progress, ChangeSource::Manual);
+            let st = normalize_change(&cur, &change, TODAY).unwrap();
+            assert_eq!(st.user_status, "COMPLETED");
+            assert_eq!(st.user_progress, 12);
+        }
+        let change = status_change("COMPLETED", None, ChangeSource::Batch);
+        assert_eq!(normalize_change(&cur, &change, TODAY).unwrap().user_progress, 12);
+
+        // Unknown total: nothing to fill
+        let change = status_change("COMPLETED", None, ChangeSource::Manual);
+        let st = normalize_change(&entry("CURRENT", 0, None), &change, TODAY).unwrap();
+        assert_eq!(st.user_status, "COMPLETED");
+        assert_eq!(st.user_progress, 0);
+
+        // Already completed below the total: re-saving keeps the progress
+        let change = status_change("COMPLETED", Some(7), ChangeSource::Manual);
+        let st = normalize_change(&entry("COMPLETED", 7, Some(12)), &change, TODAY).unwrap();
+        assert_eq!(st.user_progress, 7);
+
+        // An explicit different progress wins
+        let change = status_change("COMPLETED", Some(4), ChangeSource::Manual);
+        assert_eq!(normalize_change(&cur, &change, TODAY).unwrap().user_progress, 4);
+
+        // Adds keep what they were given
+        let change = status_change("COMPLETED", None, ChangeSource::Add);
+        assert_eq!(normalize_change(&cur, &change, TODAY).unwrap().user_progress, 0);
     }
 
     #[test]

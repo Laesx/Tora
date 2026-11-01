@@ -23,6 +23,7 @@ import { ChangelogModal } from "@/app/ChangelogModal";
 import { UpdatePromptModal } from "@/app/UpdatePromptModal";
 import { useAppUpdater } from "@/app/useAppUpdater";
 import { Toast, useToastState } from "@/app/Toast";
+import { playRewatchStart } from "@/lib/anime";
 import { useAnimeList } from "@/app/useAnimeList";
 import { useEpisodeStepper } from "@/app/useEpisodeStepper";
 import { useCustomListsState } from "@/app/useCustomListsState";
@@ -522,6 +523,12 @@ export const App: React.FC = () => {
     setSelectedAnime(entry);
   };
 
+  // Progress resets first, so the scrobbler counts episode 1 as new
+  const startRewatch = async (anime: AnimeEntry) => {
+    await list.batchUpdate({ anime_ids: [anime.id], user_status: "REPEATING" }, `Started rewatching "${titleOf(anime)}"`);
+    await playRewatchStart(anime, showToast);
+  };
+
   // One stable context object whose functions call this render's handlers
   const latestActions = useRef<AnimeActions | null>(null);
   latestActions.current = {
@@ -529,7 +536,10 @@ export const App: React.FC = () => {
     stepEpisode: stepper.stepEpisode,
     batchUpdate: list.batchUpdate,
     changeStatus: (anime, status, label) =>
-      list.batchUpdate({ anime_ids: [anime.id], user_status: status }, `Moved "${titleOf(anime)}" to ${label}`),
+      status === "REPEATING" && anime.user_status !== "REPEATING"
+        ? startRewatch(anime)
+        : list.batchUpdate({ anime_ids: [anime.id], user_status: status }, `Moved "${titleOf(anime)}" to ${label}`),
+    startRewatch,
     batchDelete: list.batchDelete,
     deleteAnime: list.deleteAnime,
     addAnime: list.addAnime,
@@ -548,6 +558,7 @@ export const App: React.FC = () => {
       stepEpisode: (a, delta) => latest().stepEpisode(a, delta),
       batchUpdate: (patch, msg) => latest().batchUpdate(patch, msg),
       changeStatus: (a, status, label) => latest().changeStatus(a, status, label),
+      startRewatch: (a) => latest().startRewatch(a),
       batchDelete: (targets) => latest().batchDelete(targets),
       deleteAnime: (a) => latest().deleteAnime(a),
       addAnime: (entry, status) => latest().addAnime(entry, status),

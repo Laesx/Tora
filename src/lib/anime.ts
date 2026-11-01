@@ -41,6 +41,11 @@ export async function playLocalEpisode(anime: AnimeEntry, ep: number, showToast:
   }
 }
 
+/** Plays episode 1 after a rewatch starts; an anime with no local files just stays quiet. */
+export async function playRewatchStart(anime: AnimeEntry, showToast: ShowToast) {
+  if (anime.local_episode_count > 0) await playLocalEpisode(anime, 1, showToast);
+}
+
 /** Open the anime's linked folder, or the folder of its first local file. */
 export async function openAnimeFolder(anime: AnimeEntry, showToast: ShowToast) {
   try {
