@@ -171,7 +171,7 @@ export function buildAnimeActions(
       keepOpen: true,
       run: () => h.stepEpisode(anime, -1),
     },
-    ...(anime.user_status !== "REPEATING"
+    ...(anime.user_status === "COMPLETED"
       ? [
           {
             id: "start-rewatch",

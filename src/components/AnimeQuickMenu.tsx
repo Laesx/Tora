@@ -825,7 +825,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
           </span>
         </button>
 
-        {anime.user_status !== "REPEATING" && (
+        {anime.user_status === "COMPLETED" && (
           <button onClick={handleStartRewatch} className={itemClass}>
             <span className="flex items-center gap-2">
               <RewatchIcon className={`w-3.5 h-3.5 ${STATUS_INFO.REPEATING.color}`} />
