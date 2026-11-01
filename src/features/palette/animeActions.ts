@@ -23,7 +23,7 @@ import {
   openExternal,
   playLocalEpisode,
 } from "@/lib/anime";
-import { LIST_STATUSES } from "@/lib/status";
+import { LIST_STATUSES, STATUS_INFO } from "@/lib/status";
 import { displayTitle } from "@/contexts/titles";
 import { torrentSearchFor } from "@/lib/torrents";
 import type { AnimeActions } from "@/contexts/animeActions";
@@ -171,6 +171,17 @@ export function buildAnimeActions(
       keepOpen: true,
       run: () => h.stepEpisode(anime, -1),
     },
+    ...(anime.user_status !== "REPEATING"
+      ? [
+          {
+            id: "start-rewatch",
+            label: "Start Rewatch",
+            icon: STATUS_INFO.REPEATING.icon,
+            iconClass: STATUS_INFO.REPEATING.color,
+            run: () => void h.startRewatch(anime),
+          },
+        ]
+      : []),
     {
       id: "search-torrents",
       label: "Search Torrents",
@@ -191,11 +202,7 @@ export function buildAnimeActions(
         iconClass: st.color,
         hint: anime.user_status === st.id ? "Current" : undefined,
         disabled: anime.user_status === st.id,
-        run: () =>
-          void h.batchUpdate(
-            { anime_ids: [anime.id], user_status: st.id },
-            `Moved "${displayTitle(anime)}" to ${st.label}`
-          ),
+        run: () => void h.changeStatus(anime, st.id, st.label),
       })),
     },
     ...(customLists ? [customLists] : []),

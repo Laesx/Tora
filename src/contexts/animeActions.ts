@@ -11,6 +11,8 @@ export interface AnimeActions {
   batchUpdate: (patch: BatchAnimeUpdatePatch, summaryToast: string) => Promise<void>;
   /** Single-entry status change with a "Moved … to <label>" toast */
   changeStatus: (anime: AnimeEntry, status: string, label: string) => Promise<void>;
+  /** Moves to Rewatching (the backend resets progress to 0), then tries to play episode 1 */
+  startRewatch: (anime: AnimeEntry) => Promise<void>;
   batchDelete: (targets: AnimeEntry[]) => Promise<void>;
   deleteAnime: (anime: AnimeEntry) => Promise<void>;
   /** Adds a remote (Seasons / Search / Schedule) anime with an instant optimistic update */
@@ -31,6 +33,7 @@ export const AnimeActionsContext = createContext<AnimeActions>({
   stepEpisode: missing,
   batchUpdate: missing,
   changeStatus: missing,
+  startRewatch: missing,
   batchDelete: missing,
   deleteAnime: missing,
   addAnime: missing,

@@ -30,6 +30,7 @@ import {
   formatEnum,
   formatMinutes,
   openExternal,
+  playRewatchStart,
 } from "@/lib/anime";
 import { seasonName } from "@/lib/seasons";
 import { AiringDot } from "@/components/AiringDot";
@@ -563,10 +564,16 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
                   </label>
                   <select
                     value={status}
-                    onChange={(e) => {
+                    onChange={async (e) => {
                       const nextSt = e.target.value;
+                      // Same rule as normalize_change: a rewatch restarts, completing fills the total
+                      let nextProg = progress;
+                      if (nextSt === "REPEATING") nextProg = 0;
+                      else if (nextSt === "COMPLETED" && anime.episodes) nextProg = anime.episodes;
                       setStatus(nextSt);
-                      handleSave(nextSt, progress, score, repeats, false);
+                      setProgress(nextProg);
+                      await handleSave(nextSt, nextProg, score, repeats, false);
+                      if (nextSt === "REPEATING") await playRewatchStart(anime, showToast);
                     }}
                     className="w-full px-2.5 py-2 rounded-lg bg-bg-primary border border-border-subtle text-xs text-text-primary focus:outline-none focus:border-accent"
                   >

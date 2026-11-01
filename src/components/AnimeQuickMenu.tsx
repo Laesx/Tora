@@ -30,7 +30,7 @@ import { AiringDot } from "./AiringDot";
 import { useAnimeTitle } from "@/contexts/titles";
 import { torrentSearchFor } from "@/lib/torrents";
 import { useToast } from "@/contexts/toast";
-import { LIST_STATUSES } from "@/lib/status";
+import { LIST_STATUSES, STATUS_INFO } from "@/lib/status";
 import { useAnimeActions } from "@/contexts/animeActions";
 import { useScoreFormat } from "@/contexts/scoreFormat";
 import { formatScore, formatValueLabel, fromFormatValue, SCORE_SCALES, toFormatValue } from "@/lib/scores";
@@ -60,7 +60,8 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
   onOpenFullModal,
   onClearSelection,
 }) => {
-  const { batchDelete, batchUpdate, deleteAnime, searchTorrents, stepEpisode } = useAnimeActions();
+  const { batchDelete, batchUpdate, changeStatus, deleteAnime, searchTorrents, startRewatch, stepEpisode } =
+    useAnimeActions();
   const showToast = useToast();
   const titleOf = useAnimeTitle();
   const scoreFormat = useScoreFormat();
@@ -673,13 +674,14 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
 
   const handleSingleStatusChange = async (statusId: string, label: string) => {
     onClose();
-    await batchUpdate(
-      {
-        anime_ids: [anime.id],
-        user_status: statusId,
-      },
-      `Moved "${titleOf(anime)}" to ${label}`
-    );
+    await changeStatus(anime, statusId, label);
+  };
+
+  const RewatchIcon = STATUS_INFO.REPEATING.icon;
+
+  const handleStartRewatch = async () => {
+    onClose();
+    await startRewatch(anime);
   };
 
   const handleSingleSaveDateStarted = async (dateStr: string) => {
@@ -822,6 +824,15 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
             <span>Decrement Episode (-1)</span>
           </span>
         </button>
+
+        {anime.user_status !== "REPEATING" && (
+          <button onClick={handleStartRewatch} className={itemClass}>
+            <span className="flex items-center gap-2">
+              <RewatchIcon className={`w-3.5 h-3.5 ${STATUS_INFO.REPEATING.color}`} />
+              <span>Start Rewatch</span>
+            </span>
+          </button>
+        )}
 
         <button
           onClick={() => {
