@@ -114,7 +114,6 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
           anime_ids: targetIds,
           user_status: statusId,
           mark_completed_progress: markMaxProgress ? true : null,
-          user_completed_at: statusId === "COMPLETED" ? todayIso : null,
         },
         `Moved ${targets.length} anime to ${label}`
       );

@@ -247,7 +247,7 @@ fn clean_opt(value: Option<&str>) -> Option<String> {
 ///   reaching the total → COMPLETED, else PLANNING with progress ≥ 1 → CURRENT;
 /// - REPEATING → COMPLETED increments repeats (unless the caller changed repeats explicitly);
 /// - an explicit date (one that differs from the stored value) always wins; otherwise the first watched
-///   episode (0 → ≥1) sets an empty `started_at` to today, and entering COMPLETED sets `completed_at` to
+///   episode (0 → ≥1) sets an empty `started_at` to today, and entering COMPLETED sets an empty `completed_at` to
 ///   today (and an empty `started_at` to today too).
 pub fn normalize_change(
     current: &AnimeEntry,
@@ -371,7 +371,7 @@ pub fn normalize_change(
         started_at = Some(today.to_string());
     }
     if entering_completed {
-        if !completed_explicit {
+        if !completed_explicit && completed_at.is_none() {
             completed_at = Some(today.to_string());
         }
         if !started_explicit && started_at.is_none() {
@@ -1939,7 +1939,7 @@ mod tests {
         cur.user_started_at = Some("2026-01-01".into());
         let st = normalize_change(&cur, &step(12), TODAY).unwrap();
         assert_eq!(st.user_status, "COMPLETED");
-        assert_eq!(st.user_completed_at.as_deref(), Some(TODAY));
+        assert_eq!(st.user_completed_at.as_deref(), Some("2020-03-01"));
         // started_at is never overwritten once set
         assert_eq!(st.user_started_at.as_deref(), Some("2026-01-01"));
 
@@ -1947,7 +1947,7 @@ mod tests {
         let st = normalize_change(&entry("PLANNING", 0, Some(12)), &step(12), TODAY).unwrap();
         assert_eq!(st.user_status, "COMPLETED");
         assert_eq!(st.user_started_at.as_deref(), Some(TODAY));
-        assert_eq!(st.user_completed_at.as_deref(), Some(TODAY));
+        assert_eq!(st.user_completed_at.as_deref(), Some("2020-03-01"));
     }
 
     #[test]
@@ -2009,8 +2009,53 @@ mod tests {
         let st = normalize_change(&cur, &step(12), TODAY).unwrap();
         assert_eq!(st.user_status, "COMPLETED");
         assert_eq!(st.user_repeats, 2);
-        assert_eq!(st.user_completed_at.as_deref(), Some(TODAY));
+        assert_eq!(st.user_completed_at.as_deref(), Some("2020-03-01"));
         assert_eq!(st.user_started_at.as_deref(), Some("2020-01-01"));
+    }
+
+    #[test]
+    fn repeating_to_completed_with_empty_completed_at_sets_today() {
+        let mut cur = entry("REPEATING", 11, Some(12));
+        cur.user_repeats = 1;
+        cur.user_started_at = Some("2020-01-01".into());
+        cur.user_completed_at = None;
+        let st = normalize_change(&cur, &step(12), TODAY).unwrap();
+        assert_eq!(st.user_status, "COMPLETED");
+        assert_eq!(st.user_repeats, 2);
+        assert_eq!(st.user_completed_at.as_deref(), Some("2020-03-01"));
+        assert_eq!(st.user_started_at.as_deref(), Some("2020-01-01"));
+    }
+
+    #[test]
+    fn repeating_to_completed_manual_keeps_existing_completed_at() {
+        let mut cur = entry("REPEATING", 12, Some(12));
+        cur.user_repeats = 1;
+        cur.user_started_at = Some("2020-01-01".into());
+        cur.user_completed_at = Some("2020-03-01".into());
+        let change = status_change("COMPLETED", None, ChangeSource::Manual);
+        let st = normalize_change(&cur, &change, TODAY).unwrap();
+        assert_eq!(st.user_status, "COMPLETED");
+        assert_eq!(st.user_repeats, 2);
+        assert_eq!(st.user_completed_at.as_deref(), Some("2020-03-01"));
+    }
+
+    #[test]
+    fn repeating_to_completed_explicit_completed_at_wins() {
+        let mut cur = entry("REPEATING", 11, Some(12));
+        cur.user_repeats = 1;
+        cur.user_started_at = Some("2020-01-01".into());
+        cur.user_completed_at = Some("2020-03-01".into());
+        let change = UserStateChange {
+            anime_id: 1,
+            progress: Some(12),
+            completed_at: Some("2026-04-01".into()),
+            source: ChangeSource::Step,
+            ..Default::default()
+        };
+        let st = normalize_change(&cur, &change, TODAY).unwrap();
+        assert_eq!(st.user_status, "COMPLETED");
+        assert_eq!(st.user_repeats, 2);
+        assert_eq!(st.user_completed_at.as_deref(), Some("2026-04-01"));
     }
 
     fn status_change(status: &str, progress: Option<u32>, source: ChangeSource) -> UserStateChange {
