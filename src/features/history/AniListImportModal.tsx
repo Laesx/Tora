@@ -1,13 +1,14 @@
 import React from "react";
 import { AlertTriangle, CheckCircle2, Download, Pause, Play } from "lucide-react";
 import { importProgress, useAniListHistory } from "@/contexts/anilistHistory";
+import { dateLocale } from "@/lib/dates";
 
 interface AniListImportModalProps {
   onClose: () => void;
 }
 
 function monthYear(ts: number): string {
-  return new Date(ts * 1000).toLocaleDateString(undefined, { month: "long", year: "numeric" });
+  return new Date(ts * 1000).toLocaleDateString(dateLocale(), { month: "long", year: "numeric" });
 }
 
 /**

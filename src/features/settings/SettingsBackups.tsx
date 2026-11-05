@@ -4,6 +4,7 @@ import { AppSettings, SettingsBackupInfo } from "@/lib/types";
 import { toraApi } from "@/lib/api";
 import { useToast } from "@/contexts/toast";
 import { logError } from "@/lib/log";
+import { formatDateTime } from "@/lib/dates";
 
 /** Settings → About: rolling settings snapshots in `app_data\backups` with restore. */
 export const SettingsBackupsPanel: React.FC<{
@@ -72,7 +73,7 @@ export const SettingsBackupsPanel: React.FC<{
           {backups.map((b) => (
             <div key={b.file_name} className="flex items-center gap-3 py-2 text-xs">
               <div className="min-w-0 flex-1">
-                <div className="font-semibold text-text-primary">{new Date(b.created_at * 1000).toLocaleString()}</div>
+                <div className="font-semibold text-text-primary">{formatDateTime(new Date(b.created_at * 1000))}</div>
                 <div className="text-[11px] text-text-muted truncate">{b.summary}</div>
               </div>
               {confirm === b.file_name ? (

@@ -157,8 +157,8 @@ pub struct HistoryCursor {
 #[serde(default)]
 pub struct HistoryQuery {
     pub source: HistorySource,
-    /// Title substring (case-insensitive for ASCII).
-    pub search: Option<String>,
+    /// Only these anime (the fuzzy title search resolved in the frontend).
+    pub title_filter: Option<HistoryTitleFilter>,
     /// Only this anime.
     pub media_id: Option<i64>,
     /// Only rows at or after this unix second (the History period).
@@ -167,6 +167,26 @@ pub struct HistoryQuery {
     pub to: Option<i64>,
     pub before: Option<HistoryCursor>,
     pub limit: u32,
+}
+
+/// What a History title search matched. The search is fuzzy, so it runs in the frontend (`lib/fuzzy.ts`,
+/// over [`Database::history_titles`]) and the rows are then filtered here, which also covers rows that
+/// aren't loaded yet.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HistoryTitleFilter {
+    /// Anime ids (`watch_history.anime_id`, `anilist_activities.media_id`).
+    pub ids: Vec<i64>,
+    /// Logged titles of local rows with no anime id.
+    pub titles: Vec<String>,
+}
+
+/// One anime's titles in the History, for the title search. `media_id` is `None` for a local row with
+/// no anime id, which can only be found by its logged title.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HistoryTitles {
+    pub media_id: Option<i64>,
+    pub titles: Vec<String>,
 }
 
 /// Watched episodes in one local calendar month (the History period picker).
@@ -214,33 +234,17 @@ pub struct TimelineEpisode {
     pub batch: bool,
 }
 
-/// `%needle%` for `LIKE … ESCAPE '\'`, or `None` for a blank search.
-fn like_pattern(search: Option<&str>) -> Option<String> {
-    let needle = search.map(str::trim).filter(|s| !s.is_empty())?;
-    let escaped = needle
-        .replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_");
-    Some(format!("%{}%", escaped))
+/// `:filter` (a JSON [`HistoryTitleFilter`], `NULL` = no search). Returns (local `h.`, AniList `a.`).
+fn title_filters() -> (&'static str, &'static str) {
+    (
+        "(:filter IS NULL OR h.anime_id IN (SELECT value FROM json_each(:filter, '$.ids'))
+          OR h.anime_title IN (SELECT value FROM json_each(:filter, '$.titles')))",
+        "(:filter IS NULL OR a.media_id IN (SELECT value FROM json_each(:filter, '$.ids')))",
+    )
 }
 
-/// `:q` title-search filters (`NULL` = no search) over every title, so rows match whatever title
-/// language they show: local rows by their logged title or the list entry's titles, AniList rows by the
-/// imported media's titles or the list entry's. Returns (local `h.`, AniList `a.`).
-fn search_filters() -> (String, String) {
-    let titles = |table: &str, id: &str| {
-        format!(
-            "SELECT {id} FROM {table}
-             WHERE title_romaji LIKE :q ESCAPE '\\' OR title_english LIKE :q ESCAPE '\\'
-                OR title_native LIKE :q ESCAPE '\\'"
-        )
-    };
-    let list = titles("anime_entries", "id");
-    let media = titles("anilist_activity_media", "media_id");
-    (
-        format!("(:q IS NULL OR h.anime_title LIKE :q ESCAPE '\\' OR h.anime_id IN ({list}))"),
-        format!("(:q IS NULL OR a.media_id IN ({media}) OR a.media_id IN ({list}))"),
-    )
+fn filter_json(filter: Option<&HistoryTitleFilter>) -> Result<Option<String>, String> {
+    filter.map(|f| serde_json::to_string(f).map_err(|e| e.to_string())).transpose()
 }
 
 /// Imported AniList-only episodes and the oldest one's time (Stats "logged episodes").
@@ -404,13 +408,13 @@ impl Database {
     pub fn list_history(&self, query: &HistoryQuery) -> Result<Vec<HistoryRow>, String> {
         let conn = self.reader()?;
         let limit = query.limit.clamp(1, 500);
-        let pattern = like_pattern(query.search.as_deref());
+        let filter = filter_json(query.title_filter.as_ref())?;
         let before = query.before.unwrap_or(HistoryCursor {
             ts: i64::MAX,
             kind: u8::MAX,
             id: i64::MAX,
         });
-        let (local_search, remote_search) = search_filters();
+        let (local_search, remote_search) = title_filters();
         let local = format!(
             "SELECT * FROM (
                SELECT 0 AS kind, h.id, h.anime_id, h.anime_title, h.episode_number AS ep_from,
@@ -462,7 +466,7 @@ impl Database {
                     ":mid": query.media_id,
                     ":from": query.from.unwrap_or(i64::MIN),
                     ":to": query.to.unwrap_or(i64::MAX),
-                    ":q": pattern,
+                    ":filter": filter,
                     ":limit": limit,
                 },
                 |r| {
@@ -493,15 +497,16 @@ impl Database {
     }
 
     /// Watched episodes per local calendar month (oldest first) for the History period picker, with the
-    /// same source and title search as [`Self::list_history`]; corrections don't count. Months are
+    /// same source and title filter as [`Self::list_history`]; corrections don't count. Months are
     /// bucketed by SQLite's `localtime`, the OS timezone the webview uses too.
     pub fn history_month_counts(
         &self,
         source: HistorySource,
-        search: Option<&str>,
+        filter: Option<&HistoryTitleFilter>,
     ) -> Result<Vec<MonthCount>, String> {
         let conn = self.reader()?;
-        let (local_search, remote_search) = search_filters();
+        let filter = filter_json(filter)?;
+        let (local_search, remote_search) = title_filters();
         let local = format!(
             "SELECT strftime('%Y-%m', h.timestamp_unix, 'unixepoch', 'localtime') AS m, COUNT(*) AS n
                FROM watch_history h
@@ -522,7 +527,7 @@ impl Database {
         let sql = format!("SELECT m, SUM(n) FROM ({union}) GROUP BY m ORDER BY m");
         let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
         let rows = stmt
-            .query_map(named_params! { ":q": like_pattern(search) }, |r| {
+            .query_map(named_params! { ":filter": filter }, |r| {
                 Ok(MonthCount {
                     month: r.get(0)?,
                     episodes: r.get(1)?,
@@ -530,6 +535,39 @@ impl Database {
             })
             .map_err(|e| e.to_string())?;
         rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
+    }
+
+    /// The titles of every anime in the History: what local rows logged plus the imported media's. The
+    /// list entries' titles and synonyms are already in the frontend, which adds them.
+    pub fn history_titles(&self) -> Result<Vec<HistoryTitles>, String> {
+        let conn = self.reader()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT anime_id, anime_title FROM watch_history GROUP BY anime_id, anime_title
+                 UNION ALL SELECT media_id, title_romaji FROM anilist_activity_media
+                 UNION ALL SELECT media_id, title_english FROM anilist_activity_media WHERE title_english IS NOT NULL
+                 UNION ALL SELECT media_id, title_native FROM anilist_activity_media WHERE title_native IS NOT NULL",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?;
+        let mut by_id: std::collections::BTreeMap<i64, Vec<String>> = Default::default();
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, title) = row.map_err(|e| e.to_string())?;
+            match id {
+                Some(id) => {
+                    let titles = by_id.entry(id).or_default();
+                    if !title.is_empty() && !titles.contains(&title) {
+                        titles.push(title);
+                    }
+                }
+                None => out.push(HistoryTitles { media_id: None, titles: vec![title] }),
+            }
+        }
+        out.extend(by_id.into_iter().map(|(id, titles)| HistoryTitles { media_id: Some(id), titles }));
+        Ok(out)
     }
 
     /// Every watched episode of one anime, oldest first: local rows (corrections excluded) and the
@@ -705,8 +743,9 @@ mod tests {
         assert_eq!(seen, vec![301, 300]);
         assert!(db.list_history(&march(HistorySource::Local, None)).unwrap().is_empty());
 
-        let count = |source, search: Option<&str>, month: &str| {
-            db.history_month_counts(source, search)
+        let count = |source, id: Option<i64>, month: &str| {
+            let filter = id.map(|id| HistoryTitleFilter { ids: vec![id], titles: vec![] });
+            db.history_month_counts(source, filter.as_ref())
                 .unwrap()
                 .into_iter()
                 .find(|m| m.month == month)
@@ -717,8 +756,8 @@ mod tests {
         assert_eq!(count(HistorySource::Anilist, None, "2025-04"), 1);
         assert_eq!(count(HistorySource::Local, None, "2025-03"), 0);
         assert_eq!(count(HistorySource::Local, None, &this_month), 2);
-        assert_eq!(count(HistorySource::All, Some("remote 2"), "2025-03"), 3);
-        assert_eq!(count(HistorySource::All, Some("alpha"), "2025-03"), 0);
+        assert_eq!(count(HistorySource::All, Some(2), "2025-03"), 3);
+        assert_eq!(count(HistorySource::All, Some(1), "2025-03"), 0);
 
         // A local row for episode 5 takes it out of March (local wins), and corrections never count
         db.record_manual_progress(&[(2, "Remote 2".into(), 4, 5)]).unwrap();
@@ -747,7 +786,7 @@ mod tests {
     }
 
     #[test]
-    fn history_pages_by_cursor_and_searches_every_title() {
+    fn history_pages_by_cursor_and_filters_by_title_match() {
         let db = seeded();
         let mut seen = vec![];
         let mut before = None;
@@ -768,18 +807,47 @@ mod tests {
         unique.dedup();
         assert_eq!(unique.len(), 4);
 
-        let search = |q: &str| {
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO watch_history (anime_id, anime_title, episode_number, player_name, file_name, scrobbled_to_tracker, timestamp_unix)
+                 VALUES (NULL, 'Orphan', 1, 'mpv', 'orphan.mkv', 0, 1000)",
+                [],
+            )
+            .unwrap();
+        let matching = |ids: &[i64], titles: &[&str]| {
+            let filter = HistoryTitleFilter {
+                ids: ids.to_vec(),
+                titles: titles.iter().map(|t| t.to_string()).collect(),
+            };
             db.list_history(&HistoryQuery {
-                search: Some(q.into()),
+                title_filter: Some(filter),
                 ..query(HistorySource::All)
             })
             .unwrap()
+            .len()
         };
-        assert_eq!(search("remote").len(), 2); // the imported romaji of both anime
-        assert_eq!(search("remote 2").len(), 1);
-        assert_eq!(search("ALPHA").len(), 3);
-        assert_eq!(search("%").len(), 0);
-        assert_eq!(search("  ").len(), 4);
+        assert_eq!(matching(&[1], &[]), 3);
+        assert_eq!(matching(&[2], &[]), 1);
+        assert_eq!(matching(&[1, 2], &[]), 4);
+        assert_eq!(matching(&[], &["Orphan"]), 1);
+        assert_eq!(matching(&[2], &["Orphan"]), 2);
+        // A search that matched nothing shows nothing; no search shows everything
+        assert_eq!(matching(&[], &[]), 0);
+        assert_eq!(db.list_history(&query(HistorySource::All)).unwrap().len(), 5);
+        // Every source takes the filter
+        for source in [HistorySource::Local, HistorySource::Anilist] {
+            let filter = HistoryTitleFilter { ids: vec![2], titles: vec![] };
+            db.list_history(&HistoryQuery { title_filter: Some(filter.clone()), ..query(source) }).unwrap();
+            db.history_month_counts(source, Some(&filter)).unwrap();
+        }
+
+        let titles = db.history_titles().unwrap();
+        let of = |id| titles.iter().find(|t| t.media_id == id).unwrap().titles.clone();
+        assert_eq!(of(None), vec!["Orphan".to_string()]);
+        assert!(of(Some(1)).contains(&"Alpha".to_string()));
+        assert!(of(Some(2)).contains(&"Remote 2".to_string()));
 
         let only = db
             .list_history(&HistoryQuery {

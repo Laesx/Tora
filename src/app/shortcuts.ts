@@ -18,10 +18,10 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
     title: "Anywhere",
     items: [
       { keys: ["Ctrl+S"], label: "Quick Jump (command palette)" },
-      { keys: ["Ctrl+1–8"], label: "Go to a sidebar tab (hold Ctrl to see the numbers)" },
+      { keys: ["Ctrl+1–8"], label: "Go to a sidebar tab" },
       { keys: ["Ctrl+9"], label: "Open Settings" },
-      { keys: ["Alt+←", "Mouse back"], label: "Go back to the previous page (tab, anime, view)" },
-      { keys: ["Alt+→", "Mouse forward"], label: "Go forward again" },
+      { keys: ["Alt+←", "Mouse back"], label: "Go back to the previous page" },
+      { keys: ["Alt+→", "Mouse forward"], label: "Go forward" },
       { keys: ["F5"], label: "Rescan library folders" },
       { keys: ["F11"], label: "Toggle fullscreen" },
       { keys: ["?"], label: "Show keyboard shortcuts" },
@@ -31,7 +31,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
   {
     title: "Anime Watchlist",
     items: [
-      { keys: ["Alt+1–6"], label: "Switch status tab (hold Alt to see the keys)" },
+      { keys: ["Alt+1–6"], label: "Switch status tab" },
       { keys: ["Alt+Q", "Alt+W", "Alt+E"], label: "Poster grid / detailed cards / table view" },
       { keys: ["A–Z"], label: "Start typing to search every list" },
       { keys: ["↓"], label: "In the search box: move to the results" },
@@ -77,9 +77,16 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { keys: ["Shift+Click"], label: "Select a range" },
       { keys: ["Double-click"], label: "Open details" },
       { keys: ["Right-click"], label: "Quick menu (applies to the whole selection)" },
-      { keys: ["Alt+Q", "Alt+W"], label: "Poster grid / extended info view" },
+      { keys: ["Alt+Q", "Alt+W"], label: "Poster grid / extended info view (hold Alt to see the keys)" },
       { keys: ["P", "W"], label: "Add the selection to Planning / Watching, then go to the next anime" },
       { keys: ["X"], label: "Not interested (or undo), then go to the next anime" },
+    ],
+  },
+  {
+    title: "Torrents",
+    items: [
+      { keys: ["Middle-click"], label: "Download the release" },
+      { keys: ["Right-click"], label: "Release menu" },
     ],
   },
 ];

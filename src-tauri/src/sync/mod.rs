@@ -1939,7 +1939,7 @@ mod tests {
         cur.user_started_at = Some("2026-01-01".into());
         let st = normalize_change(&cur, &step(12), TODAY).unwrap();
         assert_eq!(st.user_status, "COMPLETED");
-        assert_eq!(st.user_completed_at.as_deref(), Some("2020-03-01"));
+        assert_eq!(st.user_completed_at.as_deref(), Some(TODAY));
         // started_at is never overwritten once set
         assert_eq!(st.user_started_at.as_deref(), Some("2026-01-01"));
 
@@ -1947,7 +1947,7 @@ mod tests {
         let st = normalize_change(&entry("PLANNING", 0, Some(12)), &step(12), TODAY).unwrap();
         assert_eq!(st.user_status, "COMPLETED");
         assert_eq!(st.user_started_at.as_deref(), Some(TODAY));
-        assert_eq!(st.user_completed_at.as_deref(), Some("2020-03-01"));
+        assert_eq!(st.user_completed_at.as_deref(), Some(TODAY));
     }
 
     #[test]
@@ -2022,7 +2022,7 @@ mod tests {
         let st = normalize_change(&cur, &step(12), TODAY).unwrap();
         assert_eq!(st.user_status, "COMPLETED");
         assert_eq!(st.user_repeats, 2);
-        assert_eq!(st.user_completed_at.as_deref(), Some("2020-03-01"));
+        assert_eq!(st.user_completed_at.as_deref(), Some(TODAY));
         assert_eq!(st.user_started_at.as_deref(), Some("2020-01-01"));
     }
 

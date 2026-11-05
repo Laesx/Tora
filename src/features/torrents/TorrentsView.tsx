@@ -667,6 +667,9 @@ export const TorrentsView: React.FC<TorrentsViewProps> = ({
                     e.preventDefault();
                     setMenu({ x: e.clientX, y: e.clientY, release, card: c });
                   }}
+                  onDownload={(release, c) => {
+                    if (!downloading) void download([{ r: release, card: c }]);
+                  }}
                 />
               ))}
             </div>

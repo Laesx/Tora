@@ -2,6 +2,7 @@
 
 import { AnimeEntry } from "./types";
 import { formatCountdown } from "./format";
+import { formatDateTime } from "./dates";
 
 const nowSeconds = () => Math.floor(Date.now() / 1000);
 
@@ -173,7 +174,7 @@ export function episodeBar(anime: AnimeEntry, now = nowSeconds()): EpisodeBarMod
   if (missingText) lines.push(`Missing: ${missingText}`);
   else if (ready > 0) lines.push("All aired episodes are on disk");
   if (anime.next_airing_episode && anime.next_airing_at && anime.next_airing_at > now) {
-    const when = new Date(anime.next_airing_at * 1000).toLocaleString(undefined, {
+    const when = formatDateTime(new Date(anime.next_airing_at * 1000), {
       weekday: "short",
       hour: "2-digit",
       minute: "2-digit",

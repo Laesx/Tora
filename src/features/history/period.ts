@@ -1,6 +1,7 @@
 // History periods: a local day, month, season (broadcast quarter), year or a range of months.
 import { SEASONS, SeasonName, seasonLabel, shiftSeason } from "@/lib/seasons";
 import type { HistoryRow, HistorySource } from "@/lib/types";
+import { dateLocale } from "@/lib/dates";
 
 /** `month` is 0–11 */
 export interface MonthKey {
@@ -94,12 +95,12 @@ export function monthRange(a: MonthKey, b: MonthKey): HistoryPeriod {
 }
 
 const monthName = (k: MonthKey, month: "short" | "long", withYear = true) =>
-  new Date(k.year, k.month, 1).toLocaleDateString(undefined, withYear ? { month, year: "numeric" } : { month });
+  new Date(k.year, k.month, 1).toLocaleDateString(dateLocale(), withYear ? { month, year: "numeric" } : { month });
 
 export function periodLabel(p: HistoryPeriod): string {
   switch (p.unit) {
     case "day":
-      return new Date(p.year, p.month, p.day).toLocaleDateString(undefined, {
+      return new Date(p.year, p.month, p.day).toLocaleDateString(dateLocale(), {
         weekday: "short",
         month: "short",
         day: "numeric",

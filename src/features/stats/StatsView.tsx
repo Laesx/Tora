@@ -30,6 +30,7 @@ import { formatMeanScore } from "@/lib/scores";
 import { useAniListHistory } from "@/contexts/anilistHistory";
 import { usePrefs } from "@/hooks/usePrefs";
 import type { HistoryPeriod } from "@/features/history/period";
+import { dateLocale, formatTime } from "@/lib/dates";
 
 interface StatsViewProps {
   animeList: AnimeEntry[];
@@ -111,8 +112,8 @@ function computeActivity(events: WatchEvent[]) {
     months.push({
       year: m.getFullYear(),
       month: m.getMonth(),
-      label: m.toLocaleDateString(undefined, { month: "short" }),
-      title: m.toLocaleDateString(undefined, { month: "long", year: "numeric" }),
+      label: m.toLocaleDateString(dateLocale(), { month: "short" }),
+      title: m.toLocaleDateString(dateLocale(), { month: "long", year: "numeric" }),
       count: 0,
       minutes: 0,
     });
@@ -132,7 +133,7 @@ function computeActivity(events: WatchEvent[]) {
   const busiestDay = events.length ? WEEKDAYS[argmax(weekday)] : null;
   const h = argmax(hour);
   const busiestHour = events.length
-    ? `${new Date(2000, 0, 1, h).toLocaleTimeString([], { hour: "numeric" })}–${new Date(2000, 0, 1, (h + 1) % 24).toLocaleTimeString([], { hour: "numeric" })}`
+    ? `${formatTime(new Date(2000, 0, 1, h), { hour: "numeric" })}–${formatTime(new Date(2000, 0, 1, (h + 1) % 24), { hour: "numeric" })}`
     : null;
 
   return {
@@ -158,7 +159,7 @@ function heatmapCells(perDay: Map<string, number>) {
     for (let day = 0; day < 7; day++) {
       if (d > today) break;
       if (day === 0 && d.getDate() <= 7) {
-        monthLabels.push({ x: w, label: d.toLocaleDateString(undefined, { month: "short" }) });
+        monthLabels.push({ x: w, label: d.toLocaleDateString(dateLocale(), { month: "short" }) });
       }
       cells.push({ x: w, y: day, date: new Date(d), count: perDay.get(dayKey(d)) ?? 0 });
       d.setDate(d.getDate() + 1);
@@ -297,7 +298,7 @@ export const StatsView: React.FC<StatsViewProps> = ({
           stats.first_logged_at
             ? `${stats.logged_episodes.toLocaleString()} episodes logged since ${new Date(
                 stats.first_logged_at * 1000
-              ).toLocaleDateString()}`
+              ).toLocaleDateString(dateLocale())}`
             : undefined
         }
       >
@@ -611,7 +612,7 @@ const Heatmap: React.FC<{ perDay: Map<string, number>; onOpenDay: (date: Date) =
             {hover.count} episode{hover.count === 1 ? "" : "s"}
           </span>{" "}
           <span className="text-text-muted">
-            {hover.date.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}
+            {hover.date.toLocaleDateString(dateLocale(), { weekday: "short", month: "short", day: "numeric" })}
           </span>
           <span className="block text-[10px] text-text-muted">Click to see in History</span>
         </div>

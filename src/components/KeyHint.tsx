@@ -2,7 +2,7 @@ import React from "react";
 
 /**
  * Key badge shown while a modifier is held (`useModifierHint`): Ctrl digits on the sidebar, Alt keys
- * on the watchlist toolbar. Position it with `className` (it is absolutely positioned).
+ * on the watchlist and Seasons toolbars. Position it with `className` (it is absolutely positioned).
  */
 export const KeyHint: React.FC<{ label: string; visible: boolean; className?: string }> = ({
   label,

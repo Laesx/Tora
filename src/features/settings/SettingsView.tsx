@@ -4,6 +4,8 @@ import {
   Info,
   ExternalLink,
   FolderOpen,
+  CalendarDays,
+  Clock,
   Languages,
   Palette,
   Plug,
@@ -29,6 +31,7 @@ import { ACCENT_SWATCHES, THEME_PRESETS, applyThemeToDocument } from "@/lib/them
 import { formatBytes } from "@/lib/format";
 import { toraApi } from "@/lib/api";
 import { TITLE_LANGUAGES } from "@/contexts/titles";
+import { DATE_LOCALE_OPTIONS, TIME_FORMATS, dateLocaleSample, systemDateLocale } from "@/lib/dates";
 import { LibraryManagerView } from "./LibraryManagerView";
 import { AnitomyParserPanel } from "./AnitomyParserPanel";
 import { TorrentSettingsSection } from "@/features/torrents/TorrentSettings";
@@ -243,6 +246,53 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                         }`}
                     >
                       {l.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-border-subtle">
+                <div>
+                  <div className="text-xs font-semibold text-text-secondary flex items-center gap-1.5">
+                    <CalendarDays className="w-3.5 h-3.5 text-accent" />
+                    Date format
+                  </div>
+                  <p className="text-[11px] text-text-muted mt-0.5">
+                    Auto follows your Windows region{systemDateLocale() ? ` (${systemDateLocale()})` : ""}, including its month names.
+                  </p>
+                </div>
+                <select
+                  value={settings.date_locale ?? ""}
+                  onChange={(e) => onUpdateSettings({ ...settings, date_locale: e.target.value })}
+                  className="px-3 py-1.5 rounded-xl bg-bg-primary border border-border-subtle text-xs text-text-primary focus:outline-none focus:border-accent"
+                >
+                  {DATE_LOCALE_OPTIONS.map((o) => (
+                    <option key={o.id} value={o.id}>
+                      {o.label} ({dateLocaleSample(o.id)})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-border-subtle">
+                <div>
+                  <div className="text-xs font-semibold text-text-secondary flex items-center gap-1.5">
+                    <Clock className="w-3.5 h-3.5 text-accent" />
+                    Clock
+                  </div>
+                  <p className="text-[11px] text-text-muted mt-0.5">Auto uses the clock of the date format above.</p>
+                </div>
+                <div className="flex items-center bg-bg-primary p-1 rounded-xl border border-border-subtle">
+                  {TIME_FORMATS.map((f) => (
+                    <button
+                      key={f.id}
+                      onClick={() => onUpdateSettings({ ...settings, time_format: f.id })}
+                      className={`px-3 py-1 rounded-lg text-xs font-semibold transition ${(settings.time_format ?? "auto") === f.id
+                          ? "bg-accent text-white"
+                          : "text-text-secondary hover:text-text-primary"
+                        }`}
+                    >
+                      {f.label}
                     </button>
                   ))}
                 </div>

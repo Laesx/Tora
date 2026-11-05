@@ -12,7 +12,14 @@ import {
   Undo2,
   X,
 } from "lucide-react";
-import { AnimeEntry, HistoryRow, HistorySource, MANUAL_HISTORY_PLAYER, TimelineEpisode } from "@/lib/types";
+import {
+  AnimeEntry,
+  HistoryRow,
+  HistorySource,
+  HistoryTitles,
+  MANUAL_HISTORY_PLAYER,
+  TimelineEpisode,
+} from "@/lib/types";
 import { getOptimizedCoverUrl } from "@/lib/covers";
 import { toraApi } from "@/lib/api";
 import { useAnimeTitle } from "@/contexts/titles";
@@ -25,8 +32,10 @@ import { useNavigation } from "@/contexts/navigation";
 import { PeriodPicker } from "./PeriodPicker";
 import { HistoryPeriod, HistoryRequest, periodBounds, periodIsFuture, periodLabel, shiftPeriod } from "./period";
 import { TimelineDay, episodesLabel, splitWatchThroughs, watchThroughLabel } from "./timeline";
+import { buildHistoryTitleIndex, matchHistoryTitles } from "./titleSearch";
 
 import { log } from "@/lib/log";
+import { dateLocale, formatTime } from "@/lib/dates";
 interface HistoryViewProps {
   animeList: AnimeEntry[];
   /** Changes whenever a new history row may exist (scrobble / list update) */
@@ -54,11 +63,11 @@ function dayLabel(ts: number): string {
   const diffDays = Math.round((today.getTime() - day.getTime()) / 86_400_000);
   if (diffDays === 0) return "Today";
   if (diffDays === 1) return "Yesterday";
-  return d.toLocaleDateString(undefined, { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+  return d.toLocaleDateString(dateLocale(), { weekday: "long", year: "numeric", month: "long", day: "numeric" });
 }
 
 function timeLabel(ts: number): string {
-  return new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return formatTime(new Date(ts * 1000), { hour: "2-digit", minute: "2-digit" });
 }
 
 /** "3 episodes · 1 correction" for a day group (corrections are not counted as episodes). */
@@ -114,7 +123,7 @@ const AniListBadge: React.FC = () => (
 /**
  * Every watched episode, newest first: what Tora logged (player scrobbles, manual progress changes) and,
  * once imported, the user's AniList activity for episodes Tora never logged (local rows win). Pages
- * load from the backend by cursor, and the title search covers the whole history. Clicking a title
+ * load from the backend by cursor, and the fuzzy title search covers the whole history. Clicking a title
  * shows that anime's episode timeline.
  */
 export const HistoryView: React.FC<HistoryViewProps> = ({ animeList, refreshKey, request, onRequestHandled }) => {
@@ -180,15 +189,47 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ animeList, refreshKey,
     cache: { tab: "history", rows, hasMore },
   }));
 
+  // The fuzzy search runs here, over every title in the History; the backend only filters by its result
+  const searching = search !== "";
+  const [historyTitles, setHistoryTitles] = useState<HistoryTitles[] | null>(null);
+  useEffect(() => {
+    if (!searching) return;
+    let cancelled = false;
+    toraApi
+      .getHistoryTitles()
+      .then((titles) => !cancelled && setHistoryTitles(titles))
+      .catch((e) => {
+        log.error("history", "Loading the titles for the search failed", e);
+        if (!cancelled) setHistoryTitles([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [searching, refreshKey, anilist.version]);
+
+  const titleIndex = useMemo(
+    () => (searching && historyTitles ? buildHistoryTitleIndex(historyTitles, animeList) : null),
+    [searching, historyTitles, animeList]
+  );
+  // Compared by content: list updates rebuild the index, usually with the same result
+  const titleFilterKey = useMemo(
+    () => (search && titleIndex ? JSON.stringify(matchHistoryTitles(titleIndex, search)) : null),
+    [search, titleIndex]
+  );
+  const titleFilter = useMemo(() => (titleFilterKey ? JSON.parse(titleFilterKey) : null), [titleFilterKey]);
+  // A search with its titles still loading: the rows wait for them
+  const titlesPending = searching && !titleFilter;
+
   const load = useCallback(
     async (append: HistoryRow | null) => {
+      if (titlesPending) return;
       const request = ++requestRef.current;
       setLoading(true);
       try {
         const [from, to] = period ? periodBounds(period) : [null, null];
         const page = await toraApi.listHistory({
           source,
-          search: search || null,
+          title_filter: titleFilter,
           from,
           to,
           before: append?.cursor ?? null,
@@ -204,10 +245,12 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ animeList, refreshKey,
         if (request === requestRef.current) setLoading(false);
       }
     },
-    [source, search, period]
+    [source, titleFilter, titlesPending, period]
   );
 
   useEffect(() => {
+    // Rows restored by Back stay until the titles arrive and show this is still the same query
+    if (titlesPending) return;
     const restored = restoredKeyRef.current;
     restoredKeyRef.current = null;
     if (restored === queryKey(source, search, period)) return;
@@ -355,7 +398,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ animeList, refreshKey,
                 <PeriodPicker
                   period={period}
                   source={source}
-                  search={search}
+                  titleFilter={titleFilter}
                   refreshKey={[refreshKey, anilist.version]}
                   onSelect={setPeriod}
                   onClear={() => {
@@ -534,7 +577,7 @@ const LocalBadge: React.FC = () => (
 );
 
 const shortDate = (ts: number) =>
-  new Date(ts * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+  new Date(ts * 1000).toLocaleDateString(dateLocale(), { month: "short", day: "numeric", year: "numeric" });
 
 /** One day's episodes from one source: Ep · source · date · time (a span when they differ). */
 const TimelineDayRow: React.FC<{ row: TimelineDay }> = ({ row }) => {
@@ -562,7 +605,7 @@ const TimelineDayRow: React.FC<{ row: TimelineDay }> = ({ row }) => {
         )}
       </span>
       <span className="w-32 shrink-0 text-[11px] text-text-secondary">
-        {new Date(row.day * 1000).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}
+        {new Date(row.day * 1000).toLocaleDateString(dateLocale(), { weekday: "short", month: "short", day: "numeric" })}
       </span>
       <span className="w-36 shrink-0 text-right text-[10px] font-mono text-text-muted">
         {batch ? "≈ " : ""}

@@ -4,6 +4,7 @@ import { toraApi } from "@/lib/api";
 import { formatBytes } from "@/lib/format";
 import { ReleaseNote } from "@/lib/types";
 import type { UpdateProgress } from "./useAppUpdater";
+import { dateLocale } from "@/lib/dates";
 
 /** Numeric dotted-version comparison ("0.10.0" > "0.9.2"); missing parts count as 0. */
 export function compareVersions(a: string, b: string): number {
@@ -17,7 +18,7 @@ export function compareVersions(a: string, b: string): number {
 }
 
 const formatReleaseDate = (iso: string) =>
-  iso ? new Date(iso).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : "";
+  iso ? new Date(iso).toLocaleDateString(dateLocale(), { year: "numeric", month: "short", day: "numeric" }) : "";
 
 /** GitHub-rendered (sanitized) release notes; links open in the browser instead of the webview. */
 export const ReleaseNotesHtml: React.FC<{ html: string }> = ({ html }) => (

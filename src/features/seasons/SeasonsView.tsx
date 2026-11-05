@@ -45,6 +45,8 @@ import { useNavCapture } from "@/app/navigation";
 import { EXTENDED_CARD_HEIGHT, SeasonExtendedCard } from "./SeasonExtendedCard";
 import { SeasonTagFilter } from "./SeasonTagFilter";
 import { matchesTagFilters, TagFilterState } from "./tagFilters";
+import { dateLocale, formatDateTime } from "@/lib/dates";
+import { KeyHint } from "@/components/KeyHint";
 
 interface SeasonsViewProps {
   animeList: AnimeEntry[];
@@ -55,6 +57,8 @@ interface SeasonsViewProps {
   /** Jump to this season (re-applied whenever the nonce changes) */
   seasonRequest?: SeasonRequest | null;
   onSeasonRequestHandled?: () => void;
+  /** Alt is held: show the view switcher's key badges */
+  showKeyHints: boolean;
 }
 
 /** `filter` is set when Back restores the view (otherwise the filter is kept) */
@@ -129,7 +133,7 @@ function formatUpdated(fetchedAt: number): string {
   if (diff < 60) return "just now";
   if (diff < 3600) return `${Math.floor(diff / 60)} min ago`;
   if (diff < 86400) return `${Math.floor(diff / 3600)} h ago`;
-  return new Date(fetchedAt * 1000).toLocaleDateString();
+  return new Date(fetchedAt * 1000).toLocaleDateString(dateLocale());
 }
 
 function matchesFilter(item: SeasonalAnime, needle: string): boolean {
@@ -187,6 +191,7 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
   onGlobalSearch,
   seasonRequest,
   onSeasonRequestHandled,
+  showKeyHints,
 }) => {
   const showToast = useToast();
   const { openAnime, addAnime, addAnimeBatch } = useAnimeActions();
@@ -563,6 +568,12 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
   };
 
   const handleKeyDown = (e: KeyboardEvent) => {
+    // By physical key, and from the filter box too (like the watchlist)
+    if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && (e.code === "KeyQ" || e.code === "KeyW")) {
+      e.preventDefault();
+      updatePrefs({ viewMode: e.code === "KeyQ" ? "grid" : "extended" });
+      return;
+    }
     const target = e.target as HTMLElement | null;
     if (
       target &&
@@ -571,11 +582,6 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
         target.tagName === "SELECT" ||
         target.isContentEditable)
     ) {
-      return;
-    }
-    if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && (e.code === "KeyQ" || e.code === "KeyW")) {
-      e.preventDefault();
-      updatePrefs({ viewMode: e.code === "KeyQ" ? "grid" : "extended" });
       return;
     }
     if (e.ctrlKey && !e.altKey && !e.metaKey && e.key.toLowerCase() === "a") {
@@ -739,7 +745,7 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
             {result && (
               <span
                 className={`text-[11px] text-text-muted ${switching ? "invisible" : ""}`}
-                title={new Date(result.fetched_at * 1000).toLocaleString()}
+                title={formatDateTime(new Date(result.fetched_at * 1000))}
               >
                 Updated {formatUpdated(result.fetched_at)}
               </span>
@@ -818,17 +824,18 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
           <div className="flex items-center bg-bg-primary p-1 rounded-xl border border-border-subtle">
             {(
               [
-                { id: "grid", icon: LayoutGrid, title: "Poster grid (Alt+Q)" },
-                { id: "extended", icon: Rows, title: "Extended info: synopsis, tags, prequel (Alt+W)" },
+                { id: "grid", icon: LayoutGrid, title: "Poster grid (Alt+Q)", key: "Q" },
+                { id: "extended", icon: Rows, title: "Extended info: synopsis, tags, prequel (Alt+W)", key: "W" },
               ] as const
-            ).map(({ id, icon: Icon, title }) => (
+            ).map(({ id, icon: Icon, title, key }) => (
               <button
                 key={id}
                 onClick={() => updatePrefs({ viewMode: id })}
                 title={title}
-                className={`p-1.5 rounded-lg transition ${prefs.viewMode === id ? "bg-accent text-white" : "text-text-muted hover:text-text-primary"}`}
+                className={`relative p-1.5 rounded-lg transition ${prefs.viewMode === id ? "bg-accent text-white" : "text-text-muted hover:text-text-primary"}`}
               >
                 <Icon className="w-3.5 h-3.5" />
+                <KeyHint label={key} visible={showKeyHints} className="top-full mt-1 left-1/2 -translate-x-1/2 z-10" />
               </button>
             ))}
           </div>

@@ -483,9 +483,22 @@ export interface HistoryCursor {
   id: number;
 }
 
+/** What a History title search matched (`features/history/titleSearch.ts`) */
+export interface HistoryTitleFilter {
+  ids: number[];
+  /** Logged titles of local rows with no anime id */
+  titles: string[];
+}
+
+/** One anime's titles in the History; `media_id` is null for a local row with no anime id */
+export interface HistoryTitles {
+  media_id: number | null;
+  titles: string[];
+}
+
 export interface HistoryQuery {
   source: HistorySource;
-  search?: string | null;
+  title_filter?: HistoryTitleFilter | null;
   media_id?: number | null;
   /** Only rows at or after this unix second (the History period) */
   from?: number | null;
@@ -690,6 +703,9 @@ export interface AppSettings {
   players: PlayerDefinition[];
   /** Which title the UI shows; missing English / Native titles fall back to Romaji */
   title_language: TitleLanguage;
+  /** BCP 47 locale for dates and times; empty = the Windows regional locale */
+  date_locale: string;
+  time_format: TimeFormat;
   /** Check GitHub for a new Tora release and newer anime relations on startup */
   check_updates_on_startup: boolean;
   /** Imported AniList activity is shown and kept up to date after each sync */
@@ -699,6 +715,9 @@ export interface AppSettings {
 }
 
 export type TitleLanguage = "romaji" | "english" | "native";
+
+/** `auto` = the clock the date locale uses */
+export type TimeFormat = "auto" | "24h" | "12h";
 
 export interface SyncSummary {
   added: number;

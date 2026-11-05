@@ -1,6 +1,7 @@
 // Airing schedule helpers. Weeks are calendar weeks, Monday 00:00 to the next Monday 00:00, in local time.
 
 import { AnimeEntry } from "@/lib/types";
+import { dateLocale, formatTime } from "@/lib/dates";
 
 /** Monday 00:00 (local) of the week containing `date`. */
 export function weekStart(date: Date = new Date()): Date {
@@ -49,14 +50,14 @@ export function sameDay(a: Date, b: Date): boolean {
 /** Column header parts, e.g. { weekday: "Wed", date: "Oct 28" }. */
 export function formatDayHeader(date: Date): { weekday: string; date: string } {
   return {
-    weekday: date.toLocaleDateString(undefined, { weekday: "short" }),
-    date: date.toLocaleDateString(undefined, { month: "short", day: "numeric" }),
+    weekday: date.toLocaleDateString(dateLocale(), { weekday: "short" }),
+    date: date.toLocaleDateString(dateLocale(), { month: "short", day: "numeric" }),
   };
 }
 
-/** Local time of day in the locale's 12/24h format, e.g. "4:30 PM". */
+/** Local time of day in the chosen 12/24h format, e.g. "4:30 PM". */
 export function formatSlotTime(unix: number): string {
-  return new Date(unix * 1000).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  return formatTime(new Date(unix * 1000), { hour: "numeric", minute: "2-digit" });
 }
 
 /** "Oct 26 – Nov 1" (with the year when the week isn't in the current one). */
@@ -65,7 +66,7 @@ export function weekLabel(start: Date): string {
   end.setDate(end.getDate() + 6);
   const showYear = start.getFullYear() !== new Date().getFullYear() || end.getFullYear() !== start.getFullYear();
   const opts: Intl.DateTimeFormatOptions = { month: "short", day: "numeric" };
-  const fmt = (d: Date) => d.toLocaleDateString(undefined, showYear ? { ...opts, year: "numeric" } : opts);
+  const fmt = (d: Date) => d.toLocaleDateString(dateLocale(), showYear ? { ...opts, year: "numeric" } : opts);
   return `${fmt(start)} – ${fmt(end)}`;
 }
 

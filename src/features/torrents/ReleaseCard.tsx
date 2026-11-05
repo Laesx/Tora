@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, HardDrive, Pin, ShieldCheck } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, Download, HardDrive, Pin, ShieldCheck } from "lucide-react";
 import { AnimeEntry, AnimeReleaseCard, BoardRelease } from "@/lib/types";
 import { getOptimizedCoverUrl } from "@/lib/covers";
 import { useAnimeTitle } from "@/contexts/titles";
@@ -16,6 +16,7 @@ interface ReleaseCardProps {
   isChecked: (r: BoardRelease) => boolean;
   onToggle: (keys: string[], checked: boolean) => void;
   onContextMenu: (e: React.MouseEvent, release: BoardRelease, card: AnimeReleaseCard) => void;
+  onDownload: (release: BoardRelease, card: AnimeReleaseCard) => void;
 }
 
 const CODEC_LABEL: Record<string, string> = { hevc: "HEVC", avc: "AVC", av1: "AV1" };
@@ -47,7 +48,8 @@ const ReleaseRow: React.FC<{
   checked: boolean;
   onToggle: (checked: boolean) => void;
   onContextMenu: (e: React.MouseEvent) => void;
-}> = ({ r, card, tierLabels, checked, onToggle, onContextMenu }) => {
+  onDownload: () => void;
+}> = ({ r, card, tierLabels, checked, onToggle, onContextMenu, onDownload }) => {
   const t = r.traits;
   const tierName =
     r.tier == null
@@ -58,9 +60,16 @@ const ReleaseRow: React.FC<{
   return (
     <div
       onClick={() => onToggle(!checked)}
+      // Middle click downloads, like it plays on the watchlist (mousedown is cancelled so WebView2 doesn't start autoscroll)
+      onMouseDown={(e) => {
+        if (e.button === 1) e.preventDefault();
+      }}
+      onAuxClick={(e) => {
+        if (e.button === 1) onDownload();
+      }}
       onContextMenu={onContextMenu}
       title={r.title}
-      className={`grid grid-cols-[18px_58px_minmax(0,1fr)_auto] items-center gap-2.5 px-3 py-2 text-xs cursor-pointer select-none transition ${checked ? "bg-accent/10 hover:bg-accent/15" : "hover:bg-bg-tertiary/50"
+      className={`group grid grid-cols-[18px_58px_minmax(0,1fr)_auto] items-center gap-2.5 px-3 py-2 text-xs cursor-pointer select-none transition ${checked ? "bg-accent/10 hover:bg-accent/15" : "hover:bg-bg-tertiary/50"
         } ${r.discarded_by ? "opacity-50" : ""}`}
     >
       <input
@@ -119,7 +128,23 @@ const ReleaseRow: React.FC<{
           </span>
         )}
         <span className="text-text-muted w-8 text-right">{ageLabel(r.pub_unix)}</span>
-        <span className="w-14 flex justify-end">{stateChip(r, card)}</span>
+        {/* On hover the state badge gives its slot to the download button, so the row needs no extra column */}
+        <span className="relative w-14 flex justify-end">
+          <span className="group-hover:opacity-0 transition-opacity">{stateChip(r, card)}</span>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onDownload();
+            }}
+            title="Download this release (middle-click)"
+            aria-label="Download this release"
+            className="absolute right-0 top-1/2 -translate-y-1/2 flex items-center gap-1 px-1.5 py-0.5 rounded bg-accent/20 text-accent hover:bg-accent hover:text-white text-[10px] font-semibold opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition"
+          >
+            <Download className="w-3 h-3" />
+            Get
+          </button>
+        </span>
       </div>
     </div>
   );
@@ -133,6 +158,7 @@ export const ReleaseCard: React.FC<ReleaseCardProps> = ({
   isChecked,
   onToggle,
   onContextMenu,
+  onDownload,
 }) => {
   const { openAnime } = useAnimeActions();
   const titleOf = useAnimeTitle();
@@ -157,6 +183,7 @@ export const ReleaseCard: React.FC<ReleaseCardProps> = ({
         checked={isChecked(r)}
         onToggle={(c) => onToggle([r.key], c)}
         onContextMenu={(e) => onContextMenu(e, r, card)}
+        onDownload={() => onDownload(r, card)}
       />
     ));
 

@@ -1,3 +1,5 @@
+import { formatDateTime } from "./dates";
+
 export function formatBytes(bytes: number): string {
   if (!bytes || bytes <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -29,7 +31,7 @@ export function formatLastSynced(ts: number): string {
   if (diffSec < 60) return "just now";
   if (diffSec < 3600) return `${Math.floor(diffSec / 60)} min ago`;
   if (diffSec < 86400) return `${Math.floor(diffSec / 3600)} h ago`;
-  return new Date(ms).toLocaleString();
+  return formatDateTime(new Date(ms));
 }
 
 const MINUTE = 60;
@@ -65,7 +67,7 @@ export function formatRelativeTime(unixSec: number, now: number, style: "short" 
 
 /** Unix seconds -> full local date and time (tooltips) */
 export function formatExactTime(unixSec: number): string {
-  return new Date(unixSec * 1000).toLocaleString(undefined, { dateStyle: "full", timeStyle: "short" });
+  return formatDateTime(new Date(unixSec * 1000), { dateStyle: "full", timeStyle: "short" });
 }
 
 /** "1 episode" / "3 episodes" */

@@ -1,5 +1,6 @@
 // One anime's History timeline: watch-throughs → months → one row per day and source.
 import { TimelineEpisode } from "@/lib/types";
+import { dateLocale } from "@/lib/dates";
 
 /** One row: a day's episodes from one source (AniList, Manual, or a player). */
 export interface TimelineDay {
@@ -56,7 +57,7 @@ export function splitWatchThroughs(episodes: TimelineEpisode[]): WatchThrough[] 
 function groupMonths(episodes: TimelineEpisode[]): TimelineMonth[] {
   const months: TimelineMonth[] = [];
   for (const e of episodes) {
-    const label = new Date(e.timestamp_unix * 1000).toLocaleDateString(undefined, { month: "long", year: "numeric" });
+    const label = new Date(e.timestamp_unix * 1000).toLocaleDateString(dateLocale(), { month: "long", year: "numeric" });
     let month = months[months.length - 1];
     if (!month || month.label !== label) {
       month = { label, days: [] };

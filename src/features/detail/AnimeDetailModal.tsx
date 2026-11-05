@@ -40,6 +40,8 @@ import { useScoreFormat } from "@/contexts/scoreFormat";
 import { formatScore, SCORE_SCALES } from "@/lib/scores";
 import { ScoreInput } from "@/components/ScoreInput";
 import { log } from "@/lib/log";
+import { DateInput } from "@/components/DateInput";
+import { todayIso } from "@/lib/dates";
 
 interface AnimeDetailModalProps {
   anime: AnimeEntry;
@@ -90,9 +92,13 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
   const pendingStepSaveRef = useRef<Parameters<typeof toraApi.updateAnimeEntry>[0] | null>(null);
   const backgroundRef = useRef({ onSavedInBackground, showToast });
   backgroundRef.current = { onSavedInBackground, showToast };
+  // The anime on screen; null once the drawer closed. A save that returns after that must not reopen it.
+  const openAnimeIdRef = useRef<number | null>(anime.id);
 
   useEffect(() => {
+    openAnimeIdRef.current = anime.id;
     return () => {
+      openAnimeIdRef.current = null;
       if (stepSaveTimerRef.current) {
         clearTimeout(stepSaveTimerRef.current);
         stepSaveTimerRef.current = null;
@@ -114,17 +120,22 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
     setProgress(anime.user_progress);
     setScore(anime.user_score);
     setRepeats(anime.user_repeats);
-    setStartedAt(anime.user_started_at || "");
-    setCompletedAt(anime.user_completed_at || "");
   }, [
     anime.id,
     anime.user_status,
     anime.user_progress,
     anime.user_score,
     anime.user_repeats,
-    anime.user_started_at,
-    anime.user_completed_at,
   ]);
+
+  // One at a time: a save returning for one date must not wipe the other while it's being typed
+  useEffect(() => {
+    setStartedAt(anime.user_started_at || "");
+  }, [anime.id, anime.user_started_at]);
+
+  useEffect(() => {
+    setCompletedAt(anime.user_completed_at || "");
+  }, [anime.id, anime.user_completed_at]);
 
   // Reload text inputs when switching to a different anime ID
   useEffect(() => {
@@ -184,6 +195,12 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
     nextStartedAt = startedAt,
     nextCompletedAt = completedAt
   ) => {
+    // This save sends the current state, so anything still pending would only overwrite it later
+    if (stepSaveTimerRef.current) {
+      clearTimeout(stepSaveTimerRef.current);
+      stepSaveTimerRef.current = null;
+    }
+    pendingStepSaveRef.current = null;
     setSaving(true);
     try {
       const parsedSynonyms = includeMetadata
@@ -205,6 +222,10 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
         userStartedAt: nextStartedAt.trim(),
         userCompletedAt: nextCompletedAt.trim(),
       });
+      if (openAnimeIdRef.current !== anime.id) {
+        backgroundRef.current.onSavedInBackground?.(updated);
+        return;
+      }
       onUpdated(updated);
       if (includeMetadata) {
         await loadLocalFiles(anime.id);
@@ -265,6 +286,40 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
       pendingStepSaveRef.current = null;
       handleSave(nextStat, nextProg, score, repeats, false);
     }, 1200);
+  };
+
+  /** A date being edited: only remembered, so closing the drawer or switching anime still saves it */
+  const stageDates = (nextStartedAt: string, nextCompletedAt: string) => {
+    if (stepSaveTimerRef.current) {
+      clearTimeout(stepSaveTimerRef.current);
+      stepSaveTimerRef.current = null;
+    }
+    pendingStepSaveRef.current = {
+      animeId: anime.id,
+      userStatus: status,
+      userProgress: progress,
+      userScore: score,
+      userRepeats: repeats,
+      userNotes: notes,
+      customFolder: customFolder.trim() || null,
+      synonyms: null,
+      userStartedAt: nextStartedAt.trim(),
+      userCompletedAt: nextCompletedAt.trim(),
+    };
+  };
+
+  /** The user left a date field: save once, and only if something changed */
+  const commitDates = (nextStartedAt: string, nextCompletedAt: string) => {
+    const unchanged =
+      nextStartedAt === (anime.user_started_at || "") &&
+      nextCompletedAt === (anime.user_completed_at || "") &&
+      status === anime.user_status &&
+      progress === anime.user_progress;
+    if (unchanged) {
+      pendingStepSaveRef.current = null;
+      return;
+    }
+    handleSave(status, progress, score, repeats, false, nextStartedAt, nextCompletedAt);
   };
 
   const handlePlayEpisodeNumber = async (epNum: number) => {
@@ -643,7 +698,7 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
                     <button
                       type="button"
                       onClick={() => {
-                        const today = new Date().toISOString().slice(0, 10);
+                        const today = todayIso();
                         setStartedAt(today);
                         handleSave(status, progress, score, repeats, false, today, completedAt);
                       }}
@@ -652,14 +707,13 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
                       Set Today
                     </button>
                   </div>
-                  <input
-                    type="date"
+                  <DateInput
                     value={startedAt}
-                    onChange={(e) => {
-                      const nextDate = e.target.value;
+                    onChange={(nextDate) => {
                       setStartedAt(nextDate);
-                      handleSave(status, progress, score, repeats, false, nextDate, completedAt);
+                      stageDates(nextDate, completedAt);
                     }}
+                    onCommit={(nextDate) => commitDates(nextDate, completedAt)}
                     className="w-full px-3 py-2 rounded-lg bg-bg-primary border border-border-subtle text-xs font-mono text-text-primary focus:outline-none focus:border-accent"
                   />
                 </div>
@@ -672,7 +726,7 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
                     <button
                       type="button"
                       onClick={() => {
-                        const today = new Date().toISOString().slice(0, 10);
+                        const today = todayIso();
                         setCompletedAt(today);
                         handleSave(status, progress, score, repeats, false, startedAt, today);
                       }}
@@ -681,14 +735,13 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
                       Set Today
                     </button>
                   </div>
-                  <input
-                    type="date"
+                  <DateInput
                     value={completedAt}
-                    onChange={(e) => {
-                      const nextDate = e.target.value;
+                    onChange={(nextDate) => {
                       setCompletedAt(nextDate);
-                      handleSave(status, progress, score, repeats, false, startedAt, nextDate);
+                      stageDates(startedAt, nextDate);
                     }}
+                    onCommit={(nextDate) => commitDates(startedAt, nextDate)}
                     className="w-full px-3 py-2 rounded-lg bg-bg-primary border border-border-subtle text-xs font-mono text-text-primary focus:outline-none focus:border-accent"
                   />
                 </div>

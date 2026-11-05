@@ -39,6 +39,7 @@ import { useToast } from "@/contexts/toast";
 import { useAnimeActions } from "@/contexts/animeActions";
 import { usePrefs } from "@/hooks/usePrefs";
 import { useNavCapture } from "@/app/navigation";
+import { dateLocale, formatDateTime } from "@/lib/dates";
 
 /** Back restores this week (`weekStart` = its Monday, ms) */
 export interface ScheduleRequest {
@@ -370,7 +371,7 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({
             disabled={busy}
             title={
               result
-                ? `Refetch this week from AniList • Updated ${new Date(result.fetched_at * 1000).toLocaleString()}`
+                ? `Refetch this week from AniList • Updated ${formatDateTime(new Date(result.fetched_at * 1000))}`
                 : "Refetch this week from AniList"
             }
             className="p-2 rounded-xl bg-bg-secondary hover:bg-bg-tertiary border border-border-subtle text-text-secondary hover:text-text-primary transition disabled:opacity-60"
@@ -737,7 +738,7 @@ const ScheduleCard: React.FC<{
 const BreakCard: React.FC<{ brk: InferredBreak; handlers: CardHandlers }> = ({ brk, handlers }) => {
   const titleOf = useAnimeTitle();
   const next = new Date(brk.nextAt * 1000);
-  const nextLabel = next.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+  const nextLabel = next.toLocaleDateString(dateLocale(), { weekday: "short", month: "short", day: "numeric" });
   return (
     <div
       role="button"

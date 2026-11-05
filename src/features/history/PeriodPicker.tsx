@@ -1,15 +1,16 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { HistorySource, MonthCount } from "@/lib/types";
+import { HistorySource, HistoryTitleFilter, MonthCount } from "@/lib/types";
 import { toraApi } from "@/lib/api";
 import { log } from "@/lib/log";
 import { SEASONS, seasonName } from "@/lib/seasons";
 import { HistoryPeriod, MonthKey, monthId, monthIndex, monthRange, periodMonths } from "./period";
+import { dateLocale } from "@/lib/dates";
 
 interface PeriodPickerProps {
   period: HistoryPeriod | null;
-  /** The list's source and title search: the counts follow them */
+  /** The list's source and title filter: the counts follow them */
   source: HistorySource;
-  search: string;
+  titleFilter: HistoryTitleFilter | null;
   /** Changes when the counts may have changed */
   refreshKey: unknown;
   onSelect: (period: HistoryPeriod) => void;
@@ -18,7 +19,7 @@ interface PeriodPickerProps {
   onClose: () => void;
 }
 
-const MONTHS = Array.from({ length: 12 }, (_, m) => new Date(2000, m, 1).toLocaleDateString(undefined, { month: "short" }));
+const monthNames = () => Array.from({ length: 12 }, (_, m) => new Date(2000, m, 1).toLocaleDateString(dateLocale(), { month: "short" }));
 // Same steps as the Stats heatmap: accent opacity per quarter of the busiest month
 const HEAT_OPACITY = [0, 0.3, 0.5, 0.75, 1];
 const heatLevel = (count: number, max: number) => (count === 0 ? 0 : Math.min(4, Math.ceil((count / max) * 4)));
@@ -31,7 +32,7 @@ const heatLevel = (count: number, max: number) => (count === 0 ? 0 : Math.min(4,
 export const PeriodPicker: React.FC<PeriodPickerProps> = ({
   period,
   source,
-  search,
+  titleFilter,
   refreshKey,
   onSelect,
   onClear,
@@ -64,14 +65,15 @@ export const PeriodPicker: React.FC<PeriodPickerProps> = ({
   useEffect(() => {
     let cancelled = false;
     toraApi
-      .getHistoryMonthCounts(source, search || null)
+      .getHistoryMonthCounts(source, titleFilter)
       .then((c) => !cancelled && setCounts(c))
       .catch((e) => log.error("history", "Loading the month counts failed", e));
     return () => {
       cancelled = true;
     };
-  }, [source, search, refreshKey]);
+  }, [source, titleFilter, refreshKey]);
 
+  const months = useMemo(monthNames, []);
   const now = new Date();
   const thisMonth = monthIndex({ year: now.getFullYear(), month: now.getMonth() });
   const { byMonth, max, years } = useMemo(() => {
@@ -114,7 +116,7 @@ export const PeriodPicker: React.FC<PeriodPickerProps> = ({
       <div className="flex items-center gap-2 pl-24 text-[9px] font-mono text-text-muted">
         {SEASONS.map((s, q) => (
           <div key={s} className="flex-1 grid grid-cols-3 gap-0.5 text-center">
-            {MONTHS.slice(q * 3, q * 3 + 3).map((m) => (
+            {months.slice(q * 3, q * 3 + 3).map((m) => (
               <span key={m}>{m}</span>
             ))}
           </div>
@@ -159,7 +161,7 @@ export const PeriodPicker: React.FC<PeriodPickerProps> = ({
                             key={offset}
                             disabled={future}
                             onClick={(e) => pickMonth(k, e.shiftKey)}
-                            title={`${MONTHS[k.month]} ${year}: ${count} episode${count === 1 ? "" : "s"}`}
+                            title={`${months[k.month]} ${year}: ${count} episode${count === 1 ? "" : "s"}`}
                             className={`relative h-6 rounded overflow-hidden text-[9px] font-mono transition disabled:opacity-30 disabled:cursor-default ${
                               selected(i) ? "ring-2 ring-text-primary" : i === thisMonth ? "ring-1 ring-accent/60" : ""
                             } ${level === 0 ? "bg-bg-tertiary text-text-muted" : "text-white"} enabled:hover:brightness-125`}

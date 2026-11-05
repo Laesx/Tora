@@ -27,6 +27,8 @@ import { openAnimeFolder, playLocalEpisode } from "@/lib/anime";
 import { useCustomLists } from "@/contexts/customLists";
 import { CustomListsPanel } from "./CustomListsPanel";
 import { AiringDot } from "./AiringDot";
+import { DateInput } from "./DateInput";
+import { formatDate, todayIso } from "@/lib/dates";
 import { useAnimeTitle } from "@/contexts/titles";
 import { torrentSearchFor } from "@/lib/torrents";
 import { useToast } from "@/contexts/toast";
@@ -70,7 +72,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
   const targets = isMultiSelect ? selectedAnime : [anime];
   const targetIds = targets.map((a) => a.id);
 
-  const todayIso = new Date().toISOString().slice(0, 10);
+  const today = todayIso();
 
   // Shared inline editor state for both single and multi-select menus
   const [activePanel, setActivePanel] = useState<ActiveInlinePanel>(null);
@@ -79,10 +81,10 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
   );
   const [notesMode, setNotesMode] = useState<"replace" | "append">("replace");
   const [dateStartedValue, setDateStartedValue] = useState<string>(
-    (!isMultiSelect && anime.user_started_at) || todayIso
+    (!isMultiSelect && anime.user_started_at) || today
   );
   const [dateCompletedValue, setDateCompletedValue] = useState<string>(
-    (!isMultiSelect && anime.user_completed_at) || todayIso
+    (!isMultiSelect && anime.user_completed_at) || today
   );
   const [scoreValue, setScoreValue] = useState<number>(
     !isMultiSelect && anime.user_score > 0 ? anime.user_score : 85
@@ -152,7 +154,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
           user_started_at: dateStr,
         },
         dateStr
-          ? `Set Date Started to ${dateStr} for ${targets.length} anime`
+          ? `Set Date Started to ${formatDate(dateStr)} for ${targets.length} anime`
           : `Cleared Date Started for ${targets.length} anime`
       );
     };
@@ -165,7 +167,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
           user_completed_at: dateStr,
         },
         dateStr
-          ? `Set Date Completed to ${dateStr} for ${targets.length} anime`
+          ? `Set Date Completed to ${formatDate(dateStr)} for ${targets.length} anime`
           : `Cleared Date Completed for ${targets.length} anime`
       );
     };
@@ -418,14 +420,14 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
         {/* Bulk Dates & Notes */}
         <div className="py-1">
           <button
-            onClick={() => handleApplyDateStarted(todayIso)}
+            onClick={() => handleApplyDateStarted(today)}
             className={itemClass}
           >
             <span className="flex items-center gap-2">
               <Calendar className="w-3.5 h-3.5 text-emerald-400" />
               <span>Set Date Started → Today</span>
             </span>
-            <span className="font-mono text-[10px] text-text-muted">{todayIso}</span>
+            <span className="font-mono text-[10px] text-text-muted">{formatDate(today)}</span>
           </button>
 
           <button onClick={() => togglePanel("date_started")} className={itemClass}>
@@ -446,7 +448,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
                 <span>Date Started</span>
                 <div className="flex items-center gap-2">
                   <button
-                    onClick={() => setDateStartedValue(todayIso)}
+                    onClick={() => setDateStartedValue(today)}
                     className="text-accent hover:underline font-semibold"
                   >
                     Today
@@ -460,12 +462,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
                 </div>
               </div>
               <div className="flex items-center gap-1.5">
-                <input
-                  type="date"
-                  value={dateStartedValue}
-                  onChange={(e) => setDateStartedValue(e.target.value)}
-                  className="w-full px-2 py-1 rounded bg-bg-secondary border border-border-subtle text-xs font-mono text-text-primary focus:outline-none focus:border-accent"
-                />
+                <DateInput value={dateStartedValue} onChange={setDateStartedValue} className="w-full px-2 py-1 rounded bg-bg-secondary border border-border-subtle text-xs font-mono text-text-primary focus:outline-none focus:border-accent" />
                 <button
                   onClick={() => handleApplyDateStarted(dateStartedValue)}
                   className="px-2.5 py-1 rounded bg-accent hover:bg-accent-hover text-white font-semibold text-[11px] shrink-0 flex items-center gap-1"
@@ -495,7 +492,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
                 <span>Date Completed</span>
                 <div className="flex items-center gap-2">
                   <button
-                    onClick={() => setDateCompletedValue(todayIso)}
+                    onClick={() => setDateCompletedValue(today)}
                     className="text-accent hover:underline font-semibold"
                   >
                     Today
@@ -509,12 +506,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
                 </div>
               </div>
               <div className="flex items-center gap-1.5">
-                <input
-                  type="date"
-                  value={dateCompletedValue}
-                  onChange={(e) => setDateCompletedValue(e.target.value)}
-                  className="w-full px-2 py-1 rounded bg-bg-secondary border border-border-subtle text-xs font-mono text-text-primary focus:outline-none focus:border-accent"
-                />
+                <DateInput value={dateCompletedValue} onChange={setDateCompletedValue} className="w-full px-2 py-1 rounded bg-bg-secondary border border-border-subtle text-xs font-mono text-text-primary focus:outline-none focus:border-accent" />
                 <button
                   onClick={() => handleApplyDateCompleted(dateCompletedValue)}
                   className="px-2.5 py-1 rounded bg-accent hover:bg-accent-hover text-white font-semibold text-[11px] shrink-0 flex items-center gap-1"
@@ -691,7 +683,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
         user_started_at: dateStr,
       },
       dateStr
-        ? `Set Date Started to ${dateStr} for "${titleOf(anime)}"`
+        ? `Set Date Started to ${formatDate(dateStr)} for "${titleOf(anime)}"`
         : `Cleared Date Started for "${titleOf(anime)}"`
     );
   };
@@ -909,7 +901,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
             <span>Set Date Started...</span>
           </span>
           <span className="font-mono text-[10px] text-text-muted">
-            {anime.user_started_at || "None"}
+            {anime.user_started_at ? formatDate(anime.user_started_at) : "None"}
           </span>
         </button>
 
@@ -917,10 +909,10 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
           <div className="mx-2 my-1 p-2 rounded-lg bg-bg-primary border border-border-subtle space-y-1.5">
             <div className="flex items-center justify-between text-[10px] text-text-muted">
               <button
-                onClick={() => handleSingleSaveDateStarted(todayIso)}
+                onClick={() => handleSingleSaveDateStarted(today)}
                 className="text-accent hover:underline font-semibold"
               >
-                Set Today ({todayIso})
+                Set Today ({formatDate(today)})
               </button>
               {anime.user_started_at && (
                 <button
@@ -932,12 +924,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
               )}
             </div>
             <div className="flex items-center gap-1">
-              <input
-                type="date"
-                value={dateStartedValue}
-                onChange={(e) => setDateStartedValue(e.target.value)}
-                className="w-full px-2 py-1 rounded bg-bg-secondary border border-border-subtle text-xs font-mono text-text-primary focus:outline-none focus:border-accent"
-              />
+              <DateInput value={dateStartedValue} onChange={setDateStartedValue} className="w-full px-2 py-1 rounded bg-bg-secondary border border-border-subtle text-xs font-mono text-text-primary focus:outline-none focus:border-accent" />
               <button
                 onClick={() => handleSingleSaveDateStarted(dateStartedValue)}
                 className="px-2 py-1 rounded bg-accent hover:bg-accent-hover text-white font-semibold text-[11px] shrink-0"

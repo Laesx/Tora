@@ -42,6 +42,8 @@ import {
   WatchStats,
   AniListHistoryStatus,
   HistoryQuery,
+  HistoryTitleFilter,
+  HistoryTitles,
   HistoryRow,
   HistorySource,
   MonthCount,
@@ -223,9 +225,12 @@ export const toraApi = {
   /** One page of History (newest first; pass the last row's `cursor` as `before` for the next) */
   listHistory: (query: HistoryQuery) => invoke<HistoryRow[]>("list_history", { query }),
 
-  /** Watched episodes per local month (History period picker), same source and search as the list */
-  getHistoryMonthCounts: (source: HistorySource, search: string | null) =>
-    invoke<MonthCount[]>("get_history_month_counts", { source, search }),
+  /** Watched episodes per local month (History period picker), same source and title filter as the list */
+  getHistoryMonthCounts: (source: HistorySource, titleFilter: HistoryTitleFilter | null) =>
+    invoke<MonthCount[]>("get_history_month_counts", { source, titleFilter }),
+
+  /** The titles of every anime in the History, for the fuzzy title search */
+  getHistoryTitles: () => invoke<HistoryTitles[]>("get_history_titles"),
 
   getHistoryTimeline: (mediaId: number) => invoke<TimelineEpisode[]>("get_history_timeline", { mediaId }),
 
@@ -240,6 +245,9 @@ export const toraApi = {
   refreshAniListHistory: () => invoke<number>("refresh_anilist_history"),
 
   clearAniListHistory: () => invoke<void>("clear_anilist_history"),
+
+  /** The Windows regional locale ("es-ES"); empty if unknown */
+  getSystemLocale: () => invoke<string>("get_system_locale"),
 
   getAppInfo: () => invoke<AppInfo>("get_app_info"),
 

@@ -6,6 +6,7 @@ import { plural } from "@/lib/format";
 import { SEASONS, SeasonName } from "@/lib/seasons";
 import { WATCHLIST_TABS } from "@/lib/status";
 import { animeTitle, setCurrentTitleLanguage, TitleLanguageContext } from "@/contexts/titles";
+import { setDateSettings } from "@/lib/dates";
 import { CustomListsContext } from "@/contexts/customLists";
 import { ToastContext } from "@/contexts/toast";
 import { ScoreFormatContext } from "@/contexts/scoreFormat";
@@ -64,6 +65,8 @@ export const App: React.FC = () => {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const titleLanguage = settings?.title_language ?? "romaji";
   setCurrentTitleLanguage(titleLanguage);
+  const [systemLocale, setSystemLocale] = useState("");
+  setDateSettings(settings?.date_locale, systemLocale, settings?.time_format);
   const titleOf = useCallback((a: AnimeEntry) => animeTitle(a, titleLanguage), [titleLanguage]);
 
   /* useBrowserGuards(); */ // Disabled for now since it has to be checked
@@ -217,7 +220,7 @@ export const App: React.FC = () => {
   const [signOutModalOpen, setSignOutModalOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const showShortcutHints = useModifierHint("Control");
-  const showWatchlistKeyHints = useModifierHint("Alt");
+  const showAltKeyHints = useModifierHint("Alt");
   const [isAuthorizingAnilist, setIsAuthorizingAnilist] = useState(false);
   const [libraryRefreshTick, setLibraryRefreshTick] = useState(0);
   // Sync requires an OAuth token; a bare username no longer counts as signed in
@@ -279,7 +282,12 @@ export const App: React.FC = () => {
 
   const loadInitialData = async () => {
     try {
-      const [s, entries] = await Promise.all([toraApi.getAppSettings(), toraApi.getAnimeList()]);
+      const [s, entries, locale] = await Promise.all([
+        toraApi.getAppSettings(),
+        toraApi.getAnimeList(),
+        toraApi.getSystemLocale().catch(() => ""),
+      ]);
+      setSystemLocale(locale);
       setSettings(s);
       applyThemeToDocument(s.theme, s.accent_color);
       list.setList(entries);
@@ -696,7 +704,11 @@ export const App: React.FC = () => {
                         }}
                       >
                         {/* One crashing tab shows its error; the sidebar and other tabs keep working */}
-                        <ErrorBoundary key={activeTab} scope={`tab:${activeTab}`}>
+                        {/* Keyed on the date settings too: a change redraws every date label behind the Settings modal */}
+                        <ErrorBoundary
+                          key={`${activeTab}|${settings?.date_locale ?? ""}|${settings?.time_format ?? "auto"}`}
+                          scope={`tab:${activeTab}`}
+                        >
                           {activeTab === "watchlist" && (
                             <WatchlistView
                               watchlist={watchlist}
@@ -718,7 +730,7 @@ export const App: React.FC = () => {
                               onSetQuickMenuAnimeId={list.setQuickMenuAnimeId}
                               searchInputRef={watchlistSearchRef}
                               navRef={watchlistNavRef}
-                              showKeyHints={showWatchlistKeyHints}
+                              showKeyHints={showAltKeyHints}
                             />
                           )}
 
@@ -747,6 +759,7 @@ export const App: React.FC = () => {
                               onGlobalSearch={openGlobalSearch}
                               seasonRequest={seasonRequest}
                               onSeasonRequestHandled={() => setSeasonRequest(null)}
+                              showKeyHints={showAltKeyHints}
                             />
                           )}
 

@@ -39,6 +39,7 @@ import { useNow } from "@/hooks/useNow";
 import { useClickSelection } from "@/hooks/useClickSelection";
 import type { SortDir, WatchlistSortKey } from "./sort";
 import { TABLE_COLUMNS, TableColumn, TableColumnId, clampColumnWidth, useTableColumns } from "./tableColumns";
+import { formatDate } from "@/lib/dates";
 
 /** A titled section of the list (search results grouped by status) */
 export interface WatchlistGroup {
@@ -749,7 +750,7 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
       case "title": {
         const subline = [
           anime.studios.join(", "),
-          anime.user_started_at ? `Started ${anime.user_started_at}` : "",
+          anime.user_started_at ? `Started ${formatDate(anime.user_started_at)}` : "",
         ]
           .filter(Boolean)
           .join(" · ");

@@ -12,7 +12,8 @@ pub mod updates;
 
 use crate::db::{
     AniListHistoryStatus, AnimeEntry, AppSettings, BatchAnimeUpdatePatch, CachedSeason,
-    CustomListChange, CustomListsState, Database, HistoryQuery, HistoryRow, HistorySource, LibraryFolder,
+    CustomListChange, CustomListsState, Database, HistoryQuery, HistoryRow, HistorySource, HistoryTitleFilter,
+    HistoryTitles, LibraryFolder,
     ListStats, LocalEpisodeFile, MonthCount, SettingsBackupInfo, TimelineEpisode, WatchHistoryEntry,
 };
 use crate::detection::anisthesia::{
@@ -1067,6 +1068,22 @@ async fn get_watch_history(
         .map_err(|e| e.to_string())?
 }
 
+/// The Windows regional locale (Region → Regional format), e.g. "es-ES". The webview only knows the
+/// display language, which can differ. Empty if it can't be read.
+#[tauri::command]
+async fn get_system_locale() -> String {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Globalization::GetUserDefaultLocaleName;
+        let mut name = [0u16; 85]; // LOCALE_NAME_MAX_LENGTH
+        let len = unsafe { GetUserDefaultLocaleName(name.as_mut_ptr(), name.len() as i32) };
+        if len > 1 {
+            return String::from_utf16_lossy(&name[..len as usize - 1]);
+        }
+    }
+    String::new()
+}
+
 /// One page of the History tab (local rows, imported AniList-only rows or both; keyset paginated).
 #[tauri::command]
 async fn list_history(state: State<'_, AppState>, query: HistoryQuery) -> Result<Vec<HistoryRow>, String> {
@@ -1076,15 +1093,24 @@ async fn list_history(state: State<'_, AppState>, query: HistoryQuery) -> Result
         .map_err(|e| e.to_string())?
 }
 
-/// Watched episodes per local month for the History period picker (same source / search as the list).
+/// Watched episodes per local month for the History period picker (same source / title filter as the list).
 #[tauri::command]
 async fn get_history_month_counts(
     state: State<'_, AppState>,
     source: HistorySource,
-    search: Option<String>,
+    title_filter: Option<HistoryTitleFilter>,
 ) -> Result<Vec<MonthCount>, String> {
     let db = state.db.clone();
-    tokio::task::spawn_blocking(move || db.history_month_counts(source, search.as_deref()))
+    tokio::task::spawn_blocking(move || db.history_month_counts(source, title_filter.as_ref()))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// The titles of every anime in the History, for the fuzzy title search in the frontend.
+#[tauri::command]
+async fn get_history_titles(state: State<'_, AppState>) -> Result<Vec<HistoryTitles>, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || db.history_titles())
         .await
         .map_err(|e| e.to_string())?
 }
@@ -2035,8 +2061,10 @@ pub fn run() {
             confirm_playback_update,
             link_detected_episode_to_anime,
             get_watch_history,
+            get_system_locale,
             list_history,
             get_history_month_counts,
+            get_history_titles,
             get_history_timeline,
             get_anilist_history_status,
             start_anilist_history_import,

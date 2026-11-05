@@ -16,7 +16,7 @@ mod settings;
 
 pub use activity::{
     AniListHistoryState, AniListHistoryStatus, HistoryCursor, HistoryQuery, HistoryRow, HistorySource,
-    ImportStatus, MonthCount, TimelineEpisode,
+    HistoryTitleFilter, HistoryTitles, ImportStatus, MonthCount, TimelineEpisode,
 };
 pub use settings::{
     SettingsBackupInfo, TORRENT_BOARD_OPTIONS_KEY, TORRENT_FANSUBS_KEY, TORRENT_FEEDS_KEY,
@@ -327,6 +327,12 @@ pub struct AppSettings {
     /// Has a serde default so settings saved before it existed still deserialize.
     #[serde(default = "default_title_language")]
     pub title_language: String,
+    /// BCP 47 locale for dates and times (Settings → Appearance); empty = the Windows regional locale.
+    #[serde(default)]
+    pub date_locale: String,
+    /// Clock for times: "auto" (what the date locale uses) | "24h" | "12h".
+    #[serde(default = "default_time_format")]
+    pub time_format: String,
     /// Check GitHub for a new Tora release and a newer `anime-relations.txt` on startup.
     #[serde(default = "default_true")]
     pub check_updates_on_startup: bool,
@@ -345,6 +351,10 @@ fn default_update_mode() -> String {
 
 fn default_title_language() -> String {
     "romaji".into()
+}
+
+fn default_time_format() -> String {
+    "auto".into()
 }
 
 fn default_true() -> bool {
@@ -385,6 +395,8 @@ impl Default for AppSettings {
             torrent_auto_download: false,
             players: default_players(),
             title_language: default_title_language(),
+            date_locale: String::new(),
+            time_format: default_time_format(),
             check_updates_on_startup: true,
             anilist_history_enabled: false,
             settings_recovered: false,
@@ -4639,6 +4651,17 @@ mod tests {
         let s: AppSettings = serde_json::from_value(json).unwrap();
         assert_eq!(s.title_language, "romaji");
         assert_eq!(s.anilist_token, "tok");
+    }
+
+    #[test]
+    fn settings_saved_before_date_format_still_load() {
+        let mut json = serde_json::to_value(AppSettings::default()).unwrap();
+        let map = json.as_object_mut().unwrap();
+        map.remove("date_locale");
+        map.remove("time_format");
+        let s: AppSettings = serde_json::from_value(json).unwrap();
+        assert_eq!(s.date_locale, "");
+        assert_eq!(s.time_format, "auto");
     }
 
     fn insert_episode(db: &Database, anime_id: Option<i64>, file: &str, ep: u32, watched: bool) {

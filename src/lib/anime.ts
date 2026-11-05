@@ -4,6 +4,7 @@ import { seasonName } from "./seasons";
 import { displayTitle } from "@/contexts/titles";
 
 import type { ShowToast } from "@/contexts/toast";
+import { dateLocale } from "./dates";
 
 const ANILIST = "https://anilist.co";
 
@@ -100,10 +101,10 @@ export function fuzzyDateToDate(value: string | null | undefined): Date | null {
 export function formatFuzzyDate(value: string | null | undefined): string | null {
   if (!value) return null;
   const full = fuzzyDateToDate(value);
-  if (full) return full.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  if (full) return full.toLocaleDateString(dateLocale(), { year: "numeric", month: "short", day: "numeric" });
   const m = value.match(/^(\d{4})-(\d{2})$/);
   if (m) {
-    return new Date(Number(m[1]), Number(m[2]) - 1, 1).toLocaleDateString(undefined, {
+    return new Date(Number(m[1]), Number(m[2]) - 1, 1).toLocaleDateString(dateLocale(), {
       year: "numeric",
       month: "short",
     });
