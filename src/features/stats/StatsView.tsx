@@ -236,7 +236,7 @@ export const StatsView: React.FC<StatsViewProps> = ({
   const readyEpisodes = ready.reduce((n, r) => n + r.unwatched_on_disk, 0);
 
   return (
-    <div className="p-6 space-y-5 max-w-6xl mx-auto">
+    <div className="p-6 space-y-5 max-w-7xl mx-auto">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <h1 className="text-xl font-bold text-text-primary flex items-center gap-2.5">
           <BarChart3 className="w-6 h-6 text-accent" />
@@ -297,8 +297,8 @@ export const StatsView: React.FC<StatsViewProps> = ({
         aside={
           stats.first_logged_at
             ? `${stats.logged_episodes.toLocaleString()} episodes logged since ${new Date(
-                stats.first_logged_at * 1000
-              ).toLocaleDateString(dateLocale())}`
+              stats.first_logged_at * 1000
+            ).toLocaleDateString(dateLocale())}`
             : undefined
         }
       >
@@ -510,9 +510,8 @@ const StatusBar: React.FC<{
               onClick={() => onOpenStatus(s.id)}
               onMouseEnter={() => setHover(s.id)}
               aria-label={`${s.label}: ${n}`}
-              className={`h-full transition-opacity focus:outline-none ${i === 0 ? "rounded-l" : ""} ${
-                i === segments.length - 1 ? "rounded-r" : ""
-              } ${hover && hover !== s.id ? "opacity-40" : ""}`}
+              className={`h-full transition-opacity focus:outline-none ${i === 0 ? "rounded-l" : ""} ${i === segments.length - 1 ? "rounded-r" : ""
+                } ${hover && hover !== s.id ? "opacity-40" : ""}`}
               style={{ flexGrow: n, flexBasis: 0, minWidth: 4, backgroundColor: s.color }}
             />
           );
@@ -527,9 +526,8 @@ const StatusBar: React.FC<{
               onClick={() => onOpenStatus(s.id)}
               onMouseEnter={() => setHover(s.id)}
               onMouseLeave={() => setHover(null)}
-              className={`flex items-center gap-1.5 text-xs rounded px-1 -mx-1 hover:bg-bg-tertiary transition ${
-                hover === s.id ? "bg-bg-tertiary" : ""
-              }`}
+              className={`flex items-center gap-1.5 text-xs rounded px-1 -mx-1 hover:bg-bg-tertiary transition ${hover === s.id ? "bg-bg-tertiary" : ""
+                }`}
             >
               <span className="w-2.5 h-2.5 rounded-sm shrink-0" style={{ backgroundColor: s.color }} />
               <span className="text-text-secondary">{s.label}</span>
@@ -660,9 +658,8 @@ const MonthBars: React.FC<{ months: MonthBar[]; onOpenMonth: (month: MonthBar) =
               </div>
             )}
             <div
-              className={`w-full max-w-[28px] rounded-t bg-accent transition-opacity ${
-                hover !== null && hover !== i ? "opacity-50" : ""
-              }`}
+              className={`w-full max-w-[28px] rounded-t bg-accent transition-opacity ${hover !== null && hover !== i ? "opacity-50" : ""
+                }`}
               style={{ height: m.count ? `${Math.max(3, (m.count / max) * 100)}%` : 0 }}
             />
           </div>

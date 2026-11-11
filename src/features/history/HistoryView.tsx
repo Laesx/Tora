@@ -286,7 +286,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ animeList, refreshKey,
   const importing = status?.status === "running" || status?.status === "paused";
 
   return (
-    <div className="p-6 space-y-5 max-w-5xl mx-auto">
+    <div className="p-6 space-y-5 max-w-7xl mx-auto">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <h1 className="text-xl font-bold text-text-primary flex items-center gap-2.5">
           <History className="w-6 h-6 text-accent" />
@@ -416,9 +416,8 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ animeList, refreshKey,
                 <button
                   key={id}
                   onClick={() => setSource(id)}
-                  className={`px-3 py-1 rounded-lg text-xs font-semibold transition ${
-                    source === id ? "bg-accent text-white" : "text-text-secondary hover:text-text-primary"
-                  }`}
+                  className={`px-3 py-1 rounded-lg text-xs font-semibold transition ${source === id ? "bg-accent text-white" : "text-text-secondary hover:text-text-primary"
+                    }`}
                 >
                   {label}
                 </button>
@@ -455,11 +454,11 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ animeList, refreshKey,
                 ? "No entries match the filter."
                 : period
                   ? `Nothing watched in ${periodLabel(period)}.`
-                : source === "anilist"
-                  ? anilist.hasData
-                    ? "Every episode in your AniList history was also logged by Tora."
-                    : "Nothing imported from AniList yet."
-                  : "No history yet. Play an episode or update your progress to start tracking."}
+                  : source === "anilist"
+                    ? anilist.hasData
+                      ? "Every episode in your AniList history was also logged by Tora."
+                      : "Nothing imported from AniList yet."
+                    : "No history yet. Play an episode or update your progress to start tracking."}
           </p>
           {source === "anilist" && !anilist.hasData && !importing && (
             <button
