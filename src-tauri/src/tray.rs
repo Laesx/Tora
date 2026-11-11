@@ -11,6 +11,7 @@ use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, Window, Wry};
 use tauri_plugin_autostart::ManagerExt;
+use tauri_plugin_window_state::{AppHandleExt, StateFlags};
 
 use crate::db::AppSettings;
 use crate::AppState;
@@ -21,6 +22,10 @@ const MAIN_WINDOW: &str = "main";
 pub const AUTOSTART_ARG: &str = "--autostart";
 /// Carries the full `AppSettings` after the backend changed them (tray detection toggle).
 pub const EVENT_SETTINGS_CHANGED: &str = "settings-changed";
+/// What `tauri_plugin_window_state` remembers of the main window. Not fullscreen (F11 is per
+/// session) and not visibility (`setup` decides it).
+pub const WINDOW_STATE_FLAGS: StateFlags =
+    StateFlags::SIZE.union(StateFlags::POSITION).union(StateFlags::MAXIMIZED);
 
 pub struct TrayState {
     tray_enabled: AtomicBool,
@@ -168,12 +173,20 @@ pub fn show_main_window(app: &AppHandle) {
 }
 
 /// Hiding isn't a 0×0 resize, so WebView2's low memory target is set here.
+/// The window state is also saved now: the plugin only writes it on a clean exit, and an app living
+/// in the tray is often ended by a shutdown instead.
 pub fn hide_to_tray(window: &Window) {
     let _ = window.hide();
     #[cfg(windows)]
     if let Some(webview) = window.app_handle().get_webview_window(window.label()) {
         crate::memory::set_low_memory_target(&webview, true);
     }
+    let app = window.app_handle().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Err(e) = app.save_window_state(WINDOW_STATE_FLAGS) {
+            log::warn!(target: "app", "saving the window state failed: {}", e);
+        }
+    });
 }
 
 /// "Watching Frieren · Ep 5" in the tooltip and the menu's first line; None = nothing playing.

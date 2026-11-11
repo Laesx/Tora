@@ -1947,6 +1947,13 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec![tray::AUTOSTART_ARG]),
         ))
+        // Size, position and maximized state of the main window, restored before `setup` shows it
+        // (never its visibility: `setup` decides that, start in the tray included)
+        .plugin(
+            tauri_plugin_window_state::Builder::new()
+                .with_state_flags(tray::WINDOW_STATE_FLAGS)
+                .build(),
+        )
         .setup(|app| {
             let app_data = app
                 .path()
