@@ -9,7 +9,6 @@
 </p>
 
 > [!WARNING]
-> Tora is under heavy development. Expect bugs and breaking changes.
 > 
 > Only AniList is supported for now, and only on Windows.
 > 
