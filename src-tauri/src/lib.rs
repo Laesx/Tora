@@ -8,6 +8,7 @@ pub mod memory;
 pub mod plugins;
 pub mod sync;
 pub mod torrents;
+pub mod tray;
 pub mod updates;
 
 use crate::db::{
@@ -731,23 +732,43 @@ async fn poll_media_recognition(
         .map_err(|e| e.to_string())??;
     let session = poll_session(&app, &state, &settings).await;
 
-    // Discord shows a matched episode while its player is open; anything else clears it
-    let presence = match session.as_ref() {
-        Ok(Some(s)) if settings.discord_presence_enabled => {
-            discord_presence_for(&state, s, &settings.title_language).await
+    // Discord and the tray show a matched episode while its player is open; anything else clears them
+    let playing = match session.as_ref() {
+        Ok(Some(s)) if settings.discord_presence_enabled || settings.tray_icon_enabled => {
+            match s.matched_anime_id {
+                Some(id) => presence_anime_for(&state, id, &settings.title_language)
+                    .await
+                    .map(|anime| (s, anime)),
+                None => None,
+            }
         }
         _ => None,
     };
+    tray::set_now_playing(
+        &app,
+        playing
+            .as_ref()
+            .map(|(s, anime)| tray::now_playing_label(&anime.title, s.parsed.episode_number)),
+    );
+    let presence = playing
+        .filter(|_| settings.discord_presence_enabled)
+        .map(|(s, anime)| PresenceInfo {
+            anime,
+            episode: s.parsed.episode_number,
+            total_episodes: s.matched_total_episodes,
+            started_at_unix: s.detected_at_unix,
+        });
     state.discord.update(presence);
     session
 }
 
-async fn discord_presence_for(
+/// The matched anime's display data (title in the user's language, cover, link), cached per
+/// (id, language) by `DiscordPresence`. Shared by Discord and the tray tooltip.
+async fn presence_anime_for(
     state: &AppState,
-    session: &DetectedMediaSession,
+    anime_id: i64,
     title_language: &str,
-) -> Option<PresenceInfo> {
-    let anime_id = session.matched_anime_id?;
+) -> Option<PresenceAnime> {
     let anime = match state.discord.cached_anime(anime_id, title_language) {
         Some(anime) => anime,
         None => {
@@ -764,12 +785,7 @@ async fn discord_presence_for(
             anime
         }
     };
-    Some(PresenceInfo {
-        anime,
-        episode: session.parsed.episode_number,
-        total_episodes: session.matched_total_episodes,
-        started_at_unix: session.detected_at_unix,
-    })
+    Some(anime)
 }
 
 async fn poll_session(
@@ -1445,13 +1461,18 @@ async fn backup_settings_now(state: State<'_, AppState>) -> Result<Vec<SettingsB
 
 #[tauri::command]
 async fn restore_settings_backup(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     file_name: String,
 ) -> Result<AppSettings, String> {
     let db = state.db.clone();
-    tokio::task::spawn_blocking(move || db.restore_settings_backup(&file_name))
-        .await
-        .map_err(|e| e.to_string())?
+    tokio::task::spawn_blocking(move || {
+        let settings = db.restore_settings_backup(&file_name)?;
+        tray::apply_settings(&app, &settings);
+        Ok(settings)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1464,6 +1485,7 @@ async fn get_app_settings(state: State<'_, AppState>) -> Result<AppSettings, Str
 
 #[tauri::command]
 async fn save_app_settings(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     settings: AppSettings,
 ) -> Result<AppSettings, String> {
@@ -1476,7 +1498,9 @@ async fn save_app_settings(
         if !folder.is_empty() && !folder.eq_ignore_ascii_case(previous_folder.trim()) {
             ensure_library_folder(&db, &monitor, folder);
         }
-        db.get_settings()
+        let saved = db.get_settings()?;
+        tray::apply_settings(&app, &saved);
+        Ok(saved)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1908,12 +1932,21 @@ pub fn run() {
     data_migration::migrate_legacy_data_dirs(&context.config().identifier);
 
     tauri::Builder::default()
-        // First, so every other plugin and `setup` can log
+        // First (the plugin requires it): a second launch focuses this instance and exits, so a window
+        // hidden in the tray never ends up with two processes writing the same database
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            tray::show_main_window(app)
+        }))
+        // Next, so every other plugin and `setup` can log
         .plugin(logging::plugin(log_dir))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec![tray::AUTOSTART_ARG]),
+        ))
         .setup(|app| {
             let app_data = app
                 .path()
@@ -1934,10 +1967,8 @@ pub fn run() {
             }
             // A newer anime-relations downloaded on a previous run, before anything parses filenames.
             updates::load_cached_relations(&app_data);
-            let check_updates = db
-                .get_settings()
-                .map(|s| s.check_updates_on_startup)
-                .unwrap_or(true);
+            let startup_settings = db.get_settings().unwrap_or_default();
+            let check_updates = startup_settings.check_updates_on_startup;
             let torrent_cache = Arc::new(TorrentCache::new(app_data.join("torrents")));
             let plugins = Arc::new(PluginManager::new());
 
@@ -1966,6 +1997,26 @@ pub fn run() {
                 sync.clone(),
                 oauth_listener_active.clone(),
             );
+
+            // The main window is created hidden (tauri.conf.json): shown here unless Windows started
+            // Tora with "Start in the tray" on, so it never flashes before hiding
+            if let Err(e) = tray::init(app.handle(), &startup_settings) {
+                log::warn!(target: "app", "tray icon failed: {}", e);
+            }
+            if let Some(window) = app.get_webview_window("main") {
+                if tray::starts_hidden(&startup_settings) {
+                    log::info!(target: "app", "started in the tray");
+                    #[cfg(windows)]
+                    memory::set_low_memory_target(&window, true);
+                } else {
+                    let _ = window.show();
+                }
+            }
+            let autostart_handle = app.handle().clone();
+            let start_with_windows = startup_settings.start_with_windows;
+            tauri::async_runtime::spawn_blocking(move || {
+                tray::sync_autostart(&autostart_handle, start_with_windows)
+            });
 
             app.manage(AppState {
                 db,
@@ -2013,14 +2064,26 @@ pub fn run() {
 
             Ok(())
         })
-        .on_window_event(|window, event| {
-            // Minimizing sends a 0×0 resize, restoring the real size
-            #[cfg(windows)]
-            if let tauri::WindowEvent::Resized(_) = event {
-                if let Some(webview) = window.app_handle().get_webview_window(window.label()) {
-                    memory::set_low_memory_target(&webview, window.is_minimized().unwrap_or(false));
+        .on_window_event(|window, event| match event {
+            // Close to tray (atomics only: this runs on the main thread)
+            tauri::WindowEvent::CloseRequested { api, .. } => {
+                if tray::close_to_tray(window.app_handle()) {
+                    api.prevent_close();
+                    tray::hide_to_tray(window);
                 }
             }
+            // Minimizing sends a 0×0 resize, restoring the real size
+            tauri::WindowEvent::Resized(_) => {
+                let minimized = window.is_minimized().unwrap_or(false);
+                #[cfg(windows)]
+                if let Some(webview) = window.app_handle().get_webview_window(window.label()) {
+                    memory::set_low_memory_target(&webview, minimized);
+                }
+                if minimized && tray::minimize_to_tray(window.app_handle()) {
+                    tray::hide_to_tray(window);
+                }
+            }
+            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             get_anime_list,

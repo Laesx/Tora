@@ -362,6 +362,21 @@ pub struct AppSettings {
     /// (History → AniList, Stats toggle). Off by default; the import's state lives under its own key.
     #[serde(default)]
     pub anilist_history_enabled: bool,
+    /// System tray icon (Settings → System); the to-tray options below need it.
+    #[serde(default = "default_true")]
+    pub tray_icon_enabled: bool,
+    /// Minimizing hides the window to the tray.
+    #[serde(default)]
+    pub minimize_to_tray: bool,
+    /// The close button hides the window to the tray (Quit from the tray menu exits).
+    #[serde(default)]
+    pub close_to_tray: bool,
+    /// Windows startup entry (`tauri-plugin-autostart`, launched with `--autostart`).
+    #[serde(default)]
+    pub start_with_windows: bool,
+    /// Launched with Windows: stay hidden in the tray.
+    #[serde(default)]
+    pub start_hidden: bool,
     /// Set when the stored settings were unreadable and defaults are in use (never read back from JSON).
     #[serde(default, skip_deserializing)]
     pub settings_recovered: bool,
@@ -422,6 +437,11 @@ impl Default for AppSettings {
             time_format: default_time_format(),
             check_updates_on_startup: true,
             anilist_history_enabled: false,
+            tray_icon_enabled: true,
+            minimize_to_tray: false,
+            close_to_tray: false,
+            start_with_windows: false,
+            start_hidden: false,
             settings_recovered: false,
         }
     }

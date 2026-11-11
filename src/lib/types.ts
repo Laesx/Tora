@@ -712,6 +712,14 @@ export interface AppSettings {
   check_updates_on_startup: boolean;
   /** Imported AniList activity is shown and kept up to date after each sync */
   anilist_history_enabled: boolean;
+  /** System tray icon; minimize / close to tray need it */
+  tray_icon_enabled: boolean;
+  minimize_to_tray: boolean;
+  close_to_tray: boolean;
+  /** Windows startup entry */
+  start_with_windows: boolean;
+  /** Launched with Windows: stay hidden in the tray */
+  start_hidden: boolean;
   /** Stored settings were unreadable; defaults are in use until a backup is restored */
   settings_recovered?: boolean;
 }

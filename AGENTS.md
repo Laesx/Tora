@@ -130,6 +130,8 @@ Tora/
 │   │   │   ├── sort.ts                   # `SORT_OPTIONS` (grouped keys, natural direction, unknown values last) + `watchlistComparator`
 │   │   │   ├── VirtualWatchlist.tsx      # Viewport-windowed virtual grid/list for Grid, Compact & Table modes (row model with optional status group headers, scroll-to-anime, arrow-key `navRef`, last-updated labels)
 │   │   │   ├── tableColumns.ts           # Table columns (`TABLE_COLUMNS`), per-device widths / hidden columns (`useTableColumns`, `tora.watchlist.columns`)
+│   │   │   ├── useStatusDrag.ts          # Drag cards / rows onto the status board (pointer events on `window`, 6 px threshold, Esc cancels)
+│   │   │   ├── StatusDropBoard.tsx       # Drop board shown while dragging: dimmed list, 3×2 status tiles with counts, cover-stack ghost
 │   │   │   ├── CustomListsChip.tsx       # Single "Lists ▾" chip at the end of the status ribbon (filterable popover of custom lists, "New list…" row, per-list delete)
 │   │   │   ├── NewCustomListModal.tsx    # Name prompt for creating an AniList custom list
 │   │   │   └── DeleteCustomListModal.tsx # Confirmation before deleting an AniList custom list
@@ -160,7 +162,7 @@ Tora/
 │   │   ├── stats/StatsView.tsx           # Stats tab: overview tiles, status bar, activity heatmap/streaks/monthly bars, backlog & ready-to-watch
 │   │   ├── settings/
 │   │   │   ├── SettingsModal.tsx         # Settings is a modal, not a tab (gear button, Ctrl+9, palette, `openSettings(section)`)
-│   │   │   ├── SettingsView.tsx          # Sectioned settings: Appearance, Tracker, Library, Playback & Detection (update mode, Discord, Anisthesia players), Torrents, Diagnostics, About
+│   │   │   ├── SettingsView.tsx          # Sectioned settings: Appearance, Tracker, Library, Playback & Detection (update mode, Discord, Anisthesia players), Torrents, System (tray, start with Windows), Diagnostics, About
 │   │   │   ├── LibraryManagerView.tsx    # Multi-drive folder manager, disk usage & virtualized episode table (Settings → Library)
 │   │   │   ├── AnitomyParserPanel.tsx    # Interactive Anitomy filename / window title parser (Settings → Diagnostics)
 │   │   │   ├── AniListHistorySettings.tsx # Settings → Tracker: AniList activity import status, Keep it updated, Update now, Delete
@@ -199,6 +201,7 @@ Tora/
         ├── logging.rs                    # `tauri-plugin-log` setup (`%APPDATA%\Tora\logs\tora.log`, rotated), panic hook, log tail
         ├── memory.rs                     # Per-process memory (core + WebView2 processes) for Diagnostics, WebView2 low memory target while minimized
         ├── lib.rs                        # Tauri state (`AppState`), async commands, background monitor & media poll loop, WebView2 accelerator keys off (release)
+        ├── tray.rs                       # Tray icon + menu (now playing, Show, detection toggle, Quit), minimize / close to tray, start with Windows
         ├── discord.rs                    # Discord Rich Presence worker thread ("Watching <anime>", cover, episode, AniList + GitHub buttons)
         ├── main.rs                       # Tauri binary entrypoint
         ├── db/mod.rs                     # SQLite schema, `AnimeMatcherIndex`, season-isolated fuzzy matching & aliases
@@ -309,6 +312,17 @@ When a filename or media player window title is parsed (`parse_filename` in `src
 - `useBrowserGuards` blocks the native context menu outside text fields, the same Ctrl shortcuts (dev builds), Alt+← / → and mouse back / forward. Custom right-click menus use React `onContextMenu` as before.
 - F11 toggles fullscreen (`useGlobalShortcuts`, `core:window:allow-set-fullscreen`).
 
+### 5b2. Tray, Window & Single Instance (`src-tauri/src/tray.rs`)
+- `tauri_plugin_single_instance` is registered **first** (before logging, the plugin requires it): a second launch focuses the running window and exits, so a window hidden in the tray never gets a second process on the same database.
+- The main window is created hidden (`"visible": false`); `setup` shows it unless Windows launched Tora (`--autostart`, `tauri-plugin-autostart`) with `start_hidden` on.
+- `on_window_event` reads only the `TrayState` atomics (close / minimize to tray), never SQLite. `tray::apply_settings` refreshes them, the tray visibility, the detection check mark and the startup entry after every `save_app_settings` / `restore_settings_backup` (off the main thread). Hiding to the tray sets WebView2's low memory target (hiding isn't a 0×0 resize).
+- The tray's "Playback detection" toggle writes `recognition_enabled` and emits `settings-changed` (full `AppSettings`) so the frontend never saves the old value back. The tooltip / now-playing line is set from `poll_media_recognition` only when its label changes (title via the same cached `presence_anime_for` lookup as Discord).
+- The recognition poll runs in the webview: while the window is hidden Chromium may throttle its timers. Check the `playback` log cadence before relying on hidden-window timing.
+
+### 5b3. Watchlist Drag to Change Status (`features/watchlist/useStatusDrag.ts`)
+- Pointer events, not HTML5 drag and drop (WebView2 drops HTML5 drag events while Tauri's file drop is on). After the press every listener is on `window`, because a virtualized card can unmount mid-drag. Controls inside cards (`button, a, input…`, `[data-no-drag]`) never start a drag; cards cancel `dragstart` so covers don't start the browser's image drag.
+- A selected card drags the selection; any other card becomes the selection. Drops go through `batchUpdate` (never `changeStatus`, whose Rewatching path plays episode 1); Esc is caught in the capture phase so it doesn't also clear the selection; the click after a release is swallowed.
+
 ### 5c. Back / Forward Navigation (`src/app/navigation.ts`, `useNavHistory.ts`)
 - An in-app history like a browser's (no router, no `history.pushState`): the sidebar ← / → buttons, Alt+← / →, mouse back / forward and the palette's Go Back / Go Forward. They wait while a modal, the palette or Settings is open; the drawer is part of the page.
 - A location is the active tab's `NavView` (small, serializable, typed per tab) + the open drawer + `<main>`'s scroll, plus an optional `NavCache` (History rows, Search results) that only the newest 3 entries keep. Tabs still unmount; nothing else is kept.
@@ -335,6 +349,7 @@ When a filename or media player window title is parsed (`parse_filename` in `src
 - **Title language**: `AppSettings.title_language` (`romaji` | `english` | `native`, serde default `romaji`; missing titles fall back to Romaji). Show titles with `useAnimeTitle()` (or `displayTitle` in plain helpers), never `title_romaji` directly. Torrent search queries always use `title_romaji`.
 - **DOM Virtualization**:
   - Large lists (`VirtualWatchlist.tsx` for the Anime Watchlist across `"grid"`, `"compact"`, and `"table"` modes, and the Indexed Local Episodes table in `LibraryManagerView.tsx`) must remain virtualized so WebView2 only mounts visible rows (+ overscan) and releases decoded cover image bitmaps for off-screen rows.
+  - Poster grid columns: today's breakpoints (2–5), plus one more column whenever posters would grow past `MAX_POSTER_WIDTH` (260 px), so wide / fullscreen windows show more rows. The Watchlist tab has no max width (a centered cap would stop columns from ever being added).
   - Every virtualized row must be exactly the height the row model says: no wrapping text, no borders (separators are inset shadows), and the list element carries `[overflow-anchor:none]`. Otherwise Chromium scroll anchoring and the re-measure in `useScrollViewport` feed each other and the page locks up.
   - Table mode uses `table-fixed` with a `<colgroup>` from `useTableColumns` (`tableColumns.ts`): column widths never depend on the mounted rows. Title takes the remaining width and can't be hidden, so the columns after it are anchored to the right edge: each header boundary (Title|Type included) is dragged by resizing the column on its **right** (`startResize`, capped so the title keeps its minimum; double-click resets). Right-clicking the header shows or hides columns. The header is sticky under the toolbar, so the table's wrapper is `overflow-clip` (never a scroll container) and scroll-into-view accounts for the `thead` height. The Season cell opens that season in the Seasons tab. Widths and hidden columns are per-device prefs (`tora.watchlist.columns`), not `AppSettings`.
   - `VirtualWatchlist` virtualizes a row model (optional group header rows + rows of `cols` cards with prefix-sum offsets, `visibleRange` binary search for the first visible row); search results grouped by status go through the same path. Lists scrolling inside `<main>` measure with `useScrollViewport` (`src/hooks/virtual.ts`).
@@ -350,7 +365,7 @@ When a filename or media player window title is parsed (`parse_filename` in `src
 - **Dates and times**: WebView2's locale follows the Windows display language (wry sets it), not the regional format, and `<input type="date">` can't be told otherwise. So the app formats them itself: `AppSettings.date_locale` (empty = Auto, the Windows regional locale from `get_system_locale`) and `time_format` (`auto` | `24h` | `12h`), mirrored into `src/lib/dates.ts` from App's body. Pass `dateLocale()` to `toLocaleDateString`, use `formatTime` / `formatDateTime` for anything showing a time (`hourCycle`, because `hour12: false` shows midnight as 24:00 in en-US), `formatDate` for stored `YYYY-MM-DD` values, `todayIso()` for today, and `DateInput` for editing. No module-level constants holding formatted dates: App keys the tab content on these settings so a change redraws every label.
 
 ### 7b. Logging & Crash Reporting
-- **Rust**: use the `log` macros with a short subsystem target (`log::warn!(target: "sync", …)`: `app`, `sync`, `anilist`, `playback`, `scrobble`, `library`, `matcher`, `torrents`, `relations`, `settings`, `discord`, `webview`), never `println!` / `eprintln!` (exception: `data_migration`, which runs before the logger exists, and benchmark output in tests). `logging::plugin` is registered first in `run()`: a file in `%APPDATA%\Tora\logs` (`tora.log`, 5 MB, last 5 kept) plus stdout in debug builds; `Debug` level in debug builds, `Info` in release, dependencies at `Warn`. A panic hook logs panics with their location.
+- **Rust**: use the `log` macros with a short subsystem target (`log::warn!(target: "sync", …)`: `app`, `sync`, `anilist`, `playback`, `scrobble`, `library`, `matcher`, `torrents`, `relations`, `settings`, `discord`, `webview`), never `println!` / `eprintln!` (exception: `data_migration`, which runs before the logger exists, and benchmark output in tests). `logging::plugin` is registered right after single-instance in `run()`: a file in `%APPDATA%\Tora\logs` (`tora.log`, 5 MB, last 5 kept) plus stdout in debug builds; `Debug` level in debug builds, `Info` in release, dependencies at `Warn`. A panic hook logs panics with their location.
 - **Frontend**: `log` from `src/lib/log.ts` writes to the same file (`@tauri-apps/plugin-log`, `log:default` capability) and to the console in dev; no bare `console.*`. `toraApi` logs every failed command (rate-limited per command); uncaught errors and unhandled rejections are logged from `main.tsx`; `ErrorBoundary` wraps the root and the tab content (keyed by tab) so a render error never leaves an empty window.
 - **Levels**: `error` = a bug or lost work, `warn` = a failed operation that the user may notice (sync, network, file), `info` = one line per meaningful event (startup, pull summary, scan, session start/end, scrobble, downloads), `debug` = detail (each AniList request, watcher batches).
 - **Never log** the AniList token, GraphQL variables, request bodies, notes or file contents; titles and paths are fine. Hot paths (the 2.5 s recognition poll, per-file matching, per-release evaluation) log only state changes, never every pass.

@@ -21,6 +21,8 @@ export interface AppEventHandlers {
   libraryChanged: (summary: ScanSummary) => void;
   torrentAutoDownloaded: (event: TorrentAutoDownloadedEvent) => void;
   authUpdated: (settings: AppSettings) => void;
+  /** The backend changed settings (tray detection toggle) */
+  settingsChanged: (settings: AppSettings) => void;
   syncStarted: (event: TrackerSyncStartedEvent) => void;
   listSynced: (summary: SyncSummary) => void;
   syncFailed: (event: TrackerSyncFailedEvent) => void;
@@ -43,6 +45,7 @@ const EVENTS: [string, Exclude<keyof AppEventHandlers, "ready">][] = [
   ["library-changed", "libraryChanged"],
   ["torrent-auto-downloaded", "torrentAutoDownloaded"],
   ["tracker-auth-updated", "authUpdated"],
+  ["settings-changed", "settingsChanged"],
   ["tracker-sync-started", "syncStarted"],
   ["tracker-list-synced", "listSynced"],
   ["tracker-sync-failed", "syncFailed"],

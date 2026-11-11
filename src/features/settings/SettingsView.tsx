@@ -18,6 +18,7 @@ import {
   RefreshCw,
   ScrollText,
   Copy,
+  Monitor,
 } from "lucide-react";
 import {
   AnimeEntry,
@@ -46,6 +47,7 @@ export type SettingsSection =
   | "library"
   | "playback"
   | "torrents"
+  | "system"
   | "diagnostics"
   | "about";
 
@@ -55,8 +57,50 @@ const SECTIONS: { id: SettingsSection; label: string; icon: React.ElementType }[
   { id: "library", label: "Library", icon: HardDrive },
   { id: "playback", label: "Playback & Detection", icon: Tv },
   { id: "torrents", label: "Torrents", icon: Download },
+  { id: "system", label: "System", icon: Monitor },
   { id: "diagnostics", label: "Diagnostics", icon: FlaskConical },
   { id: "about", label: "About", icon: Info },
+];
+
+type SystemOptionKey =
+  | "tray_icon_enabled"
+  | "minimize_to_tray"
+  | "close_to_tray"
+  | "start_with_windows"
+  | "start_hidden";
+
+// Settings -> System: tray and startup (indented rows need every setting in `needs` on)
+const SYSTEM_OPTIONS: { key: SystemOptionKey; label: string; hint: string; needs: SystemOptionKey[] }[] = [
+  {
+    key: "tray_icon_enabled",
+    label: "Show icon in the system tray",
+    hint: "Click it to open Tora; its menu shows what's playing, toggles detection and quits",
+    needs: [],
+  },
+  {
+    key: "minimize_to_tray",
+    label: "Minimize to tray",
+    hint: "Minimizing hides the window instead of leaving it on the taskbar",
+    needs: ["tray_icon_enabled"],
+  },
+  {
+    key: "close_to_tray",
+    label: "Close to tray",
+    hint: "The close button hides the window and keeps detection running; quit from the tray menu",
+    needs: ["tray_icon_enabled"],
+  },
+  {
+    key: "start_with_windows",
+    label: "Start with Windows",
+    hint: "Open Tora when you sign in to Windows",
+    needs: [],
+  },
+  {
+    key: "start_hidden",
+    label: "Start in the tray",
+    hint: "When started with Windows, stay in the tray instead of opening the window",
+    needs: ["start_with_windows", "tray_icon_enabled"],
+  },
 ];
 
 // Settings -> Playback: automatic list update options (off in manual mode)
@@ -578,6 +622,38 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
         {section === "torrents" && (
           <TorrentSettingsSection settings={settings} onUpdateSettings={onUpdateSettings} />
+        )}
+
+        {section === "system" && (
+          <div className="bg-bg-secondary border border-border-subtle rounded-2xl p-5 space-y-4">
+            <h2 className="text-sm font-bold text-text-primary flex items-center gap-2">
+              <Monitor className="w-4 h-4 text-accent" />
+              Tray & Startup
+            </h2>
+            <div className="space-y-3 text-xs">
+              {SYSTEM_OPTIONS.map(({ key, label, hint, needs }) => {
+                const disabled = needs.some((k) => !settings[k]);
+                return (
+                  <label
+                    key={key}
+                    className={`flex items-start gap-2.5 ${needs.length ? "pl-6" : ""} ${disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={settings[key]}
+                      disabled={disabled}
+                      onChange={(e) => onUpdateSettings({ ...settings, [key]: e.target.checked })}
+                      className="rounded accent-accent w-4 h-4 mt-0.5 cursor-pointer disabled:cursor-not-allowed"
+                    />
+                    <span>
+                      <span className="font-semibold text-text-primary">{label}</span>
+                      <span className="block text-[11px] text-text-muted">{hint}</span>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
         )}
 
         {section === "diagnostics" && (

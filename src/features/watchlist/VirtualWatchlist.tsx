@@ -40,6 +40,8 @@ import { useClickSelection } from "@/hooks/useClickSelection";
 import type { SortDir, WatchlistSortKey } from "./sort";
 import { TABLE_COLUMNS, TableColumn, TableColumnId, clampColumnWidth, useTableColumns } from "./tableColumns";
 import { formatDate } from "@/lib/dates";
+import { useStatusDrag } from "./useStatusDrag";
+import { StatusDropBoard } from "./StatusDropBoard";
 
 /** A titled section of the list (search results grouped by status) */
 export interface WatchlistGroup {
@@ -49,6 +51,8 @@ export interface WatchlistGroup {
 }
 
 const GROUP_HEADER_HEIGHT = 40;
+/** Poster grid: past this card width another column is added (more rows fit on large screens) */
+const MAX_POSTER_WIDTH = 260;
 
 /** Poster grid -1 / +1: round chips over the ends of the progress bar, shown on hover (or selected) */
 const GRID_STEP_BUTTON =
@@ -124,7 +128,7 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
   onSort,
 }) => {
   const showToast = useToast();
-  const { openAnime, openSeason } = useAnimeActions();
+  const { openAnime, openSeason, batchUpdate } = useAnimeActions();
   const titleOf = useAnimeTitle();
   const scoreFormat = useScoreFormat();
   // Stars and smileys carry their own symbol; numbers get a star icon in the table
@@ -160,16 +164,55 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
     [selectedAnimeIds]
   );
 
-  const selectedAnimeEntries = useMemo(() => {
-    if (selectedAnimeIds.length === 0) return [];
-    const byId = new Map<number, AnimeEntry>();
-    for (const a of allAnime) {
-      byId.set(a.id, a);
-    }
-    return selectedAnimeIds
-      .map((id) => byId.get(id))
-      .filter((a): a is AnimeEntry => Boolean(a));
-  }, [allAnime, selectedAnimeIds]);
+  const entriesOf = useCallback(
+    (ids: number[]) => {
+      if (ids.length === 0) return [];
+      const byId = new Map<number, AnimeEntry>();
+      for (const a of allAnime) {
+        byId.set(a.id, a);
+      }
+      return ids.map((id) => byId.get(id)).filter((a): a is AnimeEntry => Boolean(a));
+    },
+    [allAnime]
+  );
+
+  const selectedAnimeEntries = useMemo(
+    () => entriesOf(selectedAnimeIds),
+    [entriesOf, selectedAnimeIds]
+  );
+
+  // Drag cards onto the status drop board
+  const statusDrag = useStatusDrag({
+    selectedAnimeIds,
+    onSetSelectedAnimeIds,
+    lastClickedIdRef,
+    scrollContainerRef,
+    onDrop: (ids, status) => {
+      const targets = entriesOf(ids).filter((a) => a.user_status !== status);
+      if (targets.length === 0) return;
+      const label = STATUS_INFO[status]?.label ?? status;
+      void batchUpdate(
+        { anime_ids: targets.map((a) => a.id), user_status: status },
+        targets.length === 1
+          ? `Moved "${titleOf(targets[0])}" to ${label}`
+          : `Moved ${targets.length} anime to ${label}`
+      );
+    },
+  });
+  const dragProps = (anime: AnimeEntry) => ({
+    onPointerDown: (e: React.PointerEvent) => statusDrag.startPress(e, anime.id),
+    // Covers would start the browser's own image drag
+    onDragStart: (e: React.DragEvent) => e.preventDefault(),
+  });
+  const dropBoard = statusDrag.drag && (
+    <StatusDropBoard
+      drag={statusDrag.drag}
+      dragged={entriesOf(statusDrag.drag.ids)}
+      allAnime={allAnime}
+      hoverStatus={statusDrag.hoverStatus}
+      ghostRef={statusDrag.ghostRef}
+    />
+  );
 
   const handleItemClick = useCallback(
     (e: React.MouseEvent, anime: AnimeEntry) => {
@@ -289,7 +332,8 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
   // Compute grid columns & exact row heights based on viewMode and containerWidth
   const layout = useMemo(() => {
     if (viewMode === "grid") {
-      const cols =
+      const gap = 16;
+      const base =
         containerWidth >= 960
           ? 5
           : containerWidth >= 720
@@ -297,7 +341,8 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
             : containerWidth >= 480
               ? 3
               : 2;
-      const gap = 16;
+      // Wide windows add columns instead of growing posters past MAX_POSTER_WIDTH
+      const cols = Math.max(base, Math.ceil((containerWidth + gap) / (MAX_POSTER_WIDTH + gap)));
       const cardWidth = Math.max(140, (containerWidth - (cols - 1) * gap) / cols);
       const imageHeight = Math.round(cardWidth * (4 / 3));
       const cardHeight = imageHeight + 70; // 10px progress bar + 60px footer
@@ -552,6 +597,7 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
         onClick={(e) => handleItemClick(e, anime)}
         onDoubleClick={(e) => handleItemDoubleClick(e, anime)}
         onMouseDown={handleMiddleMouseDown}
+        {...dragProps(anime)}
         onAuxClick={(e) => handleAuxClick(e, anime)}
         onContextMenu={(e) => handleContextMenu(e, anime)}
         className={`group relative rounded-2xl overflow-visible outline-none flex flex-col cursor-pointer transition-[color,background-color,border-color,box-shadow] shadow-sm hover:shadow-xl ${isSelected
@@ -669,6 +715,7 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
         onClick={(e) => handleItemClick(e, anime)}
         onDoubleClick={(e) => handleItemDoubleClick(e, anime)}
         onMouseDown={handleMiddleMouseDown}
+        {...dragProps(anime)}
         onAuxClick={(e) => handleAuxClick(e, anime)}
         onContextMenu={(e) => handleContextMenu(e, anime)}
         className={`group flex gap-4 p-3.5 rounded-2xl outline-none cursor-pointer transition-[color,background-color,border-color,box-shadow] ${isSelected
@@ -862,6 +909,7 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
         onClick={(e) => handleItemClick(e, anime)}
         onDoubleClick={(e) => handleItemDoubleClick(e, anime)}
         onMouseDown={handleMiddleMouseDown}
+        {...dragProps(anime)}
         onAuxClick={(e) => handleAuxClick(e, anime)}
         onContextMenu={(e) => handleContextMenu(e, anime)}
         // Separator and selection marker are shadows: borders would add height the row model doesn't know
@@ -906,6 +954,7 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
         )}
         {bottomSpacerHeight > 0 && <div style={{ height: bottomSpacerHeight }} />}
         {contextMenuPortal}
+        {dropBoard}
       </div>
     );
   }
@@ -1099,6 +1148,7 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
         </FloatingQuickMenu>
       )}
       {contextMenuPortal}
+      {dropBoard}
     </div>
   );
 };

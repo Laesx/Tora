@@ -48,7 +48,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { keys: ["Middle-click"], label: "Play the next episode from disk" },
       { keys: ["Right-click"], label: "Quick menu (applies to the whole selection)" },
       { keys: ["Right-click"], label: "On the table header: show / hide columns" },
-      { keys: ["Drag"], label: "A table header edge: resize the column (double-click resets)" },
+      { keys: ["Drag"], label: "An anime or selection to drop them to a new list" },
       { keys: ["Del"], label: "In the Lists dropdown: delete the highlighted list" },
     ],
   },

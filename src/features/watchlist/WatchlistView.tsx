@@ -111,7 +111,8 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
   };
 
   return (
-    <div className="px-6 pb-6 max-w-7xl mx-auto">
+    // Full width: wide windows get more poster columns (`MAX_POSTER_WIDTH`), not wider margins
+    <div className="px-6 pb-6">
       {/* Filter & view mode toolbar: stays at the top while the list scrolls */}
       <div
         ref={toolbarRef}

@@ -341,6 +341,7 @@ export const App: React.FC = () => {
       setIsAuthorizingAnilist(false);
       if (next.anilist_username) showToast(`Signed in to AniList as @${next.anilist_username}!`, "success");
     },
+    settingsChanged: setSettings,
     syncStarted: sync.onStarted,
     listSynced: sync.onSynced,
     syncFailed: sync.onFailed,
