@@ -688,6 +688,8 @@ export interface AppSettings {
   update_require_focus: boolean;
   /** Show the playing anime as Discord Rich Presence */
   discord_presence_enabled: boolean;
+  /** Time-left estimates leave out ~3 min of opening + ending per full-length episode */
+  skip_op_ed: boolean;
   custom_media_player_path: string;
   /** Torrent app exe; empty = auto-detect */
   torrent_app_path: string;

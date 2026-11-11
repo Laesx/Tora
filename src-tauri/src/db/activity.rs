@@ -871,9 +871,9 @@ mod tests {
     #[test]
     fn stats_take_anilist_only_episodes_when_asked() {
         let db = seeded();
-        let local = db.list_stats(0, false).unwrap();
+        let local = db.list_stats(0, false, false).unwrap();
         assert_eq!(local.logged_episodes, 2);
-        let with = db.list_stats(0, true).unwrap();
+        let with = db.list_stats(0, true, false).unwrap();
         assert_eq!(with.logged_episodes, 2 + 3);
         assert_eq!(with.first_logged_at, Some(1_000));
         assert_eq!(with.watch_events.len(), 5);

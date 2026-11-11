@@ -1195,7 +1195,8 @@ async fn get_stats(
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
         let since = chrono::Utc::now().timestamp() - 366 * 24 * 60 * 60;
-        db.list_stats(since, include_anilist.unwrap_or(false))
+        let skip_op_ed = db.get_settings().map(|s| s.skip_op_ed).unwrap_or(false);
+        db.list_stats(since, include_anilist.unwrap_or(false), skip_op_ed)
     })
     .await
     .map_err(|e| e.to_string())?

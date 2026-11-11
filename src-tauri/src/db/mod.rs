@@ -258,6 +258,7 @@ pub struct ReadyToWatch {
 }
 
 /// Result of [`Database::list_stats`]. Episodes and minutes include rewatches; durations default to 24 min.
+/// Planning / remaining minutes use [`remaining_minutes_per_episode`] (openings and endings skipped when asked).
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ListStats {
     pub total_entries: u32,
@@ -277,6 +278,23 @@ pub struct ListStats {
     pub logged_episodes: u32,
     pub first_logged_at: Option<i64>,
     pub watch_events: Vec<WatchEvent>,
+}
+
+/// Minutes of opening + ending left out of time-left estimates when `AppSettings.skip_op_ed` is on.
+const OP_ED_MINUTES: u64 = 3;
+/// Episodes shorter than this (shorts) have no full opening and ending, so nothing is left out.
+const OP_ED_MIN_EPISODE: u64 = 20;
+
+/// Minutes one unwatched episode adds to a time-left estimate: its duration (24 when unknown),
+/// minus [`OP_ED_MINUTES`] on full-length episodes when `skip_op_ed`. Mirrored by
+/// `remainingMinutesPerEpisode` in `src/lib/anime.ts`.
+pub fn remaining_minutes_per_episode(duration: Option<u32>, skip_op_ed: bool) -> u64 {
+    let minutes = duration.filter(|&d| d > 0).unwrap_or(24) as u64;
+    if skip_op_ed && minutes >= OP_ED_MIN_EPISODE {
+        minutes - OP_ED_MINUTES
+    } else {
+        minutes
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -304,6 +322,10 @@ pub struct AppSettings {
     /// Show the playing anime as Discord Rich Presence ("Watching Tora").
     #[serde(default = "default_true")]
     pub discord_presence_enabled: bool,
+    /// Time-left estimates (Continue Watching, Stats) leave out ~3 min of opening + ending per
+    /// full-length episode (`remaining_minutes_per_episode`).
+    #[serde(default)]
+    pub skip_op_ed: bool,
     pub custom_media_player_path: String,
     /// Torrent application exe; empty = auto-detect (registry `.torrent` handler, then qBittorrent).
     #[serde(default)]
@@ -386,6 +408,7 @@ impl Default for AppSettings {
             update_wait_for_close: false,
             update_require_focus: false,
             discord_presence_enabled: true,
+            skip_op_ed: false,
             custom_media_player_path: String::new(),
             torrent_app_path: String::new(),
             torrent_category: default_torrent_category(),
@@ -3612,7 +3635,8 @@ impl Database {
     /// Everything the Stats tab shows except drive usage (`list_drive_summaries`). One reader snapshot;
     /// `watch_events` are the watched-episode rows logged at or after `events_since` (corrections excluded).
     /// `include_anilist` adds imported AniList episodes that have no local row (player "AniList").
-    pub fn list_stats(&self, events_since: i64, include_anilist: bool) -> Result<ListStats, String> {
+    /// `skip_op_ed` (`AppSettings.skip_op_ed`) shortens the planning / remaining minutes only.
+    pub fn list_stats(&self, events_since: i64, include_anilist: bool, skip_op_ed: bool) -> Result<ListStats, String> {
         let conn = self.reader()?;
         let mut stats = ListStats::default();
 
@@ -3638,6 +3662,7 @@ impl Database {
         for row in rows {
             let (status, progress, repeats, score, episodes, duration) = row.map_err(|e| e.to_string())?;
             let minutes_per_ep = duration.filter(|&d| d > 0).unwrap_or(24) as u64;
+            let remaining_per_ep = remaining_minutes_per_episode(duration, skip_op_ed);
             let total = episodes.filter(|&e| e > 0);
             let watched = progress as u64 + repeats as u64 * total.unwrap_or(progress) as u64;
             stats.total_entries += 1;
@@ -3652,13 +3677,13 @@ impl Database {
                 "PLANNING" => {
                     let eps = total.unwrap_or(0).saturating_sub(progress) as u64;
                     stats.planning_episodes += eps;
-                    stats.planning_minutes += eps * minutes_per_ep;
+                    stats.planning_minutes += eps * remaining_per_ep;
                 }
                 "CURRENT" | "REPEATING" => {
                     if let Some(t) = total {
                         let eps = t.saturating_sub(progress) as u64;
                         stats.watching_remaining_episodes += eps;
-                        stats.watching_remaining_minutes += eps * minutes_per_ep;
+                        stats.watching_remaining_minutes += eps * remaining_per_ep;
                     }
                 }
                 _ => {}
@@ -4629,7 +4654,7 @@ mod tests {
         insert_episode(&db, Some(1), "C:/lib/alpha-05.mkv", 5, false);
         db.record_manual_progress(&[(1, "Alpha".into(), 0, 2), (1, "Alpha".into(), 2, 1)]).unwrap();
 
-        let s = db.list_stats(0, false).unwrap();
+        let s = db.list_stats(0, false, false).unwrap();
         assert_eq!(s.total_entries, 2);
         assert_eq!(s.status_counts.get("PLANNING"), Some(&1));
         assert_eq!((s.episodes_watched, s.minutes_watched), (2, 40));
@@ -4641,6 +4666,23 @@ mod tests {
         assert!(s.ready_to_watch[0].next_episode_on_disk);
         assert_eq!(s.logged_episodes, 2);
         assert_eq!(s.watch_events.len(), 2);
+
+        // Skipping openings and endings shortens time left (20 → 17, unknown 24 → 21), never time watched
+        let s = db.list_stats(0, false, true).unwrap();
+        assert_eq!(s.minutes_watched, 40);
+        assert_eq!(s.planning_minutes, 210);
+        assert_eq!(s.watching_remaining_minutes, 170);
+    }
+
+    #[test]
+    fn remaining_minutes_skip_op_ed_only_on_full_length_episodes() {
+        assert_eq!(remaining_minutes_per_episode(Some(24), false), 24);
+        assert_eq!(remaining_minutes_per_episode(Some(24), true), 21);
+        assert_eq!(remaining_minutes_per_episode(None, true), 21);
+        assert_eq!(remaining_minutes_per_episode(Some(0), false), 24);
+        assert_eq!(remaining_minutes_per_episode(Some(20), true), 17);
+        assert_eq!(remaining_minutes_per_episode(Some(13), true), 13);
+        assert_eq!(remaining_minutes_per_episode(Some(5), true), 5);
     }
 
     #[test]

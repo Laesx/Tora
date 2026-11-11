@@ -802,7 +802,7 @@ export const App: React.FC = () => {
                           {activeTab === "stats" && (
                             <StatsView
                               animeList={animeList}
-                              refreshKey={statsKey}
+                              refreshKey={`${statsKey}|${settings?.skip_op_ed}`}
                               onOpenStatus={(status) => showInWatchlist(() => watchlist.showStatus(status))}
                               onOpenHistory={(period, source) => {
                                 remember();

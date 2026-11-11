@@ -127,3 +127,18 @@ export function formatMinutes(total: number): string {
   const m = total % 60;
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
+
+/** Minutes of opening + ending left out of time-left estimates when `AppSettings.skip_op_ed` is on. */
+const OP_ED_MINUTES = 3;
+/** Shorter episodes (shorts) have no full opening and ending, so nothing is left out. */
+const OP_ED_MIN_EPISODE = 20;
+
+/**
+ * Minutes one unwatched episode adds to a time-left estimate: its duration (24 when unknown), minus
+ * the opening and ending on full-length episodes when `skipOpEd`. Mirrors the backend's
+ * `remaining_minutes_per_episode` (Stats).
+ */
+export function remainingMinutesPerEpisode(duration: number | null, skipOpEd: boolean): number {
+  const minutes = duration && duration > 0 ? duration : 24;
+  return skipOpEd && minutes >= OP_ED_MIN_EPISODE ? minutes - OP_ED_MINUTES : minutes;
+}

@@ -8,6 +8,7 @@ import {
   formatMinutes,
   fuzzyDateToDate,
   playLocalEpisode,
+  remainingMinutesPerEpisode,
   unwatchedOnDisk,
 } from "@/lib/anime";
 import { AnimeQuickMenu } from "@/components/AnimeQuickMenu";
@@ -17,32 +18,56 @@ import { AiringDot } from "@/components/AiringDot";
 import { useAnimeTitle } from "@/contexts/titles";
 import { useToast } from "@/contexts/toast";
 import { useAnimeActions } from "@/contexts/animeActions";
+import { useCustomLists } from "@/contexts/customLists";
+import { usePrefs } from "@/hooks/usePrefs";
 import { log } from "@/lib/log";
 
 interface NowPlayingDashboardProps {
   animeList: AnimeEntry[];
+  /** `AppSettings.skip_op_ed`: time left leaves out openings and endings */
+  skipOpEd: boolean;
 }
+
+interface NowPlayingPrefs {
+  /** Custom list Continue Watching is narrowed to (null = all anime) */
+  customList: string | null;
+}
+
+const DEFAULT_PREFS: NowPlayingPrefs = { customList: null };
 
 const CONTINUE_LIMIT = 12;
 const RECENT_DAYS = 14;
 const WATCHING = ["CURRENT", "REPEATING"];
 
-/** Watch time left on an anime that finished airing (episode count known); 24 min/episode when the duration is unknown. */
-function timeToFinish(a: AnimeEntry): { episodes: number; perEpisode: number; minutes: number } | null {
+/**
+ * Watch time left on an anime that finished airing (episode count known); 24 min/episode when the
+ * duration is unknown, minus openings and endings when `skipOpEd`.
+ */
+function timeToFinish(
+  a: AnimeEntry,
+  skipOpEd: boolean
+): { episodes: number; perEpisode: number; minutes: number } | null {
   if (a.airing_status !== "FINISHED" || !a.episodes) return null;
   const episodes = a.episodes - a.user_progress;
   if (episodes <= 0) return null;
-  const perEpisode = a.duration && a.duration > 0 ? a.duration : 24;
+  const perEpisode = remainingMinutesPerEpisode(a.duration, skipOpEd);
   return { episodes, perEpisode, minutes: episodes * perEpisode };
 }
 
 /** Idle state of the Now Playing tab: stats, continue watching and recent airing changes. */
 export const NowPlayingDashboard: React.FC<NowPlayingDashboardProps> = ({
   animeList,
+  skipOpEd,
 }) => {
   const showToast = useToast();
   const { openAnime } = useAnimeActions();
   const titleOf = useAnimeTitle();
+  const customLists = useCustomLists();
+  const [prefs, updatePrefs] = usePrefs("tora.nowplaying.prefs", DEFAULT_PREFS);
+  // A list deleted (or renamed) since it was picked falls back to all anime
+  const listFilter =
+    prefs.customList !== null && customLists.names.includes(prefs.customList) ? prefs.customList : null;
+  const { membership } = customLists;
   const [stats, setStats] = useState<WatchStats | null>(null);
   const [showAll, setShowAll] = useState(false);
   const [menu, setMenu] = useState<{ anime: AnimeEntry; x: number; y: number } | null>(null);
@@ -63,10 +88,13 @@ export const NowPlayingDashboard: React.FC<NowPlayingDashboardProps> = ({
     () =>
       animeList
         .filter(
-          (a) => WATCHING.includes(a.user_status) && a.available_episodes.includes(a.user_progress + 1)
+          (a) =>
+            WATCHING.includes(a.user_status) &&
+            a.available_episodes.includes(a.user_progress + 1) &&
+            (listFilter === null || !!membership(a.id)?.lists.includes(listFilter))
         )
         .sort((a, b) => b.updated_at - a.updated_at),
-    [animeList]
+    [animeList, listFilter, membership]
   );
 
   const totals = useMemo(() => {
@@ -153,6 +181,21 @@ export const NowPlayingDashboard: React.FC<NowPlayingDashboardProps> = ({
           <Play className="w-4 h-4 text-accent" />
           Continue Watching
           <span className="text-[11px] font-medium text-text-muted">{continueWatching.length}</span>
+          {customLists.names.length > 0 && (
+            <select
+              value={listFilter ?? ""}
+              onChange={(e) => updatePrefs({ customList: e.target.value || null })}
+              title="Only anime in this custom list"
+              className="max-w-48 px-2 py-1 rounded-lg bg-bg-primary border border-border-subtle text-[11px] font-medium text-text-secondary cursor-pointer focus:outline-none focus:border-accent"
+            >
+              <option value="">All anime</option>
+              {customLists.names.map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          )}
           {continueWatching.length > CONTINUE_LIMIT && (
             <button
               onClick={() => setShowAll((v) => !v)}
@@ -164,14 +207,16 @@ export const NowPlayingDashboard: React.FC<NowPlayingDashboardProps> = ({
         </h2>
         {continueWatching.length === 0 ? (
           <div className="py-6 text-center text-xs text-text-muted">
-            No next episodes on disk for the anime you're watching.
+            {listFilter === null
+              ? "No next episodes on disk for the anime you're watching."
+              : `No next episodes on disk for anime in “${listFilter}”.`}
           </div>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
             {visibleContinue.map((a) => {
               const next = a.user_progress + 1;
               const more = unwatchedOnDisk(a).length - 1;
-              const left = timeToFinish(a);
+              const left = timeToFinish(a, skipOpEd);
               return (
                 <button
                   key={a.id}
@@ -207,7 +252,7 @@ export const NowPlayingDashboard: React.FC<NowPlayingDashboardProps> = ({
                     {left && (
                       <div
                         className="text-[10px] text-text-secondary mt-0.5 flex items-center gap-1"
-                        title={`${left.episodes} episode${left.episodes === 1 ? "" : "s"} left × ${left.perEpisode} min`}
+                        title={`${left.episodes} episode${left.episodes === 1 ? "" : "s"} left × ${left.perEpisode} min${skipOpEd ? " (openings and endings skipped)" : ""}`}
                       >
                         <Clock className="w-3 h-3 shrink-0 text-text-muted" />~{formatMinutes(left.minutes)} to finish
                       </div>

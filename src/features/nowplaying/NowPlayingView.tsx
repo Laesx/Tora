@@ -78,6 +78,7 @@ export const NowPlayingView: React.FC<NowPlayingViewProps> = ({
       ) : (
         <NowPlayingDashboard
           animeList={animeList}
+          skipOpEd={settings.skip_op_ed}
         />
       )}
     </div>

@@ -489,6 +489,21 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   </span>
                 </label>
 
+                <label className="flex items-start gap-2.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={settings.skip_op_ed}
+                    onChange={(e) => onUpdateSettings({ ...settings, skip_op_ed: e.target.checked })}
+                    className="rounded accent-accent w-4 h-4 mt-0.5 cursor-pointer"
+                  />
+                  <span>
+                    <span className="font-semibold text-text-primary">Skip openings and endings in time left</span>
+                    <span className="block text-[11px] text-text-muted">
+                      Time-left estimates leave out ~3 min per episode (episodes of 20 min or more)
+                    </span>
+                  </span>
+                </label>
+
                 <div>
                   <label className="block text-[11px] text-text-muted mb-1">
                     Custom Media Player Executable (Blank = System Default)
