@@ -23,6 +23,8 @@ interface WatchlistInputs {
   customListNames: string[];
   hiddenFromStatusIds: Set<number>;
   titleOf: (a: AnimeEntry) => string;
+  /** `AppSettings.skip_op_ed` (the "Time left" sort) */
+  skipOpEd: boolean;
 }
 
 /** Rewatching shows under the Watching tab */
@@ -36,6 +38,7 @@ export function useWatchlist({
   customListNames,
   hiddenFromStatusIds,
   titleOf,
+  skipOpEd,
 }: WatchlistInputs) {
   const [statusFilter, setStatusFilter] = useState("CURRENT");
   // Selected AniList custom list; replaces the status filter while set
@@ -79,8 +82,9 @@ export function useWatchlist({
         progress: stepSnapshots[a.id]?.initialProgress ?? a.user_progress,
         updatedAt: stepSnapshots[a.id]?.initialUpdatedAt ?? a.updated_at,
         title: titleOf(a),
+        skipOpEd,
       })),
-    [prefs.sortKey, prefs.sortDir, stepSnapshots, titleOf]
+    [prefs.sortKey, prefs.sortDir, stepSnapshots, titleOf, skipOpEd]
   );
 
   /** Pick a sort; a new key starts in its natural direction, the same key flips direction */
@@ -189,6 +193,7 @@ export function useWatchlist({
     sortKey: prefs.sortKey,
     sortDir: prefs.sortDir,
     setSort,
+    skipOpEd,
     focusRequest,
     clearFocusRequest: () => setFocusRequest(null),
     statusCounts,

@@ -1,6 +1,7 @@
 import { AnimeEntry } from "@/lib/types";
 import { latestAiredEpisode } from "@/lib/episodes";
 import { SEASONS } from "@/lib/seasons";
+import { remainingMinutesPerEpisode } from "@/lib/anime";
 
 export type WatchlistSortKey =
   | "updated"
@@ -8,11 +9,13 @@ export type WatchlistSortKey =
   | "score"
   | "started"
   | "completed"
+  | "notes"
   | "progress"
   | "progress_pct"
   | "remaining"
   | "ready"
   | "behind"
+  | "time_left"
   | "next_airing"
   | "average_score"
   | "start_date"
@@ -27,6 +30,14 @@ export interface SortContext {
   progress: number;
   updatedAt: number;
   title: string;
+  /** `AppSettings.skip_op_ed`: time left leaves out openings and endings */
+  skipOpEd: boolean;
+}
+
+/** Minutes left to finish (total episode count known), the same rule as Now Playing's "to finish". */
+export function timeLeftMinutes(a: AnimeEntry, progress: number, skipOpEd: boolean): number | null {
+  if (!a.episodes) return null;
+  return Math.max(0, a.episodes - progress) * remainingMinutesPerEpisode(a.duration, skipOpEd);
 }
 
 interface SortOption {
@@ -47,6 +58,7 @@ export const SORT_OPTIONS: SortOption[] = [
   { id: "score", label: "My score", group: "My list", defaultDir: "desc", value: (a) => (a.user_score > 0 ? a.user_score : null) },
   { id: "started", label: "Date started", group: "My list", defaultDir: "desc", value: (a) => a.user_started_at || null },
   { id: "completed", label: "Date completed", group: "My list", defaultDir: "desc", value: (a) => a.user_completed_at || null },
+  { id: "notes", label: "Notes", group: "My list", defaultDir: "asc", value: (a) => a.user_notes.trim() || null },
 
   { id: "progress", label: "Episodes watched", group: "Progress", defaultDir: "desc", value: (_, c) => c.progress },
   {
@@ -79,6 +91,13 @@ export const SORT_OPTIONS: SortOption[] = [
       const aired = latestAiredEpisode(a);
       return aired === null ? null : Math.max(0, aired - c.progress);
     },
+  },
+  {
+    id: "time_left",
+    label: "Time left",
+    group: "Progress",
+    defaultDir: "asc",
+    value: (a, c) => timeLeftMinutes(a, c.progress, c.skipOpEd),
   },
 
   { id: "next_airing", label: "Next episode airs", group: "Airing", defaultDir: "asc", value: (a) => a.next_airing_at || null },

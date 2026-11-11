@@ -23,7 +23,7 @@ import { getOptimizedCoverUrl } from "@/lib/covers";
 import { AnimeQuickMenu } from "@/components/AnimeQuickMenu";
 import { LIST_STATUSES, STATUS_INFO } from "@/lib/status";
 import { displayTitle, useAnimeTitle } from "@/contexts/titles";
-import { playLocalEpisode } from "@/lib/anime";
+import { formatMinutes, playLocalEpisode } from "@/lib/anime";
 import { seasonName } from "@/lib/seasons";
 import { episodeBar, episodeTotalLabel } from "@/lib/episodes";
 import { EpisodeProgressBar } from "@/components/EpisodeProgressBar";
@@ -37,9 +37,11 @@ import { formatScore, SCORE_SCALES } from "@/lib/scores";
 import { useScrollViewport, visibleRange } from "@/hooks/virtual";
 import { useNow } from "@/hooks/useNow";
 import { useClickSelection } from "@/hooks/useClickSelection";
+import { timeLeftMinutes } from "./sort";
 import type { SortDir, WatchlistSortKey } from "./sort";
 import { TABLE_COLUMNS, TableColumn, TableColumnId, clampColumnWidth, useTableColumns } from "./tableColumns";
 import { formatDate } from "@/lib/dates";
+import { ScoreDropdown } from "./ScoreDropdown";
 import { useStatusDrag } from "./useStatusDrag";
 import { StatusDropBoard } from "./StatusDropBoard";
 
@@ -51,6 +53,8 @@ export interface WatchlistGroup {
 }
 
 const GROUP_HEADER_HEIGHT = 40;
+/** The title column takes the remaining width; resizing a neighbour never squeezes it below this */
+const TITLE_MIN_WIDTH = TABLE_COLUMNS.find((c) => c.id === "title")!.minWidth;
 /** Poster grid: past this card width another column is added (more rows fit on large screens) */
 const MAX_POSTER_WIDTH = 260;
 
@@ -106,6 +110,8 @@ interface VirtualWatchlistProps {
   sortKey?: WatchlistSortKey;
   sortDir?: SortDir;
   onSort?: (key: WatchlistSortKey) => void;
+  /** `AppSettings.skip_op_ed` (table "Time left" column) */
+  skipOpEd?: boolean;
 }
 
 export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
@@ -126,6 +132,7 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
   sortKey,
   sortDir,
   onSort,
+  skipOpEd = false,
 }) => {
   const showToast = useToast();
   const { openAnime, openSeason, batchUpdate } = useAnimeActions();
@@ -155,9 +162,23 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
 
   // Table mode: fixed column widths (resizable / hideable per device)
   const tableColumns = useTableColumns();
+  const startedShown = tableColumns.columns.some((c) => c.id === "started");
   const [dragWidth, setDragWidth] = useState<{ id: TableColumnId; width: number } | null>(null);
+  // Header being dragged to a new place: ghost position and the drop line (`null` = stays put)
+  const [columnDrag, setColumnDrag] = useState<{
+    id: TableColumnId;
+    label: string;
+    ghostX: number;
+    top: number;
+    width: number;
+    height: number;
+    lineX: number | null;
+  } | null>(null);
   const [columnMenuAnchor, setColumnMenuAnchor] = useState<{ x: number; y: number } | null>(null);
   const closeColumnMenu = useCallback(() => setColumnMenuAnchor(null), []);
+  // Table Score cell dropdown
+  const [scoreMenu, setScoreMenu] = useState<{ id: number; anchor: { x: number; y: number } } | null>(null);
+  const closeScoreMenu = useCallback(() => setScoreMenu(null), []);
 
   const selectedSet = useMemo(
     () => new Set(selectedAnimeIds),
@@ -548,6 +569,12 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
           zIndex: 100,
         }}
         onClick={(e) => e.stopPropagation()}
+        // The menu opens at the pointer, so a second right-click on the same spot lands in its
+        // rounded corner: the wrapper's, which would otherwise show the browser's own menu
+        onContextMenu={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+        }}
       >
         <AnimeQuickMenu
           anime={activeQuickMenuAnime}
@@ -797,7 +824,8 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
       case "title": {
         const subline = [
           anime.studios.join(", "),
-          anime.user_started_at ? `Started ${formatDate(anime.user_started_at)}` : "",
+          // The Started column shows it already
+          anime.user_started_at && !startedShown ? `Started ${formatDate(anime.user_started_at)}` : "",
         ]
           .filter(Boolean)
           .join(" · ");
@@ -825,16 +853,7 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
                   <RewatchChip anime={anime} variant="inline" />
                   {titleOf(anime)}
                 </div>
-                <div className="text-[10px] text-text-muted truncate">
-                  {anime.user_score > 0 && (
-                    <span title="Your score" className="font-mono font-bold text-amber-400">
-                      {scoreIcon && <Star className="inline-block w-2.5 h-2.5 mr-0.5 -mt-0.5 fill-amber-400" />}
-                      {formatScore(anime.user_score, scoreFormat)}
-                      {subline && <span className="text-text-muted font-sans font-normal"> · </span>}
-                    </span>
-                  )}
-                  {subline}
-                </div>
+                <div className="text-[10px] text-text-muted truncate">{subline}</div>
               </div>
             </div>
           </td>
@@ -880,6 +899,113 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
             ) : (
               label
             )}
+          </td>
+        );
+      }
+      case "score":
+        return (
+          <td key={column.id} className={cls}>
+            <button
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (scoreMenu?.id === anime.id) {
+                  setScoreMenu(null);
+                  return;
+                }
+                const rect = e.currentTarget.getBoundingClientRect();
+                setScoreMenu({ id: anime.id, anchor: { x: rect.left, y: rect.bottom + 4 } });
+              }}
+              onDoubleClick={(e) => e.stopPropagation()}
+              title="Set your score"
+              className={`max-w-full inline-flex items-center gap-1 px-1.5 py-0.5 -mx-1.5 rounded-md font-mono font-bold transition hover:bg-bg-tertiary ${scoreMenu?.id === anime.id ? "bg-bg-tertiary ring-1 ring-accent/60" : ""}`}
+            >
+              {anime.user_score > 0 ? (
+                <span className="truncate text-amber-400">
+                  {scoreIcon && <Star className="inline-block w-2.5 h-2.5 mr-1 -mt-0.5 fill-amber-400" />}
+                  {formatScore(anime.user_score, scoreFormat)}
+                </span>
+              ) : (
+                <span className="text-text-muted font-normal">-</span>
+              )}
+            </button>
+          </td>
+        );
+      case "average_score":
+        return (
+          <td key={column.id} className={`${cls} text-[11px] font-mono`}>
+            {anime.average_score ? (
+              <span title="AniList average score" className="text-amber-400">
+                <Star className="inline-block w-2.5 h-2.5 mr-1 -mt-0.5 fill-amber-400" />
+                {anime.average_score}%
+              </span>
+            ) : (
+              <span className="text-text-muted">-</span>
+            )}
+          </td>
+        );
+      case "started":
+      case "completed": {
+        const date = column.id === "started" ? anime.user_started_at : anime.user_completed_at;
+        return (
+          <td key={column.id} className={`${cls} text-[11px] text-text-secondary truncate`}>
+            {date ? formatDate(date) : <span className="text-text-muted">-</span>}
+          </td>
+        );
+      }
+      case "next_airing": {
+        const cd = formatCountdown(anime.next_airing_at);
+        return (
+          <td key={column.id} className={`${cls} text-[11px] truncate`}>
+            {cd && anime.next_airing_episode ? (
+              <span
+                className="font-mono text-emerald-400"
+                title={anime.next_airing_at ? formatExactTime(anime.next_airing_at) : undefined}
+              >
+                Ep {anime.next_airing_episode} · {cd}
+              </span>
+            ) : (
+              <span className="text-text-muted">
+                {anime.airing_status === "FINISHED"
+                  ? "Finished"
+                  : anime.airing_status === "NOT_YET_RELEASED"
+                    ? "Not yet aired"
+                    : "-"}
+              </span>
+            )}
+          </td>
+        );
+      }
+      case "ready": {
+        const files = anime.available_episodes ?? [];
+        const ready = files.filter((ep) => ep > anime.user_progress).length;
+        return (
+          <td
+            key={column.id}
+            className={`${cls} text-[11px] truncate`}
+            title={files.length > 0 ? `${files.length} episode${files.length === 1 ? "" : "s"} on disk` : undefined}
+          >
+            {ready > 0 ? (
+              <span className="font-mono text-emerald-400">{ready} ready</span>
+            ) : (
+              <span className="text-text-muted">-</span>
+            )}
+          </td>
+        );
+      }
+      case "time_left": {
+        const minutes = timeLeftMinutes(anime, anime.user_progress, skipOpEd);
+        return (
+          <td key={column.id} className={`${cls} text-[11px] font-mono text-text-secondary truncate`}>
+            {minutes ? formatMinutes(minutes) : <span className="text-text-muted">-</span>}
+          </td>
+        );
+      }
+      case "notes": {
+        const note = (anime.user_notes ?? "").trim();
+        return (
+          <td key={column.id} className={`${cls} text-[11px] text-text-secondary truncate`} title={note || undefined}>
+            {note ? note.split("\n", 1)[0] : <span className="text-text-muted">-</span>}
           </td>
         );
       }
@@ -961,6 +1087,8 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
 
   // "table" mode (Taiga Classic Dense Table View)
   const colSpan = tableColumns.columns.length;
+  const scoreMenuAnime = scoreMenu ? entriesOf([scoreMenu.id])[0] : undefined;
+  const titleIndex = tableColumns.columns.findIndex((c) => c.id === "title");
   const widthOf = (column: TableColumn) =>
     dragWidth?.id === column.id ? dragWidth.width : tableColumns.widthOf(column);
   // Never squeeze the title below its minimum (narrower windows clip the last columns)
@@ -970,11 +1098,12 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
   );
 
   /**
-   * Drag the boundary on `column`'s left edge. The title takes the remaining width, so the columns
-   * after it are anchored to the right: moving the boundary right narrows `column` (the title
-   * grows), moving it left widens it until the title is at its minimum. Saved on release.
+   * Drag a header boundary. The title takes the remaining width, so a boundary resizes the column
+   * on its side away from the title: `side` +1 = the column left of the title (moving right widens
+   * it), -1 = right of the title (moving right narrows it). Either way the title absorbs the
+   * difference and never goes below its minimum. Saved on release.
    */
-  const startResize = (e: React.PointerEvent<HTMLSpanElement>, column: TableColumn) => {
+  const startResize = (e: React.PointerEvent<HTMLSpanElement>, column: TableColumn, side: 1 | -1) => {
     if (e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
@@ -982,12 +1111,12 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
     handle.setPointerCapture(e.pointerId);
     const startX = e.clientX;
     const startWidth = tableColumns.widthOf(column) ?? column.minWidth;
-    const titleCell = handle.closest("tr")?.firstElementChild as HTMLElement | null;
-    const titleSlack = Math.max(0, (titleCell?.offsetWidth ?? 0) - tableColumns.columns[0].minWidth);
+    const titleCell = handle.closest("tr")?.querySelector<HTMLElement>('[data-col-id="title"]');
+    const titleSlack = Math.max(0, (titleCell?.offsetWidth ?? 0) - TITLE_MIN_WIDTH);
     const maxWidth = startWidth + titleSlack;
     let width = startWidth;
     const onMove = (ev: PointerEvent) => {
-      width = Math.min(maxWidth, clampColumnWidth(column, startWidth - (ev.clientX - startX)));
+      width = Math.min(maxWidth, clampColumnWidth(column, startWidth + side * (ev.clientX - startX)));
       setDragWidth({ id: column.id, width });
     };
     const onUp = () => {
@@ -1000,6 +1129,90 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
     handle.addEventListener("pointermove", onMove);
     handle.addEventListener("pointerup", onUp);
     handle.addEventListener("pointercancel", onUp);
+  };
+
+  /**
+   * Press on a header: past a few pixels sideways it drags the column (a ghost follows the pointer,
+   * a line marks where it lands); otherwise the click sorts as usual. Esc cancels; the click that
+   * ends a drag is swallowed so it doesn't also sort.
+   */
+  const startColumnDrag = (e: React.PointerEvent<HTMLTableCellElement>, column: TableColumn) => {
+    if (e.button !== 0) return;
+    const th = e.currentTarget;
+    const row = th.parentElement;
+    if (!row) return;
+    const startX = e.clientX;
+    const thRect = th.getBoundingClientRect();
+    const grabOffset = startX - thRect.left;
+    const visible = tableColumns.columns;
+    let edges: number[] = [];
+    let target: number | null = null;
+    let active = false;
+    let cancelled = false;
+
+    const cleanup = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
+      window.removeEventListener("keydown", onKey, true);
+      document.body.style.removeProperty("cursor");
+      setColumnDrag(null);
+    };
+    const swallowNextClick = () => {
+      const swallow = (ev: MouseEvent) => {
+        ev.stopPropagation();
+        ev.preventDefault();
+      };
+      window.addEventListener("click", swallow, { capture: true, once: true });
+      // No click follows when the pointer was released outside the header
+      setTimeout(() => window.removeEventListener("click", swallow, true), 0);
+    };
+    const onMove = (ev: PointerEvent) => {
+      if (cancelled) return;
+      if (!active) {
+        if (Math.abs(ev.clientX - startX) < 5) return;
+        active = true;
+        const rects = Array.from(row.children).map((c) => c.getBoundingClientRect());
+        edges = [rects[0].left, ...rects.map((r) => r.right)];
+        document.body.style.cursor = "grabbing";
+      }
+      let best = 0;
+      edges.forEach((x, i) => {
+        if (Math.abs(x - ev.clientX) < Math.abs(edges[best] - ev.clientX)) best = i;
+      });
+      const from = visible.findIndex((c) => c.id === column.id);
+      // Either edge of the dragged column leaves it where it is
+      target = best === from || best === from + 1 ? null : best;
+      setColumnDrag({
+        id: column.id,
+        label: column.label,
+        ghostX: ev.clientX - grabOffset,
+        top: thRect.top,
+        width: thRect.width,
+        height: thRect.height,
+        lineX: target === null ? null : edges[target],
+      });
+    };
+    const onUp = () => {
+      cleanup();
+      if (!active) return;
+      swallowNextClick();
+      if (!cancelled && target !== null) tableColumns.move(column.id, visible[target]?.id ?? null);
+    };
+    const onCancel = () => cleanup();
+    // Cancelled drags still wait for the release, so its click doesn't sort
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key !== "Escape" || !active || cancelled) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      cancelled = true;
+      document.body.style.removeProperty("cursor");
+      setColumnDrag(null);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onCancel);
+    window.addEventListener("keydown", onKey, true);
   };
 
   const openColumnMenu = (e: React.MouseEvent) => {
@@ -1024,21 +1237,26 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
             return <col key={column.id} style={width === null ? undefined : { width }} />;
           })}
         </colgroup>
-        <thead className="bg-bg-tertiary text-text-muted uppercase text-[10px]" onContextMenu={openColumnMenu}>
+        <thead className="bg-bg-tertiary text-text-muted uppercase text-[10px] select-none" onContextMenu={openColumnMenu}>
           <tr>
             {tableColumns.columns.map((column, i) => {
               const { id, label, sortKey: key } = column;
               const active = key !== null && key === sortKey;
               const SortIcon = sortDir === "asc" ? ArrowUp : ArrowDown;
-              // The boundary on this header's right edge resizes the next column
+              // The boundary on this header's right edge resizes the column on its side away from
+              // the title: this one while left of the title, the next one after it
               const next = tableColumns.columns[i + 1];
-              const dragging = next !== undefined && dragWidth?.id === next.id;
+              const leftOfTitle = i < titleIndex;
+              const resized = next === undefined ? undefined : leftOfTitle ? column : next;
+              const dragging = resized !== undefined && dragWidth?.id === resized.id;
               return (
                 <th
                   key={id}
+                  data-col-id={id}
                   // 1px under the toolbar: its measured height is rounded, and a sub-pixel gap shows rows
                   style={{ top: stickyOffset - 1 }}
-                  className={`sticky z-10 py-2.5 whitespace-nowrap overflow-hidden bg-bg-tertiary shadow-[inset_0_-1px_0_0_rgb(var(--border-subtle))] ${column.className}`}
+                  onPointerDown={(e) => startColumnDrag(e, column)}
+                  className={`sticky z-10 py-2.5 whitespace-nowrap overflow-hidden bg-bg-tertiary shadow-[inset_0_-1px_0_0_rgb(var(--border-subtle))] cursor-grab transition-opacity ${columnDrag?.id === id ? "opacity-40" : ""} ${column.className}`}
                   aria-sort={active ? (sortDir === "asc" ? "ascending" : "descending") : undefined}
                 >
                   <span className="inline-flex items-center gap-1 max-w-full">
@@ -1058,16 +1276,16 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
                       <span className="truncate">{label}</span>
                     )}
                   </span>
-                  {next?.resizable && (
+                  {resized?.resizable && (
                     <span
                       role="separator"
                       aria-orientation="vertical"
                       title="Drag to resize (double-click to reset)"
-                      onPointerDown={(e) => startResize(e, next)}
+                      onPointerDown={(e) => startResize(e, resized, leftOfTitle ? 1 : -1)}
                       onClick={(e) => e.stopPropagation()}
                       onDoubleClick={(e) => {
                         e.stopPropagation();
-                        tableColumns.setWidth(next, null);
+                        tableColumns.setWidth(resized, null);
                       }}
                       className="group/resize absolute top-0 right-0 h-full w-2 flex items-center justify-end cursor-col-resize touch-none"
                     >
@@ -1114,8 +1332,8 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
             <div className="px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-text-muted">
               Columns
             </div>
-            {TABLE_COLUMNS.map((column) => {
-              const shown = !tableColumns.hidden.includes(column.id);
+            {tableColumns.ordered.map((column) => {
+              const shown = tableColumns.isVisible(column);
               return (
                 <button
                   key={column.id}
@@ -1145,6 +1363,43 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
               Reset columns
             </button>
           </div>
+        </FloatingQuickMenu>
+      )}
+      {columnDrag &&
+        createPortal(
+          <>
+            <div
+              className="fixed z-[200] pointer-events-none px-3 flex items-center rounded-md bg-bg-tertiary/90 border border-accent/60 shadow-xl text-[10px] font-bold uppercase text-text-primary whitespace-nowrap overflow-hidden"
+              style={{ left: columnDrag.ghostX, top: columnDrag.top, width: columnDrag.width, height: columnDrag.height }}
+            >
+              {columnDrag.label}
+            </div>
+            {columnDrag.lineX !== null && (
+              <div
+                className="fixed z-[200] pointer-events-none w-0.5 -ml-px rounded-full bg-accent"
+                style={{ left: columnDrag.lineX, top: columnDrag.top, height: columnDrag.height }}
+              />
+            )}
+          </>,
+          document.body
+        )}
+      {scoreMenuAnime && scoreMenu && (
+        <FloatingQuickMenu anchor={scoreMenu.anchor} onClose={closeScoreMenu}>
+          <ScoreDropdown
+            key={scoreMenuAnime.id}
+            score={scoreMenuAnime.user_score}
+            onPick={(score) => {
+              closeScoreMenu();
+              if (score === scoreMenuAnime.user_score) return;
+              const title = titleOf(scoreMenuAnime);
+              void batchUpdate(
+                { anime_ids: [scoreMenuAnime.id], user_score: score },
+                score > 0
+                  ? `Scored "${title}" ${formatScore(score, scoreFormat)}${SCORE_SCALES[scoreFormat].suffix}`
+                  : `Cleared the score of "${title}"`
+              );
+            }}
+          />
         </FloatingQuickMenu>
       )}
       {contextMenuPortal}

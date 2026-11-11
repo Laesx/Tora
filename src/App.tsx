@@ -84,6 +84,7 @@ export const App: React.FC = () => {
     customListNames: customLists.names,
     hiddenFromStatusIds: customLists.hiddenFromStatusIds,
     titleOf,
+    skipOpEd: settings?.skip_op_ed ?? false,
   });
 
   // Hand-over requests to other tabs; `nonce` makes the same request apply again

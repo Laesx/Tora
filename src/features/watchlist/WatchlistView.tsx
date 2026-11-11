@@ -276,6 +276,7 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
         sortKey={w.sortKey}
         sortDir={w.sortDir}
         onSort={w.setSort}
+        skipOpEd={w.skipOpEd}
       />
     </div>
   );

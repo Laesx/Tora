@@ -59,6 +59,11 @@ export const FloatingQuickMenu: React.FC<{
       ref={ref}
       style={{ position: "fixed", top: position.top, left: position.left, zIndex: 100 }}
       onClick={(e) => e.stopPropagation()}
+      // A right-click inside (or on the rounded corner under the pointer) never shows the browser's menu
+      onContextMenu={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+      }}
     >
       {children}
     </div>,
