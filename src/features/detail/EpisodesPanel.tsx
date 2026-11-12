@@ -158,9 +158,11 @@ export const EpisodesPanel: React.FC<{
   anime: AnimeEntry;
   files: LocalEpisodeFile[];
   progress: number;
+  /** The episode a player has open (Now Playing), ringed in the grid */
+  playingEpisode?: number | null;
   /** An episode with no file: look for it */
   onMissingEpisode: () => void;
-}> = ({ anime, files, progress, onMissingEpisode }) => {
+}> = ({ anime, files, progress, playingEpisode = null, onMissingEpisode }) => {
   const showToast = useToast();
   const total = anime.episodes;
   const pinned = usePinnedRelease(anime.id);
@@ -360,7 +362,9 @@ export const EpisodesPanel: React.FC<{
                   ? `Episode ${epNum} on disk${copies > 1 ? ` (${copies} releases)` : ""}. Click to play`
                   : `Episode ${epNum}. Click to search torrents for this anime`
               }
-              className={`relative py-1.5 rounded-md text-xs font-mono border transition flex items-center justify-center ${btnClass}`}
+              className={`relative py-1.5 rounded-md text-xs font-mono border transition flex items-center justify-center ${btnClass} ${
+                epNum === playingEpisode ? "ring-2 ring-accent ring-offset-1 ring-offset-bg-primary" : ""
+              }`}
             >
               {epNum}
               {copies > 1 && (

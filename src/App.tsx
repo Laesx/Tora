@@ -42,6 +42,7 @@ import { useWatchlist } from "@/features/watchlist/useWatchlist";
 import { ViewMode, WatchlistView } from "@/features/watchlist/WatchlistView";
 import type { WatchlistNav } from "@/features/watchlist/VirtualWatchlist";
 import { AnimeDetailModal } from "@/features/detail/AnimeDetailModal";
+import type { EntryCallbacks } from "@/features/anime/AnimePage";
 import { CommandPalette } from "@/features/palette/CommandPalette";
 import { CLOSE_MENUS_EVENT } from "@/components/FloatingQuickMenu";
 import { TorrentsRequest, TorrentsView } from "@/features/torrents/TorrentsView";
@@ -504,6 +505,16 @@ export const App: React.FC = () => {
     }
   };
 
+  // How the anime page (full page, Now Playing) hands its edits back to the list
+  const entryCallbacks: EntryCallbacks = {
+    onUpdated: (updated) => list.replaceEntries([updated]),
+    onSavedInBackground: (updated) => list.setAnimeList((prev) => prev.map((a) => (a.id === updated.id ? updated : a))),
+    onDeleted: (deletedId) => {
+      list.applyDelta([], [deletedId]);
+      showToast("Removed anime from library", "info");
+    },
+  };
+
   const openAnime = (anime: AnimeEntry) => {
     if (selectedAnime?.id !== anime.id) remember();
     setSelectedAnime(animeList.find((a) => a.id === anime.id) ?? anime);
@@ -780,6 +791,8 @@ export const App: React.FC = () => {
                             <NowPlayingView
                               activeSession={activeSession}
                               animeList={animeList}
+                              listById={listById}
+                              callbacks={entryCallbacks}
                               settings={settings}
                               onUpdateSettings={handleUpdateSettings}
                               onLinkDetectedEpisode={async (animeId, aliasTitle) => {

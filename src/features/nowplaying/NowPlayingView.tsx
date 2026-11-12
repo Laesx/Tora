@@ -3,10 +3,13 @@ import { Activity } from "lucide-react";
 import { AnimeEntry, AppSettings, DetectedMediaSession } from "@/lib/types";
 import { NowPlayingHero } from "./NowPlayingHero";
 import { NowPlayingDashboard } from "./NowPlayingDashboard";
+import type { EntryCallbacks } from "@/features/anime/AnimePage";
 
 interface NowPlayingViewProps {
   activeSession: DetectedMediaSession | null;
   animeList: AnimeEntry[];
+  listById: Map<number, AnimeEntry>;
+  callbacks: EntryCallbacks;
   settings: AppSettings;
   onUpdateSettings: (next: AppSettings) => Promise<void>;
   onLinkDetectedEpisode: (animeId: number, aliasTitle: string) => Promise<void>;
@@ -19,6 +22,8 @@ interface NowPlayingViewProps {
 export const NowPlayingView: React.FC<NowPlayingViewProps> = ({
   activeSession,
   animeList,
+  listById,
+  callbacks,
   settings,
   onUpdateSettings,
   onLinkDetectedEpisode,
@@ -26,9 +31,7 @@ export const NowPlayingView: React.FC<NowPlayingViewProps> = ({
   onDismissSession,
   onOpenSeason,
 }) => {
-  const entry = activeSession?.matched_anime_id
-    ? animeList.find((a) => a.id === activeSession.matched_anime_id)
-    : undefined;
+  const entry = activeSession?.matched_anime_id ? listById.get(activeSession.matched_anime_id) : undefined;
 
   return (
     <div className="p-6 space-y-5 max-w-7xl mx-auto">
@@ -70,6 +73,8 @@ export const NowPlayingView: React.FC<NowPlayingViewProps> = ({
           session={activeSession}
           entry={entry}
           animeList={animeList}
+          listById={listById}
+          callbacks={callbacks}
           settings={settings}
           onLinkDetectedEpisode={onLinkDetectedEpisode}
           onConfirmUpdate={onConfirmUpdate}

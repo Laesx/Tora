@@ -48,6 +48,14 @@ const orderOf = (type: string) => {
   return i === -1 ? RELATION_ORDER.length : i;
 };
 
+/** Not anime: only what it was adapted from is shown. */
+const isShownSource = (r: MediaRelation) =>
+  r.media_type !== "ANIME" && (r.relation_type === "SOURCE" || r.relation_type === "ADAPTATION");
+
+/** Whether `RelationsPanel` shows anything for these relations. */
+export const hasVisibleRelations = (relations: MediaRelation[]) =>
+  relations.some((r) => r.media_type === "ANIME" || isShownSource(r));
+
 /** Fixed card height, so the grid never reflows while covers load. */
 const CARD_HEIGHT = "h-[88px]";
 
@@ -68,10 +76,7 @@ export const RelationsPanel: React.FC<{
   const anime = relations
     .filter((r) => r.media_type === "ANIME")
     .sort((a, b) => orderOf(a.relation_type) - orderOf(b.relation_type) || (a.year ?? 9999) - (b.year ?? 9999));
-  // Not anime: only what it was adapted from
-  const sources = relations.filter(
-    (r) => r.media_type !== "ANIME" && (r.relation_type === "SOURCE" || r.relation_type === "ADAPTATION")
-  );
+  const sources = relations.filter(isShownSource);
   if (anime.length === 0 && sources.length === 0) return null;
 
   /** The full media of an anime not on the list (stored, or fetched once from AniList). */
