@@ -14,6 +14,7 @@ import {
   ListChecks,
   Check,
   EyeOff,
+  Maximize2,
 } from "lucide-react";
 import { AnimeEntry } from "@/lib/types";
 import { CustomListsApi } from "@/contexts/customLists";
@@ -206,6 +207,14 @@ export function buildAnimeActions(
       })),
     },
     ...(customLists ? [customLists] : []),
+    {
+      id: "full-page",
+      label: "Open Full Page",
+      icon: Maximize2,
+      iconClass: "text-accent",
+      hint: "characters, staff, history",
+      run: () => h.openAnimePage(anime),
+    },
     {
       id: "edit-details",
       label: "Edit Details...",

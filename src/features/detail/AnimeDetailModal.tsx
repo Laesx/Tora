@@ -43,7 +43,7 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
   onSavedInBackground,
   onDeleted,
 }) => {
-  const { searchTorrents } = useAnimeActions();
+  const { searchTorrents, openAnimePage } = useAnimeActions();
   const showToast = useToast();
   const customListNames = useCustomLists().names;
   const editor = useEntryEditor({ anime, inList, onUpdated, onSavedInBackground });
@@ -105,7 +105,13 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
         className="relative w-full max-w-4xl h-full bg-bg-secondary border-l border-border-subtle flex flex-col overflow-hidden shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <DetailHero anime={anime} studioRefs={studioRefs} onOpenSeason={onOpenSeason} onClose={onClose} />
+        <DetailHero
+          anime={anime}
+          studioRefs={studioRefs}
+          onOpenSeason={onOpenSeason}
+          onOpenFullPage={() => openAnimePage(anime)}
+          onClose={onClose}
+        />
 
         {/* Scrollable Content */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6">

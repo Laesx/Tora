@@ -70,7 +70,7 @@ export const RelationsPanel: React.FC<{
 }> = ({ relations, listById }) => {
   const showToast = useToast();
   const titleOf = useAnimeTitle();
-  const { openAnime, addAnime } = useAnimeActions();
+  const { openAnime, openAnimePage, addAnime } = useAnimeActions();
   const [busyId, setBusyId] = useState<number | null>(null);
 
   const anime = relations
@@ -94,14 +94,12 @@ export const RelationsPanel: React.FC<{
     }
   };
 
-  const open = async (r: MediaRelation) => {
-    const entry = listById.get(r.id);
-    if (entry) {
-      openAnime(entry);
-      return;
-    }
-    const media = await remoteMedia(r.id);
-    if (media) openAnime(media);
+  /** Click: the drawer; Ctrl+click: the full page. */
+  const open = async (r: MediaRelation, fullPage: boolean) => {
+    const target = listById.get(r.id) ?? (await remoteMedia(r.id));
+    if (!target) return;
+    if (fullPage) openAnimePage(target);
+    else openAnime(target);
   };
 
   const addToPlanning = async (r: MediaRelation) => {
@@ -136,9 +134,9 @@ export const RelationsPanel: React.FC<{
               >
                 <button
                   type="button"
-                  onClick={() => open(r)}
+                  onClick={(e) => open(r, e.ctrlKey || e.metaKey)}
                   disabled={busyId === r.id}
-                  title={`${titleOf(entry ?? r)}${entry ? "" : " (not in your list)"}`}
+                  title={`${titleOf(entry ?? r)}${entry ? "" : " (not in your list)"}\nCtrl+click: full page`}
                   className="flex gap-2.5 min-w-0 flex-1 text-left disabled:cursor-wait"
                 >
                   <div className="w-12 h-full shrink-0 rounded-md overflow-hidden bg-bg-tertiary">

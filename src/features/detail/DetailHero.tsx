@@ -1,5 +1,5 @@
 import React from "react";
-import { ExternalLink, Star, X } from "lucide-react";
+import { ExternalLink, Maximize2, Star, X } from "lucide-react";
 import { AnimeEntry, StudioRef } from "@/lib/types";
 import { formatCountdown } from "@/lib/format";
 import { getOptimizedCoverUrl } from "@/lib/covers";
@@ -15,8 +15,10 @@ export const DetailHero: React.FC<{
   /** Animation studios with AniList ids; null while the stored metadata loads */
   studioRefs: StudioRef[] | null;
   onOpenSeason: (season: string, year: number) => void;
+  /** Opens the full anime page (closes the drawer) */
+  onOpenFullPage: () => void;
   onClose: () => void;
-}> = ({ anime, studioRefs, onOpenSeason, onClose }) => {
+}> = ({ anime, studioRefs, onOpenSeason, onOpenFullPage, onClose }) => {
   const showToast = useToast();
   const titleOf = useAnimeTitle();
   const titleLanguage = useTitleLanguage();
@@ -82,6 +84,21 @@ export const DetailHero: React.FC<{
 
       <button
         type="button"
+        onClick={onOpenFullPage}
+        className="
+          z-30 absolute top-3.5 right-16 h-10 px-3
+          flex items-center gap-1.5 rounded-xl
+          bg-black/65 hover:bg-accent text-white text-xs font-semibold
+          border border-white/15 shadow-lg transition cursor-pointer
+        "
+        title="Open the full anime page: characters, staff, recommendations, history"
+      >
+        <Maximize2 className="w-4 h-4" />
+        Full page
+      </button>
+
+      <button
+        type="button"
         onClick={onClose}
         className="
           z-30 absolute top-3.5 right-3.5 w-10 h-10
@@ -94,7 +111,7 @@ export const DetailHero: React.FC<{
         <X className="w-5 h-5" />
       </button>
 
-      <div className="absolute bottom-3 left-6 right-16 flex items-end gap-5">
+      <div className="absolute bottom-3 left-6 right-6 flex items-end gap-5">
         <button
           type="button"
           onClick={handleOpenAniList}

@@ -6,6 +6,8 @@ import type { TorrentSearchRequest } from "@/lib/torrents";
 export interface AnimeActions {
   /** Opens the drawer; an anime already in the list opens with its local entry */
   openAnime: (anime: AnimeEntry) => void;
+  /** Opens the full anime page in place of the tab content (closes the drawer) */
+  openAnimePage: (anime: AnimeEntry) => void;
   /** Optimistic, debounced +1 / -1 */
   stepEpisode: (anime: AnimeEntry, delta: number) => void;
   batchUpdate: (patch: BatchAnimeUpdatePatch, summaryToast: string) => Promise<void>;
@@ -32,6 +34,7 @@ const missing = () => {
 // App provides a stable object whose functions always call its latest handlers
 export const AnimeActionsContext = createContext<AnimeActions>({
   openAnime: missing,
+  openAnimePage: missing,
   stepEpisode: missing,
   batchUpdate: missing,
   changeStatus: missing,

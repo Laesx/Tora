@@ -43,6 +43,7 @@ import { ViewMode, WatchlistView } from "@/features/watchlist/WatchlistView";
 import type { WatchlistNav } from "@/features/watchlist/VirtualWatchlist";
 import { AnimeDetailModal } from "@/features/detail/AnimeDetailModal";
 import type { EntryCallbacks } from "@/features/anime/AnimePage";
+import { AnimePageView } from "@/features/anime/AnimePageView";
 import { CommandPalette } from "@/features/palette/CommandPalette";
 import { CLOSE_MENUS_EVENT } from "@/components/FloatingQuickMenu";
 import { TorrentsRequest, TorrentsView } from "@/features/torrents/TorrentsView";
@@ -62,7 +63,13 @@ export const App: React.FC = () => {
   const mainScrollRef = useRef<HTMLElement | null>(null);
   const watchlistSearchRef = useRef<HTMLInputElement | null>(null);
   const watchlistNavRef = useRef<WatchlistNav | null>(null);
-  const [activeTab, setActiveTab] = useState<NavTab>("watchlist");
+  const [activeTab, setActiveTabState] = useState<NavTab>("watchlist");
+  // The full anime page, shown in place of the tab content; any tab change closes it
+  const [animePage, setAnimePage] = useState<AnimeEntry | null>(null);
+  const setActiveTab = (tab: NavTab) => {
+    setAnimePage(null);
+    setActiveTabState(tab);
+  };
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const titleLanguage = settings?.title_language ?? "romaji";
   setCurrentTitleLanguage(titleLanguage);
@@ -121,6 +128,8 @@ export const App: React.FC = () => {
       ...captured,
       drawer: selectedAnime,
       drawerInList: selectedAnime !== null && animeList.some((a) => a.id === selectedAnime.id),
+      page: animePage,
+      pageInList: animePage !== null && animeList.some((a) => a.id === animePage.id),
       scrollTop: mainScrollRef.current?.scrollTop ?? 0,
     };
   };
@@ -174,6 +183,8 @@ export const App: React.FC = () => {
     // The entry's current copy; a list entry removed since then stays closed, a remote anime opens as it was
     const fresh = loc.drawer && animeList.find((a) => a.id === loc.drawer!.id);
     setSelectedAnime(fresh || (loc.drawer && !loc.drawerInList ? loc.drawer : null));
+    const freshPage = loc.page && animeList.find((a) => a.id === loc.page!.id);
+    setAnimePage(freshPage || (loc.page && !loc.pageInList ? loc.page : null));
     setScrollRestore({ top: loc.scrollTop, nonce });
   };
 
@@ -515,6 +526,13 @@ export const App: React.FC = () => {
     },
   };
 
+  const openAnimePage = (anime: AnimeEntry) => {
+    remember();
+    setSelectedAnime(null);
+    setAnimePage(anime);
+    setScrollRestore({ top: 0, nonce: Date.now() });
+  };
+
   const openAnime = (anime: AnimeEntry) => {
     if (selectedAnime?.id !== anime.id) remember();
     setSelectedAnime(animeList.find((a) => a.id === anime.id) ?? anime);
@@ -555,6 +573,7 @@ export const App: React.FC = () => {
   const latestActions = useRef<AnimeActions | null>(null);
   latestActions.current = {
     openAnime,
+    openAnimePage,
     stepEpisode: stepper.stepEpisode,
     batchUpdate: list.batchUpdate,
     changeStatus: (anime, status, label) =>
@@ -578,6 +597,7 @@ export const App: React.FC = () => {
     const latest = () => latestActions.current!;
     return {
       openAnime: (a) => latest().openAnime(a),
+      openAnimePage: (a) => latest().openAnimePage(a),
       stepEpisode: (a, delta) => latest().stepEpisode(a, delta),
       batchUpdate: (patch, msg) => latest().batchUpdate(patch, msg),
       changeStatus: (a, status, label) => latest().changeStatus(a, status, label),
@@ -592,7 +612,7 @@ export const App: React.FC = () => {
   }, []);
 
   useGlobalShortcuts({
-    onWatchlist: activeTab === "watchlist",
+    onWatchlist: activeTab === "watchlist" && animePage === null,
     drawerOpen: selectedAnime !== null,
     paletteOpen: cmdOpen,
     signOutOpen: signOutModalOpen,
@@ -719,6 +739,18 @@ export const App: React.FC = () => {
                       >
                         {/* One crashing tab shows its error; the sidebar and other tabs keep working */}
                         {/* Keyed on the date settings too: a change redraws every date label behind the Settings modal */}
+                        {animePage ? (
+                          <ErrorBoundary key={`page|${animePage.id}`} scope="anime-page">
+                            <AnimePageView
+                              anime={listById.get(animePage.id) ?? animePage}
+                              inList={listById.has(animePage.id)}
+                              listById={listById}
+                              callbacks={entryCallbacks}
+                              onOpenSeason={openSeason}
+                              onBack={() => stepNav("back")}
+                            />
+                          </ErrorBoundary>
+                        ) : (
                         <ErrorBoundary
                           key={`${activeTab}|${settings?.date_locale ?? ""}|${settings?.time_format ?? "auto"}`}
                           scope={`tab:${activeTab}`}
@@ -828,6 +860,7 @@ export const App: React.FC = () => {
                             />
                           )}
                         </ErrorBoundary>
+                        )}
                       </main>
                     </div>
 
