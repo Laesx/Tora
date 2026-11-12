@@ -17,6 +17,12 @@ import { EntrySettings } from "@/features/detail/EntrySettings";
 import { AnimeHero, AnimeHeroSlots } from "./AnimeHero";
 import { InfoPanel } from "./InfoPanel";
 import { PageSection } from "./PageSection";
+import { useMediaDetails } from "./useMediaDetails";
+import { CharactersSection } from "./CharactersSection";
+import { StaffSection } from "./StaffSection";
+import { RecommendationsSection } from "./RecommendationsSection";
+import { HistorySection } from "./HistorySection";
+import { FollowingSection } from "./FollowingSection";
 
 /** How the page's edits reach App's list (the drawer gets the same from App as props). */
 export interface EntryCallbacks {
@@ -96,6 +102,7 @@ export const AnimePage: React.FC<AnimePageProps> = ({
     : undefined;
 
   const relations = media?.metadata.relations ?? [];
+  const details = useMediaDetails(mediaId);
 
   return (
     <div className="space-y-5">
@@ -152,10 +159,39 @@ export const AnimePage: React.FC<AnimePageProps> = ({
               <RelationsPanel relations={relations} listById={listById} />
             </PageSection>
           )}
+
+          {details.details && details.details.characters.length > 0 && (
+            <CharactersSection
+              details={details.details}
+              loading={details.loading}
+              loadingMore={details.loadingMore}
+              onLoadMore={details.loadMoreCharacters}
+              onRefresh={details.refresh}
+            />
+          )}
+          {details.details && <StaffSection anime={anime} details={details.details} />}
+          {details.details && <RecommendationsSection details={details.details} listById={listById} />}
+          {!details.details && details.loading && (
+            <PageSection>
+              <p className="text-xs text-text-muted">Loading characters, staff and recommendations…</p>
+            </PageSection>
+          )}
+          {!details.details && !details.loading && details.error && (
+            <PageSection>
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-xs text-text-muted">Characters, staff and recommendations could not be loaded.</p>
+                <button onClick={details.refresh} className="text-[11px] font-semibold text-accent hover:underline">
+                  Try again
+                </button>
+              </div>
+            </PageSection>
+          )}
         </div>
 
         <div className="space-y-5 min-w-0">
           <InfoPanel anime={anime} media={media} onOpenSeason={onOpenSeason} />
+          {inList && <HistorySection anime={anime} />}
+          <FollowingSection anime={anime} />
           {inList && <EntrySettings anime={anime} editor={editor} onDeleted={callbacks.onDeleted} />}
         </div>
       </div>

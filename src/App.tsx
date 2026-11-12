@@ -533,6 +533,18 @@ export const App: React.FC = () => {
     setScrollRestore({ top: 0, nonce: Date.now() });
   };
 
+  const openAnimeHistory = (anime: AnimeEntry) => {
+    remember();
+    setSelectedAnime(null);
+    setHistoryRequest({
+      period: null,
+      source: "all",
+      anime: { id: anime.anilist_id ?? anime.id, title: titleOf(anime) },
+      nonce: Date.now(),
+    });
+    setActiveTab("history");
+  };
+
   const openAnime = (anime: AnimeEntry) => {
     if (selectedAnime?.id !== anime.id) remember();
     setSelectedAnime(animeList.find((a) => a.id === anime.id) ?? anime);
@@ -574,6 +586,7 @@ export const App: React.FC = () => {
   latestActions.current = {
     openAnime,
     openAnimePage,
+    openAnimeHistory,
     stepEpisode: stepper.stepEpisode,
     batchUpdate: list.batchUpdate,
     changeStatus: (anime, status, label) =>
@@ -598,6 +611,7 @@ export const App: React.FC = () => {
     return {
       openAnime: (a) => latest().openAnime(a),
       openAnimePage: (a) => latest().openAnimePage(a),
+      openAnimeHistory: (a) => latest().openAnimeHistory(a),
       stepEpisode: (a, delta) => latest().stepEpisode(a, delta),
       batchUpdate: (patch, msg) => latest().batchUpdate(patch, msg),
       changeStatus: (a, status, label) => latest().changeStatus(a, status, label),

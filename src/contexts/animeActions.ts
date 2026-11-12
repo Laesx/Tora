@@ -8,6 +8,8 @@ export interface AnimeActions {
   openAnime: (anime: AnimeEntry) => void;
   /** Opens the full anime page in place of the tab content (closes the drawer) */
   openAnimePage: (anime: AnimeEntry) => void;
+  /** Opens this anime's episode timeline in the History tab */
+  openAnimeHistory: (anime: AnimeEntry) => void;
   /** Optimistic, debounced +1 / -1 */
   stepEpisode: (anime: AnimeEntry, delta: number) => void;
   batchUpdate: (patch: BatchAnimeUpdatePatch, summaryToast: string) => Promise<void>;
@@ -35,6 +37,7 @@ const missing = () => {
 export const AnimeActionsContext = createContext<AnimeActions>({
   openAnime: missing,
   openAnimePage: missing,
+  openAnimeHistory: missing,
   stepEpisode: missing,
   batchUpdate: missing,
   changeStatus: missing,
