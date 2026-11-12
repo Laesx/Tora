@@ -1,5 +1,46 @@
 # Changelog
 
+## v0.7.0
+
+> [!WARNING]
+> **Restart Tora once after the first launch.** This version rebuilds how your library files are matched to your anime. The first launch re-matches every file on its own (a few seconds), but some anime may not show their new episodes and progress strips until Tora is restarted. Close it (from the tray too, if you use it) and open it again.
+
+This release also includes an **emergency fix for library matching**. Episodes could end up on the wrong anime, for example *Unlimited Blade Works* episodes showing under *Fate/stay night*, or a sequel's episodes under its first season, and a rescan could not fix them.
+
+### Library matching (hotfix)
+- Each file is matched by what its own name says first. A file named after a sequel goes to the sequel even when it sits in the first season's folder.
+- **Linked folders** work by whole folder names, use the nearest linked folder, and can be shared by several anime (two seasons in one folder). A folder link only decides for files whose names match no title.
+- Folders are only linked automatically from files that name the anime, never from a folder name that only looks similar (no more tool or extras folders linked to random anime).
+- Sequel numbering (episode 13 → season 2 episode 1) is only applied when the number doesn't exist in the anime the file names. A valid episode is never moved.
+- Names that fit several different anime about equally (*"Fate"*) stay unmatched instead of picking one, and a file is never put on another season of the same show.
+- **Specials, openings, endings and extras** stay attached to their anime but no longer count as episodes.
+- **Rescan (F5)** now matches every file again, so it repairs wrong matches.
+- Now Playing uses the same match as the Library for files in your library folders.
+- Better file name reading: "Title 13 - Episode title", accents (*Traumend* = *Träumend*), a year in the name picking the right remake, and a few names that were misread before.
+- The Library's episode table shows what decided each match when you hover it.
+- A few files that were matched before may now be unmatched (for example `S03E01` names when no list title says season 3). Link them once from Now Playing and they stay linked.
+
+### Tray and startup
+- **System tray** icon with the anime playing now, Show, a playback detection toggle and Quit.
+- **Minimize or close to the tray**, and **start with Windows** (optionally straight into the tray). Settings → System.
+- Opening Tora a second time brings back the running window instead of starting another copy.
+- The window remembers its size, position and maximized state.
+
+### Watchlist
+- **Drag anime onto a status** to move them: drag a card or row (or your selection) and drop it on the status board. Esc cancels.
+- New **table columns**: Score (pick a score right in the cell), Average, Started, Completed, Next episode, On disk, Time left and Notes. Score and Average are shown by default; the rest are in the header's right-click menu. Every column sorts.
+- **Drag headers to reorder** the table columns.
+- The poster grid adds columns on wide or fullscreen windows instead of growing the posters, and the Watchlist uses the whole window width.
+
+### Now Playing and Stats
+- **Skip openings and endings in time left** (Settings → Playback & Detection): time-left estimates leave out about 3 minutes per episode.
+- **Continue Watching** can be filtered by a custom list.
+- History and Stats use more of the window width.
+
+### Fixes
+- Fixed an error when right-clicking near the right edge of the watchlist table.
+- Right-clicking the rounded corner of a menu no longer opens the browser's menu.
+
 ## v0.5.0
 
 ### History
