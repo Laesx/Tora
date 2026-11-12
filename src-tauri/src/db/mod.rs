@@ -1,7 +1,7 @@
 use crate::detection::anisthesia::{default_players, PlayerDefinition};
 use crate::detection::anitomy::{extract_effective_season, normalize_anime_title, AnitomyElements};
 use crate::detection::relations::{relations_db, EpisodeRedirection};
-use crate::plugins::{AiringScheduleItem, RemoteListMembership, SeasonalAnime};
+use crate::plugins::{AiringScheduleItem, MediaDetails, RemoteListMembership, SeasonalAnime};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use once_cell::sync::Lazy;
@@ -2782,6 +2782,10 @@ impl Database {
         add_column_if_missing(&conn, "local_episodes", "parsed_episode", "INTEGER")?;
         add_column_if_missing(&conn, "local_episodes", "match_kind", "TEXT")?;
         add_column_if_missing(&conn, "local_episodes", "extra_kind", "TEXT")?;
+        // The anime page's details, next to the metadata payload: season upserts never touch them and
+        // season reads never select them
+        add_column_if_missing(&conn, "media_metadata", "details_json", "TEXT")?;
+        add_column_if_missing(&conn, "media_metadata", "details_fetched_at", "INTEGER")?;
         activity::create_tables(&conn)?;
 
         run_data_migrations(&mut conn)?;
@@ -3598,6 +3602,37 @@ impl Database {
         )
         .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    /// The anime page's stored details and when they were fetched (unreadable JSON reads as none).
+    pub fn get_media_details(&self, anilist_id: i64) -> Result<Option<(i64, MediaDetails)>, String> {
+        let conn = self.reader()?;
+        let row: Option<(Option<i64>, Option<String>)> = conn
+            .query_row(
+                "SELECT details_fetched_at, details_json FROM media_metadata WHERE anilist_id = ?1",
+                params![anilist_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        Ok(match row {
+            Some((Some(at), Some(json))) => serde_json::from_str(&json).ok().map(|d| (at, d)),
+            _ => None,
+        })
+    }
+
+    /// Stores the anime page's details on the media's metadata row (which must exist). Returns false
+    /// when there is no such row.
+    pub fn put_media_details(&self, anilist_id: i64, fetched_at: i64, details: &MediaDetails) -> Result<bool, String> {
+        let json = serde_json::to_string(details).map_err(|e| e.to_string())?;
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let n = conn
+            .execute(
+                "UPDATE media_metadata SET details_json = ?1, details_fetched_at = ?2 WHERE anilist_id = ?3",
+                params![json, fetched_at, anilist_id],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(n > 0)
     }
 
     pub fn list_cached_seasons(&self) -> Result<Vec<CachedSeason>, String> {
@@ -5908,6 +5943,33 @@ mod tests {
         assert_eq!(db.get_custom_lists().unwrap().members.len(), 1);
         db.reset_for_account_switch(7).unwrap();
         assert_eq!(db.get_custom_lists().unwrap(), CustomListsState::default());
+    }
+
+    #[test]
+    fn media_details_survive_metadata_upserts() {
+        let db = Database::open_in_memory().unwrap();
+        let item = SeasonalAnime {
+            entry: test_entry(9_000_001, "Show"),
+            popularity: None,
+            metadata: Default::default(),
+        };
+        let details = MediaDetails {
+            characters_page: 1,
+            staff: vec![crate::plugins::StaffRole {
+                id: 1,
+                name: "Director".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        // No metadata row yet: nothing to attach the details to
+        assert!(!db.put_media_details(9_000_001, 10, &details).unwrap());
+        db.put_media_metadata(5, &item).unwrap();
+        assert!(db.put_media_details(9_000_001, 10, &details).unwrap());
+        // A season fetch rewrites the payload; the details stay
+        db.put_media_metadata(20, &item).unwrap();
+        assert_eq!(db.get_media_details(9_000_001).unwrap(), Some((10, details)));
+        assert_eq!(db.get_media_metadata(9_000_001).unwrap().unwrap().0, 20);
     }
 
     #[test]

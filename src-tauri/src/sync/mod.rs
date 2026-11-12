@@ -32,7 +32,7 @@ use crate::plugins::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -40,6 +40,7 @@ use std::time::{Duration, Instant};
 
 pub use crate::db::ResolvedState;
 
+mod details;
 mod history;
 pub use history::{EVENT_HISTORY_PROGRESS, EVENT_HISTORY_UPDATED};
 
@@ -583,6 +584,8 @@ pub struct TrackerSyncService {
     history_page_interval: Duration,
     /// Multiplies the import's retry waits (0 in tests).
     history_retry_scale: u64,
+    /// Followed users' entries per media: `(fetched, token, page)` (`details::following_entries`).
+    following_cache: Mutex<HashMap<i64, (Instant, String, crate::plugins::FollowingPage)>>,
 }
 
 impl TrackerSyncService {
@@ -605,6 +608,7 @@ impl TrackerSyncService {
             history_pause: AtomicBool::new(false),
             history_page_interval: history::HISTORY_PAGE_INTERVAL,
             history_retry_scale: 1,
+            following_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -2294,6 +2298,12 @@ mod tests {
     #[derive(Default)]
     struct MockTracker {
         viewer_id: i64,
+        /// Ids of every `fetch_media_page_details` call.
+        page_details_calls: Mutex<Vec<i64>>,
+        /// `(id, page)` of every `fetch_characters_page` call.
+        character_page_calls: Mutex<Vec<(i64, u32)>>,
+        /// Media ids of every `fetch_following_entries` call.
+        following_calls: Mutex<Vec<i64>>,
         remote: Mutex<Vec<AnimeEntry>>,
         saves: Mutex<Vec<TrackerEntryUpdate>>,
         deletes: Mutex<Vec<(i64, Option<i64>)>>,
@@ -2323,6 +2333,54 @@ mod tests {
     }
 
     impl TrackerPlugin for MockTracker {
+        fn fetch_media_page_details<'a>(
+            &'a self,
+            id: i64,
+        ) -> BoxFuture<'a, Result<Option<crate::plugins::MediaDetails>, TrackerError>> {
+            Box::pin(async move {
+                self.page_details_calls.lock().unwrap().push(id);
+                Ok(Some(crate::plugins::MediaDetails {
+                    characters: vec![character(1), character(2)],
+                    characters_page: 1,
+                    characters_has_more: true,
+                    ..Default::default()
+                }))
+            })
+        }
+        fn fetch_characters_page<'a>(
+            &'a self,
+            id: i64,
+            page: u32,
+        ) -> BoxFuture<'a, Result<crate::plugins::CharactersPage, TrackerError>> {
+            Box::pin(async move {
+                self.character_page_calls.lock().unwrap().push((id, page));
+                Ok(crate::plugins::CharactersPage {
+                    // One already known (AniList pages can overlap), one new
+                    characters: vec![character(2), character(3)],
+                    has_more: false,
+                })
+            })
+        }
+        fn fetch_following_entries<'a>(
+            &'a self,
+            _token: &'a str,
+            media_id: i64,
+        ) -> BoxFuture<'a, Result<crate::plugins::FollowingPage, TrackerError>> {
+            Box::pin(async move {
+                self.following_calls.lock().unwrap().push(media_id);
+                Ok(crate::plugins::FollowingPage {
+                    entries: vec![crate::plugins::FollowingEntry {
+                        user_id: 7,
+                        user_name: "friend".into(),
+                        status: "CURRENT".into(),
+                        progress: 3,
+                        score: 85.0,
+                        ..Default::default()
+                    }],
+                    has_more: false,
+                })
+            })
+        }
         fn descriptor(&self) -> crate::plugins::TrackerPluginDescriptor {
             unimplemented!()
         }
@@ -2551,6 +2609,15 @@ mod tests {
             .with_min_request_interval(Duration::from_millis(0))
             .with_history_pacing(Duration::ZERO, 0);
         (Arc::new(svc), events)
+    }
+
+    fn character(id: i64) -> crate::plugins::CharacterRole {
+        crate::plugins::CharacterRole {
+            id,
+            name: format!("Character {id}"),
+            role: "MAIN".into(),
+            ..Default::default()
+        }
     }
 
     fn sign_in(db: &Database, user_id: i64) {
@@ -3431,6 +3498,51 @@ mod tests {
         svc.fetch_season("SUMMER", 2025, false).await.unwrap();
         assert_eq!(svc.media_metadata(7).await.unwrap().unwrap().entry.title_romaji, "Seasonal");
         assert_eq!(*mock.metadata_calls.lock().unwrap(), vec![42]);
+    }
+
+    #[tokio::test]
+    async fn media_details_are_stored_refreshed_by_age_and_extended() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let mock = Arc::new(MockTracker::default());
+        let (svc, _events) = service(db.clone(), mock.clone());
+
+        // First read fetches the metadata row, then the details; the second is served from the store
+        let first = svc.media_details(9_000_010, false).await.unwrap().unwrap();
+        assert_eq!(first.characters.len(), 2);
+        svc.media_details(9_000_010, false).await.unwrap().unwrap();
+        assert_eq!(*mock.page_details_calls.lock().unwrap(), vec![9_000_010]);
+        assert_eq!(*mock.metadata_calls.lock().unwrap(), vec![9_000_010]);
+
+        // A forced refresh, then an outdated copy, fetch again
+        svc.media_details(9_000_010, true).await.unwrap();
+        db.put_media_details(9_000_010, 0, &first).unwrap();
+        svc.media_details(9_000_010, false).await.unwrap();
+        assert_eq!(mock.page_details_calls.lock().unwrap().len(), 3);
+
+        // The next page is appended once (overlaps dropped) and stored
+        let more = svc.load_more_characters(9_000_010).await.unwrap();
+        assert_eq!(more.characters.iter().map(|c| c.id).collect::<Vec<_>>(), vec![1, 2, 3]);
+        assert_eq!((more.characters_page, more.characters_has_more), (2, false));
+        assert_eq!(db.get_media_details(9_000_010).unwrap().unwrap().1, more);
+        // Nothing more to load: no request
+        svc.load_more_characters(9_000_010).await.unwrap();
+        assert_eq!(*mock.character_page_calls.lock().unwrap(), vec![(9_000_010, 2)]);
+    }
+
+    #[tokio::test]
+    async fn following_entries_need_a_token_and_are_cached_in_memory() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let mock = Arc::new(MockTracker::default());
+        let (svc, _events) = service(db.clone(), mock.clone());
+
+        assert_eq!(svc.following_entries(9_000_020, false).await.unwrap(), None);
+        sign_in(&db, 1);
+        let page = svc.following_entries(9_000_020, false).await.unwrap().unwrap();
+        assert_eq!(page.entries[0].user_name, "friend");
+        svc.following_entries(9_000_020, false).await.unwrap();
+        assert_eq!(mock.following_calls.lock().unwrap().len(), 1);
+        svc.following_entries(9_000_020, true).await.unwrap();
+        assert_eq!(mock.following_calls.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]

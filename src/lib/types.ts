@@ -114,6 +114,67 @@ export interface MediaMetadata {
   relations?: MediaRelation[] | null;
 }
 
+export interface VoiceActor {
+  id: number;
+  name: string;
+  name_native: string | null;
+  image: string | null;
+  /** "Japanese", "English", "Spanish"… */
+  language: string;
+}
+
+export interface CharacterRole {
+  id: number;
+  name: string;
+  name_native: string | null;
+  image: string | null;
+  /** `MAIN`, `SUPPORTING` or `BACKGROUND` */
+  role: string;
+  voice_actors: VoiceActor[];
+}
+
+export interface StaffRole {
+  id: number;
+  name: string;
+  name_native: string | null;
+  image: string | null;
+  role: string;
+}
+
+export interface MediaRecommendation {
+  rating: number;
+  media: MediaRelation;
+}
+
+/** The anime page's details (stored next to the media's metadata, refreshed by age). */
+export interface MediaDetails {
+  characters: CharacterRole[];
+  characters_page: number;
+  characters_has_more: boolean;
+  staff: StaffRole[];
+  staff_has_more: boolean;
+  recommendations: MediaRecommendation[];
+}
+
+/** A followed user's list entry (account-specific, kept in memory only). */
+export interface FollowingEntry {
+  user_id: number;
+  user_name: string;
+  avatar: string | null;
+  status: string;
+  progress: number;
+  repeat: number;
+  /** 0–100 */
+  score: number;
+  notes: string | null;
+  updated_at: number | null;
+}
+
+export interface FollowingPage {
+  entries: FollowingEntry[];
+  has_more: boolean;
+}
+
 /** One AniList relation of a media, with the light fields a card needs. */
 export interface MediaRelation {
   id: number;

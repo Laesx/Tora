@@ -48,6 +48,8 @@ import {
   HistorySource,
   MonthCount,
   TimelineEpisode,
+  MediaDetails,
+  FollowingPage,
 } from "./types";
 import { errorText, log } from "./log";
 
@@ -98,6 +100,13 @@ export const toraApi = {
 
   // The list owner's AniList score format ("POINT_10_DECIMAL", …); pulls keep it current
   getScoreFormat: () => invoke<string>("get_score_format"),
+
+  // The anime page: characters, staff, recommendations (stored, refreshed by age) and followed users
+  getMediaDetails: (anilistId: number, refresh = false) =>
+    invoke<MediaDetails | null>("get_media_details", { anilistId, refresh }),
+  loadMoreCharacters: (anilistId: number) => invoke<MediaDetails>("load_more_characters", { anilistId }),
+  getFollowingEntries: (anilistId: number, refresh = false) =>
+    invoke<FollowingPage | null>("get_following_entries", { anilistId, refresh }),
 
   // Preferred release per anime (`src/lib/releases.ts` keys): local only, never sent to AniList
   getReleasePreferences: () => invoke<Record<string, string>>("get_release_preferences"),

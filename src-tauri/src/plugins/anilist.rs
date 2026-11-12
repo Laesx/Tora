@@ -1,7 +1,8 @@
 use crate::db::AnimeEntry;
 use crate::plugins::{
     ActivityMedia, ActivityPage, ActivityPageQuery, AiringScheduleItem, AiringSchedulePage,
-    BoxFuture, MediaMetadata, MediaPrequel, MediaRanking, MediaRelation, MediaTag, RemoteListActivity, ACTIVITY_PAGE_SIZE,
+    BoxFuture, CharacterRole, CharactersPage, FollowingEntry, FollowingPage, MediaDetails, MediaMetadata,
+    MediaPrequel, MediaRanking, MediaRecommendation, MediaRelation, StaffRole, VoiceActor, MediaTag, RemoteListActivity, ACTIVITY_PAGE_SIZE,
     RemoteEntryState, RemoteListMembership, RemoteListSnapshot, SeasonPage, SeasonalAnime, StudioRef,
     TrackerEntryUpdate, TrackerError, TrackerPlugin, TrackerPluginDescriptor, TrackerUserProfile,
     MEDIA_DETAILS_CHUNK,
@@ -714,6 +715,233 @@ fn opt_u32(v: Option<&Value>) -> Option<u32> {
 }
 
 /// `MEDIA_FRAGMENT + SEASON_EXTRA_FIELDS` media node → season item.
+/// The light card fields of a related / recommended media node.
+fn parse_media_card(node: &Value, relation_type: &str) -> Option<MediaRelation> {
+    let text = |v: Option<&Value>| v.and_then(|v| v.as_str()).map(|s| s.to_string());
+    let title = node.get("title")?;
+    Some(MediaRelation {
+        id: node.get("id")?.as_i64()?,
+        relation_type: relation_type.to_string(),
+        media_type: node.get("type")?.as_str()?.to_string(),
+        title_romaji: title.get("romaji")?.as_str()?.to_string(),
+        title_english: text(title.get("english")),
+        title_native: text(title.get("native")),
+        format: text(node.get("format")),
+        status: text(node.get("status")),
+        episodes: opt_u32(node.get("episodes")),
+        year: opt_u32(node.get("seasonYear")).or_else(|| opt_u32(node.get("startDate").and_then(|d| d.get("year")))),
+        cover_image: text(node.get("coverImage").and_then(|c| c.get("medium"))),
+    })
+}
+
+/// Light fields of a related / recommended media (`parse_media_card`).
+const MEDIA_CARD_FIELDS: &str = r#"
+    id
+    type
+    format
+    status
+    episodes
+    seasonYear
+    startDate {
+        year
+    }
+    coverImage {
+        medium
+    }
+    title {
+        romaji
+        english
+        native
+    }
+"#;
+
+/// A media's characters page (25 per page, every voice actor language).
+const CHARACTERS_FIELDS: &str = r#"
+    characters(sort: [ROLE, RELEVANCE, ID], page: $page, perPage: 25) {
+        pageInfo {
+            hasNextPage
+        }
+        edges {
+            role
+            node {
+                id
+                name {
+                    full
+                    native
+                }
+                image {
+                    medium
+                }
+            }
+            voiceActors {
+                id
+                name {
+                    full
+                    native
+                }
+                image {
+                    medium
+                }
+                languageV2
+            }
+        }
+    }
+"#;
+
+fn person_name(node: &Value) -> Option<(String, Option<String>)> {
+    let name = node.get("name")?;
+    let full = name.get("full")?.as_str()?.trim().to_string();
+    let native = name
+        .get("native")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    Some((full, native))
+}
+
+fn person_image(node: &Value) -> Option<String> {
+    node.get("image")?.get("medium")?.as_str().map(|s| s.to_string())
+}
+
+fn has_next_page(connection: Option<&Value>) -> bool {
+    connection
+        .and_then(|c| c.get("pageInfo"))
+        .and_then(|p| p.get("hasNextPage"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+fn parse_characters_page(media: &Value) -> CharactersPage {
+    let conn = media.get("characters");
+    let characters = conn
+        .and_then(|c| c.get("edges"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| {
+                    let node = e.get("node")?;
+                    let (name, name_native) = person_name(node)?;
+                    let voice_actors = e
+                        .get("voiceActors")
+                        .and_then(|v| v.as_array())
+                        .map(|vas| {
+                            vas.iter()
+                                .filter_map(|va| {
+                                    let (name, name_native) = person_name(va)?;
+                                    Some(VoiceActor {
+                                        id: va.get("id")?.as_i64()?,
+                                        name,
+                                        name_native,
+                                        image: person_image(va),
+                                        language: va.get("languageV2")?.as_str()?.to_string(),
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    Some(CharacterRole {
+                        id: node.get("id")?.as_i64()?,
+                        name,
+                        name_native,
+                        image: person_image(node),
+                        role: e.get("role").and_then(|v| v.as_str()).unwrap_or("BACKGROUND").to_string(),
+                        voice_actors,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    CharactersPage {
+        characters,
+        has_more: has_next_page(conn),
+    }
+}
+
+fn parse_media_page_details(media: &Value) -> MediaDetails {
+    let first = parse_characters_page(media);
+    let staff_conn = media.get("staff");
+    let staff = staff_conn
+        .and_then(|c| c.get("edges"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| {
+                    let node = e.get("node")?;
+                    let (name, name_native) = person_name(node)?;
+                    Some(StaffRole {
+                        id: node.get("id")?.as_i64()?,
+                        name,
+                        name_native,
+                        image: person_image(node),
+                        role: e.get("role").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let recommendations = media
+        .get("recommendations")
+        .and_then(|c| c.get("nodes"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|n| {
+                    let media = parse_media_card(n.get("mediaRecommendation")?, "RECOMMENDATION")?;
+                    Some(MediaRecommendation {
+                        rating: n.get("rating").and_then(|v| v.as_i64()).unwrap_or(0),
+                        media,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    MediaDetails {
+        characters_page: 1,
+        characters_has_more: first.has_more,
+        characters: first.characters,
+        staff_has_more: has_next_page(staff_conn),
+        staff,
+        recommendations,
+    }
+}
+
+fn parse_following_page(page: &Value) -> FollowingPage {
+    let entries = page
+        .get("mediaList")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| {
+                    let user = e.get("user")?;
+                    Some(FollowingEntry {
+                        user_id: user.get("id")?.as_i64()?,
+                        user_name: user.get("name")?.as_str()?.to_string(),
+                        avatar: user
+                            .get("avatar")
+                            .and_then(|a| a.get("medium"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                        status: e.get("status")?.as_str()?.to_string(),
+                        progress: opt_u32(e.get("progress")).unwrap_or(0),
+                        repeat: opt_u32(e.get("repeat")).unwrap_or(0),
+                        score: e.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                        notes: e
+                            .get("notes")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty()),
+                        updated_at: e.get("updatedAt").and_then(|v| v.as_i64()).filter(|&t| t > 0),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    FollowingPage {
+        entries,
+        has_more: has_next_page(Some(page)),
+    }
+}
+
 fn parse_seasonal_media(m: &Value) -> Option<SeasonalAnime> {
     let entry = AniListPlugin::parse_media_node(m, None)?;
     let tags = m
@@ -775,31 +1003,13 @@ fn parse_seasonal_media(m: &Value) -> Option<SeasonalAnime> {
                 .collect()
         })
         .unwrap_or_default();
-    let text = |v: Option<&Value>| v.and_then(|v| v.as_str()).map(|s| s.to_string());
     let relations: Vec<MediaRelation> = m
         .get("relations")
         .and_then(|r| r.get("edges"))
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
-                .filter_map(|e| {
-                    let node = e.get("node")?;
-                    let title = node.get("title")?;
-                    Some(MediaRelation {
-                        id: node.get("id")?.as_i64()?,
-                        relation_type: e.get("relationType")?.as_str()?.to_string(),
-                        media_type: node.get("type")?.as_str()?.to_string(),
-                        title_romaji: title.get("romaji")?.as_str()?.to_string(),
-                        title_english: text(title.get("english")),
-                        title_native: text(title.get("native")),
-                        format: text(node.get("format")),
-                        status: text(node.get("status")),
-                        episodes: opt_u32(node.get("episodes")),
-                        year: opt_u32(node.get("seasonYear"))
-                            .or_else(|| opt_u32(node.get("startDate").and_then(|d| d.get("year")))),
-                        cover_image: text(node.get("coverImage").and_then(|c| c.get("medium"))),
-                    })
-                })
+                .filter_map(|e| parse_media_card(e.get("node")?, e.get("relationType")?.as_str()?))
                 .collect()
         })
         .unwrap_or_default();
@@ -1365,6 +1575,106 @@ impl TrackerPlugin for AniListPlugin {
         })
     }
 
+    fn fetch_media_page_details<'a>(&'a self, id: i64) -> BoxFuture<'a, Result<Option<MediaDetails>, TrackerError>> {
+        Box::pin(async move {
+            let gql = format!(
+                r#"
+                query ($id: Int, $page: Int) {{
+                    Media(id: $id, type: ANIME) {{
+                        {CHARACTERS_FIELDS}
+                        staff(sort: [RELEVANCE, ID], perPage: 25) {{
+                            pageInfo {{
+                                hasNextPage
+                            }}
+                            edges {{
+                                role
+                                node {{
+                                    id
+                                    name {{
+                                        full
+                                        native
+                                    }}
+                                    image {{
+                                        medium
+                                    }}
+                                }}
+                            }}
+                        }}
+                        recommendations(sort: [RATING_DESC, ID], perPage: 10) {{
+                            nodes {{
+                                rating
+                                mediaRecommendation {{
+                                    {MEDIA_CARD_FIELDS}
+                                }}
+                            }}
+                        }}
+                    }}
+                }}
+                "#
+            );
+            match self.graphql_request(&gql, json!({ "id": id, "page": 1 }), None).await {
+                Ok(data) => Ok(data.get("Media").map(parse_media_page_details)),
+                Err(TrackerError::NotFound(_)) => Ok(None),
+                Err(e) => Err(e),
+            }
+        })
+    }
+
+    fn fetch_characters_page<'a>(&'a self, id: i64, page: u32) -> BoxFuture<'a, Result<CharactersPage, TrackerError>> {
+        Box::pin(async move {
+            let gql = format!(
+                r#"
+                query ($id: Int, $page: Int) {{
+                    Media(id: $id, type: ANIME) {{
+                        {CHARACTERS_FIELDS}
+                    }}
+                }}
+                "#
+            );
+            let data = self.graphql_request(&gql, json!({ "id": id, "page": page }), None).await?;
+            Ok(data.get("Media").map(parse_characters_page).unwrap_or_default())
+        })
+    }
+
+    fn fetch_following_entries<'a>(
+        &'a self,
+        token: &'a str,
+        media_id: i64,
+    ) -> BoxFuture<'a, Result<FollowingPage, TrackerError>> {
+        Box::pin(async move {
+            let token = token.trim();
+            if token.is_empty() {
+                return Err(TrackerError::Unauthorized("AniList OAuth token is required.".into()));
+            }
+            let gql = r#"
+                query ($mediaId: Int) {
+                    Page(perPage: 50) {
+                        pageInfo {
+                            hasNextPage
+                        }
+                        mediaList(mediaId: $mediaId, isFollowing: true, sort: [UPDATED_TIME_DESC]) {
+                            status
+                            progress
+                            repeat
+                            score(format: POINT_100)
+                            notes
+                            updatedAt
+                            user {
+                                id
+                                name
+                                avatar {
+                                    medium
+                                }
+                            }
+                        }
+                    }
+                }
+            "#;
+            let data = self.graphql_request(gql, json!({ "mediaId": media_id }), Some(token)).await?;
+            Ok(data.get("Page").map(parse_following_page).unwrap_or_default())
+        })
+    }
+
     fn save_list_entry<'a>(
         &'a self,
         token: &'a str,
@@ -1692,6 +2002,51 @@ impl AniListPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_page_details_and_following() {
+        let media = json!({
+            "characters": {
+                "pageInfo": { "hasNextPage": true },
+                "edges": [{
+                    "role": "MAIN",
+                    "node": { "id": 1, "name": { "full": "Rudeus", "native": "" }, "image": { "medium": "https://img/c1.jpg" } },
+                    "voiceActors": [
+                        { "id": 10, "name": { "full": "Tomokazu Sugita", "native": "x" }, "image": null, "languageV2": "Japanese" },
+                        { "id": 11, "name": { "full": "Elliot", "native": null }, "languageV2": "Spanish" }
+                    ]
+                }]
+            },
+            "staff": { "pageInfo": { "hasNextPage": false }, "edges": [
+                { "role": "Director", "node": { "id": 5, "name": { "full": "Director A" } } }
+            ] },
+            "recommendations": { "nodes": [
+                { "rating": 42, "mediaRecommendation": { "id": 77, "type": "ANIME", "format": "TV", "title": { "romaji": "Other" } } },
+                { "rating": 3, "mediaRecommendation": null }
+            ] }
+        });
+        let d = parse_media_page_details(&media);
+        assert_eq!((d.characters_page, d.characters_has_more, d.staff_has_more), (1, true, false));
+        assert_eq!(d.characters[0].name_native, None);
+        assert_eq!(d.characters[0].voice_actors.len(), 2);
+        assert_eq!(d.characters[0].voice_actors[1].language, "Spanish");
+        assert_eq!(d.staff[0].role, "Director");
+        assert_eq!(d.recommendations.len(), 1);
+        assert_eq!((d.recommendations[0].rating, d.recommendations[0].media.id), (42, 77));
+
+        let page = json!({
+            "pageInfo": { "hasNextPage": false },
+            "mediaList": [{
+                "status": "CURRENT", "progress": 4, "repeat": 0, "score": 85, "notes": "  ", "updatedAt": 1700000000,
+                "user": { "id": 3, "name": "friend", "avatar": { "medium": "https://img/a.png" } }
+            }]
+        });
+        let f = parse_following_page(&page);
+        assert_eq!(f.entries.len(), 1);
+        assert_eq!((f.entries[0].progress, f.entries[0].score), (4, 85.0));
+        assert_eq!(f.entries[0].notes, None);
+        assert_eq!(f.entries[0].updated_at, Some(1700000000));
+    }
 
     #[test]
     fn parses_score_format() {

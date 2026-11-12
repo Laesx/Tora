@@ -208,6 +208,89 @@ pub struct MediaRelation {
     pub cover_image: Option<String>,
 }
 
+/// A voice actor of a character (every language AniList knows; the page picks one).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct VoiceActor {
+    pub id: i64,
+    pub name: String,
+    pub name_native: Option<String>,
+    pub image: Option<String>,
+    /// AniList `languageV2`: "Japanese", "English", "Spanish"…
+    pub language: String,
+}
+
+/// A character of a media, with its voice actors.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CharacterRole {
+    pub id: i64,
+    pub name: String,
+    pub name_native: Option<String>,
+    pub image: Option<String>,
+    /// `MAIN`, `SUPPORTING` or `BACKGROUND`
+    pub role: String,
+    pub voice_actors: Vec<VoiceActor>,
+}
+
+/// A staff member of a media and what they did on it ("Director", "Original Creator"…).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct StaffRole {
+    pub id: i64,
+    pub name: String,
+    pub name_native: Option<String>,
+    pub image: Option<String>,
+    pub role: String,
+}
+
+/// An AniList user recommendation: the recommended media (light card fields) and its rating.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MediaRecommendation {
+    pub rating: i64,
+    pub media: MediaRelation,
+}
+
+/// The anime page's details, stored in `media_metadata.details_json` (never inside `payload_json`, which
+/// season views read in bulk). Characters load 25 per page; more pages are appended on demand.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MediaDetails {
+    pub characters: Vec<CharacterRole>,
+    /// Character pages loaded so far
+    pub characters_page: u32,
+    pub characters_has_more: bool,
+    pub staff: Vec<StaffRole>,
+    pub staff_has_more: bool,
+    pub recommendations: Vec<MediaRecommendation>,
+}
+
+/// One page of a media's characters.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CharactersPage {
+    pub characters: Vec<CharacterRole>,
+    pub has_more: bool,
+}
+
+/// A followed user's list entry for one media (account-specific: never stored).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct FollowingEntry {
+    pub user_id: i64,
+    pub user_name: String,
+    pub avatar: Option<String>,
+    pub status: String,
+    pub progress: u32,
+    pub repeat: u32,
+    /// 0–100 (shown in the viewer's score format)
+    pub score: f64,
+    pub notes: Option<String>,
+    /// Unix seconds
+    pub updated_at: Option<i64>,
+}
+
+/// The followed users' entries for one media, newest update first.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct FollowingPage {
+    pub entries: Vec<FollowingEntry>,
+    pub has_more: bool,
+}
+
 /// Non-essential metadata shown by the Now Playing hero, the Seasons view and the anime drawer. Written by
 /// season fetches, or one fetch for media that have none yet (or were stored without `relations`); never
 /// refreshed by playback.
@@ -373,6 +456,26 @@ pub trait TrackerPlugin: Send + Sync {
         &'a self,
         id: i64,
     ) -> BoxFuture<'a, Result<Option<SeasonalAnime>, TrackerError>>;
+
+    /// The anime page's details: the first page of characters (25, with every voice actor), the first
+    /// 25 staff and the top 10 recommendations. `Ok(None)` if the media doesn't exist.
+    fn fetch_media_page_details<'a>(&'a self, _id: i64) -> BoxFuture<'a, Result<Option<MediaDetails>, TrackerError>> {
+        Box::pin(async { Err(TrackerError::Api("not supported by this tracker".into())) })
+    }
+
+    /// One page (1-based, 25 per page) of a media's characters.
+    fn fetch_characters_page<'a>(&'a self, _id: i64, _page: u32) -> BoxFuture<'a, Result<CharactersPage, TrackerError>> {
+        Box::pin(async { Err(TrackerError::Api("not supported by this tracker".into())) })
+    }
+
+    /// The list entries of the users the viewer follows for one media (first 50, newest update first).
+    fn fetch_following_entries<'a>(
+        &'a self,
+        _token: &'a str,
+        _media_id: i64,
+    ) -> BoxFuture<'a, Result<FollowingPage, TrackerError>> {
+        Box::pin(async { Err(TrackerError::Api("not supported by this tracker".into())) })
+    }
 
     /// Create or update the viewer's list entry for `update.media_id`.
     fn save_list_entry<'a>(
