@@ -54,6 +54,7 @@ extern "C" {
 void tora_anitomy_parse(
     const char* input_ptr,
     size_t input_len,
+    uint32_t flags,
     void* user_data,
     tora_anitomy_element_cb callback
 ) {
@@ -63,7 +64,12 @@ void tora_anitomy_parse(
 
   try {
     const std::string_view input(input_ptr, input_len);
-    const auto elements = anitomy::parse(input);
+    anitomy::Options options;
+    options.parse_episode = (flags & TORA_ANITOMY_NO_EPISODE) == 0;
+    options.parse_episode_title = (flags & TORA_ANITOMY_NO_EPISODE_TITLE) == 0;
+    options.parse_file_extension = (flags & TORA_ANITOMY_NO_FILE_EXTENSION) == 0;
+    options.parse_release_group = (flags & TORA_ANITOMY_NO_RELEASE_GROUP) == 0;
+    const auto elements = anitomy::parse(input, options);
 
     for (const auto& element : elements) {
       callback(

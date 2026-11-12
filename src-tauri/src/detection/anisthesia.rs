@@ -437,7 +437,13 @@ pub fn detect_active_media_player(
             continue;
         }
 
-        let parsed = parse_filename(&cleaned_media);
+        // A file is parsed with its path, so its folders can give the season or the title
+        let mut parsed = if item.media_type == 1 {
+            parse_filename(&normalize_win32_path(&item.media_value))
+        } else {
+            parse_filename(&cleaned_media)
+        };
+        parsed.file_name = cleaned_media.clone();
         if parsed.anime_title.is_empty() {
             continue;
         }

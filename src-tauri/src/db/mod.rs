@@ -1,6 +1,6 @@
 use crate::detection::anisthesia::{default_players, PlayerDefinition};
 use crate::detection::anitomy::{extract_effective_season, normalize_anime_title, AnitomyElements};
-use crate::detection::relations::relations_db;
+use crate::detection::relations::{relations_db, EpisodeRedirection};
 use crate::plugins::{AiringScheduleItem, RemoteListMembership, SeasonalAnime};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -222,6 +222,10 @@ pub struct LocalEpisodeFile {
     pub matched_anime_id: Option<i64>,
     pub matched_anime_title: Option<String>,
     pub watched: bool,
+    /// Episode number as written in the file name (`episode_number` is the matched entry's episode).
+    pub parsed_episode: Option<u32>,
+    /// What decided the match: `alias`, `title`, `folder`, `directory`, `fuzzy` or `relation`.
+    pub match_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -557,16 +561,36 @@ impl PreparedTitle {
     }
 }
 
+/// Which rule of [`core_title_similarity_step`] produced the score.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FuzzyStep {
+    None,
+    Exact,
+    /// The shorter title starts the longer one ("kusuriya" / "kusuriya no hitorigoto").
+    Prefix,
+    /// Every word of the shorter title is in the longer one ("frieren" / "sousou no frieren").
+    Words,
+    Substring,
+    Dice,
+}
+
 /// Score similarity between a query core title and a candidate entry's core title (after season isolation).
 /// Handles exact matches, abbreviated titles (e.g. `"kusuriya"` vs `"kusuriya no hitorigoto"`),
 /// word-subset matches (e.g. `"frieren"` vs `"sousou no frieren"`), and fuzzy Romanization variants.
+#[cfg(test)]
 fn core_title_similarity(query: &PreparedTitle, cand: &PreparedTitle) -> f64 {
+    core_title_similarity_step(query, cand).0
+}
+
+/// [`core_title_similarity`] with the rule that matched. Whether a score is accepted is decided by
+/// [`AnimeMatcherIndex::fuzzy_match`]; this function only measures.
+fn core_title_similarity_step(query: &PreparedTitle, cand: &PreparedTitle) -> (f64, FuzzyStep) {
     let (query_core, cand_core) = (query.text.as_str(), cand.text.as_str());
     if query_core.is_empty() || cand_core.is_empty() {
-        return 0.0;
+        return (0.0, FuzzyStep::None);
     }
     if query_core == cand_core {
-        return 1.0;
+        return (1.0, FuzzyStep::Exact);
     }
 
     let (shorter, longer) = if query_core.len() <= cand_core.len() {
@@ -577,7 +601,7 @@ fn core_title_similarity(query: &PreparedTitle, cand: &PreparedTitle) -> f64 {
     let (short_text, long_text) = (shorter.text.as_str(), longer.text.as_str());
 
     if short_text.len() < 4 {
-        return 0.0;
+        return (0.0, FuzzyStep::None);
     }
 
     let len_ratio = short_text.len() as f64 / long_text.len() as f64;
@@ -595,7 +619,7 @@ fn core_title_similarity(query: &PreparedTitle, cand: &PreparedTitle) -> f64 {
         && long_text.starts_with(short_text)
         && long_text.as_bytes().get(short_text.len()) == Some(&b' ')
     {
-        return 0.92 + 0.07 * len_ratio;
+        return (0.92 + 0.07 * len_ratio, FuzzyStep::Prefix);
     }
 
     // 2. All words of the shorter title appear as complete words (or strong fuzzy word matches) in the longer title
@@ -612,27 +636,76 @@ fn core_title_similarity(query: &PreparedTitle, cand: &PreparedTitle) -> f64 {
             })
         });
         if all_words_match {
-            return 0.86 + 0.10 * len_ratio;
+            return (0.86 + 0.10 * len_ratio, FuzzyStep::Words);
         }
     }
 
     // 3. Contiguous substring match for titles >= 5 chars with reasonable length ratio
     if substring_possible && short_text.len() >= 5 && len_ratio >= 0.55 && long_text.contains(short_text) {
-        return 0.78 + 0.10 * len_ratio;
+        return (0.78 + 0.10 * len_ratio, FuzzyStep::Substring);
     }
 
     // 4. Overall character bigram Sorensen-Dice fuzzy similarity (shared bigrams <= short_hits)
     let total = (shorter.grams.len() + longer.grams.len()) as f64;
     if total == 0.0 || (2.0 * short_hits as f64) / total < 0.74 {
-        return 0.0;
+        return (0.0, FuzzyStep::None);
     }
     let score = dice(query_core, &query.grams, cand_core, &cand.grams, 0.74);
     if score >= 0.74 {
-        return score;
+        return (score, FuzzyStep::Dice);
     }
 
-    0.0
+    (0.0, FuzzyStep::None)
 }
+
+/// Lowest fuzzy score that counts as a match.
+const FUZZY_THRESHOLD: f64 = 0.74;
+/// Two anime whose best scores are closer than this are rivals: the match is only accepted when one of
+/// them is the base title the others extend.
+const FUZZY_RIVAL_MARGIN: f64 = 0.03;
+/// A single word found inside a longer title ("demo" in "chuunibyou demo koi ga shitai") must be at least
+/// this share of it. A single word that starts the title ("kusuriya") is not affected.
+const FUZZY_SINGLE_WORD_RATIO: f64 = 0.4;
+
+/// Titles shorter than this only match by overall similarity (typos, romanization) with at least
+/// [`FUZZY_SHORT_TITLE_SCORE`].
+const FUZZY_SHORT_TITLE: usize = 10;
+const FUZZY_SHORT_TITLE_SCORE: f64 = 0.9;
+
+/// Overall similarity from which two titles count as the same string written differently.
+const FUZZY_CLOSE_SCORE: f64 = 0.85;
+
+/// How a fuzzy candidate relates to the name, strongest first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum FuzzyTier {
+    /// Nearly the same string (a typo, another romanization).
+    Close,
+    /// The name is a shorter form of the title ("kusuriya").
+    Abbreviation,
+    /// The title is a shorter form of the name: the name says more ("... Traumend", "... (MDZS)").
+    Extended,
+    /// Only similar letters, neither the same words nor one inside the other ("... goddesses arc" and
+    /// "... tenri arc"): taken only when nothing relates better.
+    Similar,
+}
+
+/// The best fuzzy candidate title of one anime.
+#[derive(Debug, Clone, Copy)]
+struct FuzzyCandidate<'a> {
+    tier: FuzzyTier,
+    score: f64,
+    anime_id: i64,
+    /// Season-stripped candidate title.
+    text: &'a str,
+}
+
+/// Normalized words that mark a file as a special, an extra or a film rather than an episode of the
+/// series it is named after (see [`AnimeMatcherIndex::names_a_special`]).
+const SPECIAL_MARKERS: &[&str] = &[
+    "ova", "ona", "sp", "especial", "especiales", "mini", "extra", "extras", "movie", "pelicula",
+    "gekijouban", "op", "ed", "opening", "ending", "ncop", "nced", "creditless", "pv", "cm", "omake",
+    "intermission", "recap", "resumen", "trailer", "preview", "menu", "bonus", "drama",
+];
 
 /// One fuzzy-matchable normalized title in [`AnimeMatcherIndex::norms_by_season`].
 #[derive(Debug, Clone)]
@@ -646,8 +719,100 @@ pub struct NormTitle {
     pub anime_id: i64,
 }
 
-/// Title-step result of [`AnimeMatcherIndex::match_title`]: `(anime_id, title_romaji, cover, user_progress, episodes)`.
+/// `(anime_id, title_romaji, cover, user_progress, episodes)` of a matched entry.
 pub type TitleMatch = (i64, String, String, u32, Option<u32>);
+
+/// What decided a match, strongest first. Stored in `local_episodes.match_kind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchKind {
+    /// A title the user linked to the anime.
+    Alias,
+    /// The name is exactly one of the anime's titles.
+    Title,
+    /// The file sits in a folder linked to the anime (`custom_folder`) and names no other anime.
+    Folder,
+    /// The parent folder's own name is one of the anime's titles.
+    Directory,
+    /// The name is close to one of the anime's titles.
+    Fuzzy,
+    /// `anime-relations` sent the episode to another anime (continuous numbering, a later season).
+    Relation,
+}
+
+impl MatchKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MatchKind::Alias => "alias",
+            MatchKind::Title => "title",
+            MatchKind::Folder => "folder",
+            MatchKind::Directory => "directory",
+            MatchKind::Fuzzy => "fuzzy",
+            MatchKind::Relation => "relation",
+        }
+    }
+
+    /// A match that proves the file's folder holds this anime (used to link folders automatically).
+    pub fn is_title_evidence(self) -> bool {
+        matches!(self, MatchKind::Alias | MatchKind::Title | MatchKind::Directory | MatchKind::Relation)
+    }
+}
+
+/// Title step of a match: depends only on the normalized title, so callers match each distinct title once.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TitleCandidates {
+    pub alias: Option<i64>,
+    /// Every entry with exactly this normalized title, lowest id first.
+    pub exact: Vec<i64>,
+    /// Best unambiguous fuzzy match; only looked for when there is no alias and no exact title.
+    pub fuzzy: Option<i64>,
+    /// The fuzzy match is a title that the name extends ("Overlord II Especial", "Title (MDZS)").
+    pub fuzzy_says_more: bool,
+}
+
+impl TitleCandidates {
+    pub fn first(&self) -> Option<i64> {
+        self.alias.or_else(|| self.exact.first().copied()).or(self.fuzzy)
+    }
+}
+
+/// A resolved file: the list entry and which of its episodes the file is.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EpisodeMatch {
+    pub anime_id: i64,
+    pub title: String,
+    pub cover: String,
+    pub progress: u32,
+    pub episodes: Option<u32>,
+    /// Episode of `anime_id` (after any relation redirect); `None` when the name has no episode number.
+    pub episode: Option<u32>,
+    pub episode_alt: Option<u32>,
+    pub kind: MatchKind,
+}
+
+impl EpisodeMatch {
+    pub fn into_title_match(self) -> TitleMatch {
+        (self.anime_id, self.title, self.cover, self.progress, self.episodes)
+    }
+}
+
+/// Key of a directory in [`AnimeMatcherIndex::custom_folders`]: Unicode lowercase (Windows paths are
+/// case-insensitive, `Ñ` included), `\` separators, no trailing separator.
+pub fn normalize_dir_key(path: &str) -> String {
+    let mut key: String = path
+        .chars()
+        .map(|c| if c == '/' { '\\' } else { c })
+        .flat_map(char::to_lowercase)
+        .collect();
+    while key.ends_with('\\') {
+        key.pop();
+    }
+    key
+}
+
+/// Episode `n` exists in an anime with `episodes` episodes (unknown totals accept any number but 0).
+fn is_valid_episode(n: u32, episodes: Option<u32>) -> bool {
+    n != 0 && episodes.map_or(true, |max| max == 0 || n <= max)
+}
 
 /// Fast in-memory matcher index built from a single SQL pass so batch episode/torrent matching is O(1) with zero DB queries per item.
 pub struct AnimeMatcherIndex {
@@ -656,10 +821,20 @@ pub struct AnimeMatcherIndex {
     pub by_anilist_id: HashMap<i64, i64>,
     pub by_mal_id: HashMap<i64, i64>,
     pub user_aliases: HashMap<String, i64>,
-    pub exact_norm: HashMap<String, i64>,
-    pub custom_folders: Vec<(String, i64)>,
+    /// Every entry that has this normalized title, lowest id first (remakes and seasons can share one).
+    /// Also holds `"<title> <start year>"`, so "Kanon (2006)" finds the right remake.
+    pub exact_norm: HashMap<String, Vec<i64>>,
+    /// Linked folders (`custom_folder`) by [`normalize_dir_key`]. Several entries may share a folder.
+    pub custom_folders: HashMap<String, Vec<i64>>,
     /// Fuzzy-matchable titles by effective season, each bucket in build order (earlier wins ties).
     pub norms_by_season: HashMap<u32, Vec<NormTitle>>,
+    /// Normalized titles of each entry.
+    pub norms_by_id: HashMap<i64, Vec<String>>,
+    /// Lowercased titles of each entry as written, to tell apart entries whose normalized titles are
+    /// equal ("K-ON!" / "K-ON!!").
+    pub raw_titles: HashMap<i64, Vec<String>>,
+    /// Year each entry started airing, when known.
+    pub start_years: HashMap<i64, u32>,
 }
 
 impl AnimeMatcherIndex {
@@ -669,197 +844,623 @@ impl AnimeMatcherIndex {
             .map(|(t, cov, prog, eps)| (aid, t.clone(), cov.clone(), *prog, *eps))
     }
 
-    /// Step 1 of [`Self::match_title`]: the first custom folder whose (lowercased) path prefixes `file_path`.
-    pub fn match_custom_folder(&self, file_path: &str) -> Option<i64> {
+    fn entry_match(&self, aid: i64, episode: Option<u32>, episode_alt: Option<u32>, kind: MatchKind) -> Option<EpisodeMatch> {
+        let (title, cover, progress, episodes) = self.by_id.get(&aid)?;
+        Some(EpisodeMatch {
+            anime_id: aid,
+            title: title.clone(),
+            cover: cover.clone(),
+            progress: *progress,
+            episodes: *episodes,
+            episode,
+            episode_alt,
+            kind,
+        })
+    }
+
+    fn season_of(&self, aid: i64) -> u32 {
+        self.external_ids.get(&aid).map_or(1, |ids| ids.2)
+    }
+
+    /// Entries linked to the nearest linked folder above `file_path` (whole path segments, so
+    /// `...\Fate Stay Night` never owns `...\Fate Stay Night Unlimited Blade Works\x.mkv`).
+    pub fn folder_candidates(&self, file_path: &str) -> &[i64] {
+        self.linked_folder(file_path).map_or(&[], |(_, ids)| ids)
+    }
+
+    /// Entries of every linked folder above `file_path`, nearest first.
+    fn linked_folders(&self, file_path: &str) -> Vec<&[i64]> {
+        let mut levels: Vec<&[i64]> = Vec::new();
+        if self.custom_folders.is_empty() {
+            return levels;
+        }
+        let mut key = normalize_dir_key(file_path);
+        while let Some(pos) = key.rfind('\\') {
+            key.truncate(pos);
+            if let Some(ids) = self.custom_folders.get(&key) {
+                levels.push(ids);
+            }
+        }
+        levels
+    }
+
+    /// The nearest linked folder above `file_path` (its key) and the entries linked to it.
+    pub fn linked_folder(&self, file_path: &str) -> Option<(String, &[i64])> {
         if self.custom_folders.is_empty() {
             return None;
         }
-        let fp_lower = file_path.to_ascii_lowercase();
-        self.custom_folders
-            .iter()
-            .find(|(folder_prefix, aid)| {
-                fp_lower.starts_with(folder_prefix.as_str()) && self.by_id.contains_key(aid)
-            })
-            .map(|(_, aid)| *aid)
+        let mut key = normalize_dir_key(file_path);
+        while let Some(pos) = key.rfind('\\') {
+            key.truncate(pos);
+            if let Some(ids) = self.custom_folders.get(&key) {
+                return Some((key, ids));
+            }
+        }
+        None
     }
 
-    /// Steps 2-4 of [`Self::match_title`] (no custom folder check): user aliases, exact normalized titles,
-    /// then season-isolated fuzzy matching. Depends only on `normalized_title`, so callers can memoize it.
-    pub fn match_title_only(&self, normalized_title: &str) -> Option<i64> {
+    /// Entries with exactly this normalized title (a user alias first).
+    fn exact_ids(&self, norm: &str) -> Vec<i64> {
+        if let Some(aid) = self.user_aliases.get(norm) {
+            if self.by_id.contains_key(aid) {
+                return vec![*aid];
+            }
+        }
+        self.exact_norm.get(norm).cloned().unwrap_or_default()
+    }
+
+    /// Title step: user alias, exact normalized title, then season-isolated fuzzy matching.
+    pub fn title_candidates(&self, normalized_title: &str) -> TitleCandidates {
         if normalized_title.is_empty() {
-            return None;
+            return TitleCandidates::default();
         }
-
-        // 2. O(1) explicit user-linked alias lookup
-        if let Some(aid) = self.user_aliases.get(normalized_title) {
-            if self.by_id.contains_key(aid) {
-                return Some(*aid);
-            }
+        let alias = self
+            .user_aliases
+            .get(normalized_title)
+            .copied()
+            .filter(|aid| self.by_id.contains_key(aid));
+        let exact = self.exact_norm.get(normalized_title).cloned().unwrap_or_default();
+        let fuzzy = if alias.is_none() && exact.is_empty() {
+            self.fuzzy_match(normalized_title)
+        } else {
+            None
+        };
+        TitleCandidates {
+            alias,
+            exact,
+            fuzzy: fuzzy.map(|f| f.0),
+            fuzzy_says_more: fuzzy.map_or(false, |f| f.1 == FuzzyTier::Extended),
         }
+    }
 
-        // 3. O(1) exact normalized title lookup
-        if let Some(aid) = self.exact_norm.get(normalized_title) {
-            if self.by_id.contains_key(aid) {
-                return Some(*aid);
-            }
-        }
+    /// The single entry a title points to on its own (no folder, no episode): alias, first exact title, fuzzy.
+    pub fn match_title_only(&self, normalized_title: &str) -> Option<i64> {
+        self.title_candidates(normalized_title).first()
+    }
 
-        // 4. Season-isolated fuzzy matching across anime names and alternative titles
-        // Never allow a Season 2/3 query (e.g. "kusuriya 3" or "bocchi rock 2") to match a Season 1 entry.
+    /// Every anime a title is close to (same season only), each with its best candidate title.
+    fn fuzzy_candidates(&self, normalized_title: &str) -> Vec<FuzzyCandidate<'_>> {
         let query_season = extract_effective_season(normalized_title);
         let query_core = strip_trailing_season(normalized_title, query_season);
+        let mut best: Vec<FuzzyCandidate<'_>> = Vec::new();
+        if query_core.len() < 4 {
+            return best;
+        }
+        let query = PreparedTitle::new(query_core);
 
-        if query_core.len() >= 4 {
-            let query = PreparedTitle::new(query_core);
-            let mut best_match: Option<(f64, i64)> = None;
-            for cand in self.norms_by_season.get(&query_season).into_iter().flatten() {
-                let score = core_title_similarity(&query, &cand.core);
-                if score >= 0.74 && best_match.map_or(true, |(best_score, _)| score > best_score) {
-                    best_match = Some((score, cand.anime_id));
+        for cand in self.norms_by_season.get(&query_season).into_iter().flatten() {
+            let (score, step) = core_title_similarity_step(&query, &cand.core);
+            if score < FUZZY_THRESHOLD {
+                continue;
+            }
+            let text = cand.core.text.as_str();
+            let query_is_shorter = query_core.len() <= text.len();
+            // One changed letter in a short title is another anime ("nisekoi" / "kisekoi")
+            if step == FuzzyStep::Dice
+                && query_core.len().min(text.len()) < FUZZY_SHORT_TITLE
+                && score < FUZZY_SHORT_TITLE_SCORE
+            {
+                continue;
+            }
+            if matches!(step, FuzzyStep::Words | FuzzyStep::Substring) {
+                let (short, long) = if query_is_shorter { (query_core, text) } else { (text, query_core) };
+                if !short.contains(' ') && (short.len() as f64) < FUZZY_SINGLE_WORD_RATIO * long.len() as f64 {
+                    continue;
                 }
             }
-
-            if let Some((_, aid)) = best_match {
-                if self.by_id.contains_key(&aid) {
-                    return Some(aid);
-                }
+            let tier = match step {
+                FuzzyStep::Exact => FuzzyTier::Close,
+                FuzzyStep::Dice if score >= FUZZY_CLOSE_SCORE => FuzzyTier::Close,
+                FuzzyStep::Dice => FuzzyTier::Similar,
+                _ if query_is_shorter => FuzzyTier::Abbreviation,
+                _ => FuzzyTier::Extended,
+            };
+            let found = FuzzyCandidate { tier, score, anime_id: cand.anime_id, text };
+            match best.iter_mut().find(|b| b.anime_id == cand.anime_id) {
+                Some(b) if (tier, -score) < (b.tier, -b.score) => *b = found,
+                Some(_) => {}
+                None => best.push(found),
             }
         }
-
-        None
+        best
     }
 
-    pub fn match_title(&self, normalized_title: &str, file_path: Option<&str>) -> Option<TitleMatch> {
-        // 1. Check custom folder prefix match
-        if let Some(aid) = file_path.and_then(|fp| self.match_custom_folder(fp)) {
-            return self.title_match_for(aid);
-        }
-        let aid = self.match_title_only(normalized_title)?;
-        self.title_match_for(aid)
-    }
+    /// Season-isolated fuzzy match: never lets a Season 2/3 query (e.g. "kusuriya 3") reach a Season 1
+    /// title, takes a nearly identical title over an abbreviation, and refuses to choose between
+    /// different anime that fit about as well ("fate" against thirty Fate entries).
+    fn fuzzy_match(&self, normalized_title: &str) -> Option<(i64, FuzzyTier)> {
+        let cands = self.fuzzy_candidates(normalized_title);
+        let tier = cands.iter().map(|c| c.tier).min()?;
+        let pool: Vec<&FuzzyCandidate<'_>> = cands.iter().filter(|c| c.tier == tier).collect();
 
-    /// Match a parsed `AnitomyElements` against the index, validating episode bounds and applying
-    /// `erengy/anime-relations` ID redirections or multi-season sequential episode offsets (ported from Taiga's `identify`).
-    /// Equivalent to [`Self::match_title`] followed by [`Self::resolve_episode`].
-    pub fn match_episode(
-        &self,
-        parsed: &mut AnitomyElements,
-        file_path: Option<&str>,
-    ) -> Option<TitleMatch> {
-        let matched = self.match_title(&parsed.normalized_title, file_path)?;
-        self.resolve_episode(matched, parsed, file_path)
-    }
-
-    /// Episode step of [`Self::match_episode`]: given the title match for `parsed.normalized_title` / `file_path`,
-    /// validate the episode number and apply relations / multi-season redirections (may rewrite `parsed`).
-    pub fn resolve_episode(
-        &self,
-        title_match: TitleMatch,
-        parsed: &mut AnitomyElements,
-        file_path: Option<&str>,
-    ) -> Option<TitleMatch> {
-        let (aid, title, cover, prog, eps) = title_match;
-
-        let Some(ep) = parsed.episode_number else {
-            return Some((aid, title, cover, prog, eps));
-        };
-
-        // Check if this match came from an explicit user binding (custom folder or title_aliases)
-        let is_explicit_binding = self.user_aliases.contains_key(&parsed.normalized_title)
-            || file_path.map_or(false, |fp| {
-                let fp_lower = fp.to_ascii_lowercase();
-                self.custom_folders
-                    .iter()
-                    .any(|(prefix, id)| *id == aid && fp_lower.starts_with(prefix))
-            });
-
-        // Port of Taiga's `isValidEpisodeNumber`:
-        // Episode 0 or an episode exceeding the entry's total episode count triggers redirection.
-        let is_valid_ep = if ep == 0 {
-            false
-        } else if let Some(max_ep) = eps {
-            max_ep == 0 || ep <= max_ep
-        } else {
-            true
-        };
-
-        if is_valid_ep {
-            return Some((aid, title, cover, prog, eps));
-        }
-
-        // 1. Check `erengy/anime-relations` by AniList ID / MyAnimeList ID
-        let (anilist_id, mal_id, entry_season) = self
-            .external_ids
-            .get(&aid)
-            .copied()
-            .unwrap_or((None, None, 1));
-
-        if let Some(red) =
-            relations_db().find_by_id(anilist_id, mal_id, ep, parsed.episode_number_alt)
+        // A name that shortens one title and extends another ("Sword Art Online Alicization" with only
+        // "Sword Art Online" and "... Alicization War of Underworld" on the list) is an anime of its own
+        if tier == FuzzyTier::Abbreviation
+            && cands
+                .iter()
+                .any(|c| c.tier == FuzzyTier::Extended && !pool.iter().any(|p| p.anime_id == c.anime_id))
         {
-            let dst_aid = red
-                .dst_anilist_id
-                .and_then(|id| self.by_anilist_id.get(&id).copied())
-                .or_else(|| {
-                    red.dst_mal_id
-                        .and_then(|id| self.by_mal_id.get(&id).copied())
-                })
-                .or_else(|| self.user_aliases.get(&red.dst_norm_title).copied())
-                .or_else(|| self.exact_norm.get(&red.dst_norm_title).copied())
-                .or_else(|| self.match_title(&red.dst_norm_title, None).map(|m| m.0));
-
-            if let Some(target_id) = dst_aid {
-                if let Some((t, cov, p, e)) = self.by_id.get(&target_id) {
-                    parsed.episode_number = Some(red.dst_episode);
-                    if let Some(alt) = red.dst_episode_alt {
-                        parsed.episode_number_alt = Some(alt);
-                    }
-                    if let Some(s) = red.dst_season {
-                        parsed.anime_season = Some(s);
-                    }
-                    if !red.dst_title.is_empty() {
-                        parsed.anime_title = red.dst_title.clone();
-                        parsed.normalized_title = red.dst_norm_title.clone();
-                    }
-                    return Some((target_id, t.clone(), cov.clone(), *p, *e));
-                }
-            }
-
-            if is_explicit_binding || ep == 0 {
-                return Some((aid, title, cover, prog, eps));
-            }
             return None;
         }
 
-        // 2. Dynamic multi-season sequential episode fallback across entries in the user's database
-        if let Some(first_max) = eps.filter(|&m| m > 0 && ep > m) {
-            let mut rem_ep = ep - first_max;
-            let base_norm = parsed.normalized_title.clone();
-            for next_s in (entry_season + 1)..=10 {
-                let candidate_norm = format!("{} {}", base_norm, next_s);
-                let Some(&next_aid) = self.exact_norm.get(&candidate_norm) else {
-                    break;
-                };
-                let Some((t, cov, p, next_eps)) = self.by_id.get(&next_aid) else {
-                    break;
-                };
-                let max_for_season = next_eps.unwrap_or(u32::MAX);
-                if max_for_season == 0 || rem_ep <= max_for_season {
-                    parsed.episode_number = Some(rem_ep);
-                    parsed.anime_season = Some(next_s);
-                    parsed.anime_title = t.clone();
-                    parsed.normalized_title = candidate_norm;
-                    return Some((next_aid, t.clone(), cov.clone(), *p, *next_eps));
+        let top = pool.iter().copied().reduce(|a, b| if b.score > a.score { b } else { a })?;
+        let near: Vec<&FuzzyCandidate<'_>> = pool
+            .iter()
+            .copied()
+            .filter(|c| top.score - c.score < FUZZY_RIVAL_MARGIN)
+            .collect();
+        if near.len() == 1 {
+            return Some((top.anime_id, tier));
+        }
+
+        // Rivals are fine when their titles form one chain ("kusuriya no hitorigoto" and its mini anime):
+        // the base title for an abbreviation, the longest title when the name says even more than it.
+        // Unrelated titles ("fate zero", "fate hf") mean the name is ambiguous.
+        let extends = |long: &str, short: &str| {
+            long.starts_with(short) && long.as_bytes().get(short.len()) == Some(&b' ')
+        };
+        let pick = near.iter().copied().reduce(|a, b| {
+            let longer = b.text.len() > a.text.len();
+            if (tier == FuzzyTier::Extended) == longer && b.text.len() != a.text.len() { b } else { a }
+        })?;
+        let one_chain = near.iter().all(|c| {
+            c.anime_id == pick.anime_id
+                || if tier == FuzzyTier::Extended { extends(pick.text, c.text) } else { extends(c.text, pick.text) }
+        });
+        one_chain.then_some((pick.anime_id, tier))
+    }
+
+    /// The name adds words to the titles of the anime it was matched to that make it something other
+    /// than an episode: a special marker ("Overlord II - Especial 04", "Youjo Senki Mini Anime"), or,
+    /// for a guess from a longer name, more than a short tag ("Kemono Friends - Friend Card 05").
+    /// Such a file belongs to the anime but gets no episode number, so it never counts as watched.
+    fn names_a_special(&self, parsed: &AnitomyElements, aid: i64, guessed_from_longer_name: bool) -> bool {
+        let no_titles = Vec::new();
+        let titles = self.norms_by_id.get(&aid).unwrap_or(&no_titles);
+        let known: HashSet<&str> = titles.iter().flat_map(|t| t.split(' ')).collect();
+        let extra: Vec<&str> = parsed
+            .normalized_title
+            .split(' ')
+            .filter(|w| !w.is_empty() && !known.contains(w) && !w.chars().all(|c| c.is_ascii_digit()))
+            .collect();
+        if extra.iter().any(|w| SPECIAL_MARKERS.contains(w)) {
+            return true;
+        }
+        let typed = parsed.anime_type.as_deref().map(normalize_anime_title).unwrap_or_default();
+        if SPECIAL_MARKERS.contains(&typed.as_str()) && !known.contains(typed.as_str()) {
+            return true;
+        }
+        guessed_from_longer_name && !(extra.is_empty() || (extra.len() == 1 && extra[0].len() <= 4))
+    }
+
+    /// Fuzzy candidates of a title, best first (diagnostics).
+    #[cfg(test)]
+    pub fn fuzzy_scores(&self, normalized_title: &str) -> Vec<(f64, i64, String)> {
+        let mut cands = self.fuzzy_candidates(normalized_title);
+        cands.sort_by(|a, b| (a.tier, -a.score).partial_cmp(&(b.tier, -b.score)).unwrap());
+        cands
+            .into_iter()
+            .map(|c| (c.score, c.anime_id, format!("{} ({:?})", c.text, c.tier)))
+            .collect()
+    }
+
+    /// The file's title only has words that a folder entry's longer title also has ("clannad" in the
+    /// folder of "clannad after story"): the folder says more than the name does.
+    fn is_shorter_form_of(&self, normalized_title: &str, folder: &[i64]) -> bool {
+        let words: Vec<&str> = normalized_title.split(' ').collect();
+        folder.iter().any(|aid| {
+            self.norms_by_id.get(aid).map_or(false, |norms| {
+                norms.iter().any(|n| {
+                    n != normalized_title && {
+                        let other: Vec<&str> = n.split(' ').collect();
+                        other.len() > words.len() && words.iter().all(|w| other.contains(w))
+                    }
+                })
+            })
+        })
+    }
+
+    /// The name is exactly a title of other entries, but only a shorter form of a folder entry's title
+    /// ("Clannad - 01" in the folder of "Clannad: After Story"). The folder is believed when the file's own
+    /// folder is named after that entry, or when the number is no episode of the titled entries
+    /// ("Black Lagoon 13" in the folder of the second season). A name that states season 1 means it.
+    fn folder_says_more(
+        &self,
+        parsed: &AnitomyElements,
+        titled: &[i64],
+        episode: Option<u32>,
+        folder: &[i64],
+    ) -> bool {
+        let norm = parsed.normalized_title.as_str();
+        if parsed.anime_season == Some(1) || !self.is_shorter_form_of(norm, folder) {
+            return false;
+        }
+        let folder_named_after_entry = parsed.parent_title.as_deref().map_or(false, |parent| {
+            parent != norm
+                && folder.iter().any(|aid| {
+                    self.norms_by_id
+                        .get(aid)
+                        .map_or(false, |norms| norms.iter().any(|n| n == parent))
+                })
+        });
+        let no_episode_of_titled = episode.map_or(false, |n| {
+            titled
+                .iter()
+                .all(|aid| self.by_id.get(aid).map_or(true, |entry| !is_valid_episode(n, entry.3)))
+        });
+        folder_named_after_entry || no_episode_of_titled
+    }
+
+    /// Folder entries a file may fall back to. A name that asks for another season of an entry's own
+    /// series ("Show S3" in the folder of "Show" and "Show 2") is not one of them: never a file of one
+    /// season on the entry of another.
+    fn folder_entries_for(&self, folder: &[i64], parsed: &AnitomyElements) -> Vec<i64> {
+        let norm = parsed.normalized_title.as_str();
+        let query_season = parsed
+            .anime_season
+            .filter(|s| *s > 1)
+            .unwrap_or_else(|| extract_effective_season(norm));
+        if query_season <= 1 {
+            return folder.to_vec();
+        }
+        // The series as the name states it, and as the folders do when the season came only from a
+        // season folder: "Show - Arc Name - NCED 01" in `Show\Season 3`
+        let mut bases = vec![strip_trailing_season(norm, query_season)];
+        if parsed.own_title.is_some() {
+            if let Some(parent) = parsed.parent_title.as_deref() {
+                if extract_effective_season(parent) == query_season {
+                    bases.push(strip_trailing_season(parent, query_season));
                 }
-                rem_ep -= max_for_season;
+            }
+        }
+        folder
+            .iter()
+            .copied()
+            .filter(|aid| {
+                bases.iter().all(|base| {
+                    // Seasons of the entry's titles that are this series ("show" / "show 2" for base "show")
+                    let seasons: Vec<u32> = self
+                        .norms_by_id
+                        .get(aid)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|n| {
+                            let season = extract_effective_season(n);
+                            (strip_trailing_season(n, season) == *base).then_some(season)
+                        })
+                        .collect();
+                    seasons.is_empty() || seasons.contains(&query_season)
+                })
+            })
+            .collect()
+    }
+
+    /// One entry out of several candidates: the season the name states, an episode number that exists,
+    /// the title as written. Entries sharing a folder are never guessed between.
+    fn pick(&self, mut set: Vec<i64>, parsed: &AnitomyElements, episode: Option<u32>, kind: MatchKind) -> Option<i64> {
+        if set.len() <= 1 {
+            return set.first().copied();
+        }
+        let narrow = |set: &mut Vec<i64>, keep: &dyn Fn(i64) -> bool| {
+            let kept: Vec<i64> = set.iter().copied().filter(|aid| keep(*aid)).collect();
+            if !kept.is_empty() {
+                *set = kept;
+            }
+        };
+
+        match parsed.anime_season.filter(|s| *s > 1) {
+            Some(season) => narrow(&mut set, &|aid| self.season_of(aid) == season),
+            // Entries sharing one title: without a season in the name, the first season is meant
+            None if kind != MatchKind::Folder => narrow(&mut set, &|aid| self.season_of(aid) == 1),
+            None => {}
+        }
+        if let Some(n) = episode {
+            narrow(&mut set, &|aid| {
+                self.by_id.get(&aid).map_or(false, |entry| is_valid_episode(n, entry.3))
+            });
+        }
+        if set.len() > 1 {
+            let written = parsed.anime_title.to_lowercase();
+            narrow(&mut set, &|aid| {
+                self.raw_titles.get(&aid).map_or(false, |titles| titles.contains(&written))
+            });
+        }
+        match (set.len(), kind) {
+            (1, _) => set.first().copied(),
+            (_, MatchKind::Folder) => None,
+            _ => set.first().copied(),
+        }
+    }
+
+    /// List entry for the destination of a relation rule.
+    fn entry_for_ids(&self, anilist_id: Option<i64>, mal_id: Option<i64>) -> Option<i64> {
+        anilist_id
+            .and_then(|id| self.by_anilist_id.get(&id).copied())
+            .or_else(|| mal_id.and_then(|id| self.by_mal_id.get(&id).copied()))
+    }
+
+    /// Episode `n` is not an episode of `aid` (0, or past its total): where `anime-relations` or the
+    /// list's own seasons say it belongs. Port of Taiga's `ValidateEpisodeNumber` redirection, by ID.
+    fn redirect(&self, aid: i64, kind: MatchKind, parsed: &AnitomyElements, n: u32, alt: Option<u32>) -> Option<EpisodeMatch> {
+        let relations = relations_db();
+        let (anilist_id, mal_id, entry_season) = self.external_ids.get(&aid).copied().unwrap_or((None, None, 1));
+        let destination = |red: EpisodeRedirection| -> Option<EpisodeMatch> {
+            let dst = self.entry_for_ids(red.dst_anilist_id, red.dst_mal_id)?;
+            let kind = if dst == aid { kind } else { MatchKind::Relation };
+            self.entry_match(dst, Some(red.dst_episode), red.dst_episode_alt, kind)
+        };
+
+        // 1. Rules of the matched entry. A rule whose destination is not on the list ends the search.
+        if let Some(red) = relations.find_by_id(anilist_id, mal_id, n, alt) {
+            return destination(red);
+        }
+
+        // 2. The name states a season ("Shingeki no Kyojin Season 4 - 87"): the number may count from the
+        //    first season, so try the rules of the base title's entries, then of the base title itself.
+        let norm = parsed.normalized_title.as_str();
+        let base = strip_trailing_season(norm, extract_effective_season(norm));
+        if base != norm {
+            for base_id in self.exact_ids(base) {
+                if base_id == aid {
+                    continue;
+                }
+                let (b_anilist, b_mal, _) = self.external_ids.get(&base_id).copied().unwrap_or((None, None, 1));
+                if let Some(found) = relations.find_by_id(b_anilist, b_mal, n, alt).and_then(&destination) {
+                    return Some(found);
+                }
+            }
+            if let Some(found) = relations.find_by_exact_title(base, n, alt).and_then(&destination) {
+                return Some(found);
             }
         }
 
-        if is_explicit_binding || ep == 0 {
-            return Some((aid, title, cover, prog, eps));
+        // 3. Continuous numbering across the list's own seasons: "<title> 2", "<title> 3"...
+        let (_, _, _, episodes) = self.by_id.get(&aid)?;
+        if let Some(first_max) = episodes.filter(|&m| m > 0 && n > m) {
+            let mut remaining = n - first_max;
+            let no_titles = Vec::new();
+            let own_titles = self.norms_by_id.get(&aid).unwrap_or(&no_titles);
+            for next_season in (entry_season + 1)..=10 {
+                // "<name> 2", then "<any title of the entry> 2"
+                let next_id = std::iter::once(norm)
+                    .chain(own_titles.iter().map(String::as_str))
+                    .find_map(|title| self.exact_ids(&format!("{} {}", title, next_season)).first().copied())?;
+                let (_, _, _, next_episodes) = self.by_id.get(&next_id)?;
+                let max = next_episodes.unwrap_or(u32::MAX);
+                if max == 0 || remaining <= max {
+                    return self.entry_match(next_id, Some(remaining), None, MatchKind::Relation);
+                }
+                remaining -= max;
+            }
+        }
+        None
+    }
+
+    /// Rules that reach a list entry from a title that is not on the list itself (the first season was
+    /// never added, but its continuation was).
+    fn match_by_relations_only(&self, parsed: &AnitomyElements, episode: Option<u32>, alt: Option<u32>) -> Option<EpisodeMatch> {
+        let relations = relations_db();
+        let norm = parsed.normalized_title.as_str();
+        let season = parsed
+            .anime_season
+            .filter(|s| *s > 1)
+            .unwrap_or_else(|| extract_effective_season(norm));
+        let base = strip_trailing_season(norm, season);
+
+        if let Some(n) = episode {
+            let redirected = relations
+                .find_by_exact_title(norm, n, alt)
+                .or_else(|| relations.find_by_exact_title(base, n, alt))
+                .and_then(|red| {
+                    let dst = self.entry_for_ids(red.dst_anilist_id, red.dst_mal_id)?;
+                    self.entry_match(dst, Some(red.dst_episode), red.dst_episode_alt, MatchKind::Relation)
+                });
+            if redirected.is_some() {
+                return redirected;
+            }
         }
 
+        // "Title S3": the entry that rules call the third season of the base title
+        if season > 1 {
+            let by_entry = self.exact_ids(base).into_iter().find_map(|base_id| {
+                let (anilist_id, mal_id, _) = self.external_ids.get(&base_id).copied()?;
+                relations.season_by_id(anilist_id, mal_id, season)
+            });
+            let (dst_anilist, dst_mal) = by_entry.or_else(|| relations.season_by_exact_title(base, season))?;
+            let dst = self.entry_for_ids(dst_anilist, dst_mal)?;
+            return self.finish(dst, MatchKind::Relation, parsed, episode, alt);
+        }
         None
+    }
+
+    /// Episode step for the chosen entry: validate the number, follow redirections.
+    fn finish(
+        &self,
+        aid: i64,
+        kind: MatchKind,
+        parsed: &AnitomyElements,
+        episode: Option<u32>,
+        episode_alt: Option<u32>,
+    ) -> Option<EpisodeMatch> {
+        let (_, _, _, episodes) = self.by_id.get(&aid)?;
+        let episodes = *episodes;
+
+        // "25 Spice Girl.mkv" in the anime's folder: the leading number is the episode
+        let from_folder = matches!(kind, MatchKind::Folder | MatchKind::Directory);
+        let leading = if episode.is_none() && from_folder { parsed.leading_number } else { None };
+
+        let Some(n) = episode.or(leading) else {
+            // A single-episode anime (a movie) needs no number
+            return self.entry_match(aid, (episodes == Some(1)).then_some(1), None, kind);
+        };
+        if is_valid_episode(n, episodes) {
+            return self.entry_match(aid, Some(n), episode_alt, kind);
+        }
+        if let Some(found) = self.redirect(aid, kind, parsed, n, episode_alt) {
+            return Some(found);
+        }
+        if leading.is_some() {
+            // The number was something else ("5 Centimeters per Second")
+            return self.entry_match(aid, (episodes == Some(1)).then_some(1), None, kind);
+        }
+        // Not an episode of this entry. A title the user linked keeps the file anyway, as does episode 0.
+        if kind == MatchKind::Alias || n == 0 {
+            return self.entry_match(aid, Some(n), episode_alt, kind);
+        }
+        None
+    }
+
+    /// Entry and episode for a parsed name, given the title step for `parsed.normalized_title`
+    /// ([`Self::title_candidates`]). `file_path` brings in the linked folders.
+    ///
+    /// 1. A user alias wins.
+    /// 2. Title against folder: an exact title that the folder agrees with; a folder entry when the name
+    ///    matches nothing or is only a shorter form of the folder entry's title; else the exact title.
+    /// 3. An unambiguous fuzzy match, then the parent folder's own name.
+    /// 4. Episode validation and `anime-relations` redirection by ID (see [`Self::finish`]).
+    pub fn resolve(
+        &self,
+        cands: &TitleCandidates,
+        parsed: &AnitomyElements,
+        file_path: Option<&str>,
+    ) -> Option<EpisodeMatch> {
+        let norm = parsed.normalized_title.as_str();
+        let levels: Vec<&[i64]> = file_path.map_or_else(Vec::new, |p| self.linked_folders(p));
+        let folder: &[i64] = levels.first().copied().unwrap_or(&[]);
+        let mut episode = parsed.episode_number;
+        let mut episode_alt = parsed.episode_number_alt;
+        let mut titled: Vec<i64> = cands.exact.clone();
+
+        if cands.alias.is_none() {
+            // The number and the episode title may be part of the anime's title
+            // ("Zom 100 - Bucket List of the Dead"), as in Taiga's merged title lookup.
+            let merged = match (episode, parsed.episode_title.as_deref(), parsed.anime_season.unwrap_or(1)) {
+                (Some(n), Some(episode_title), 1) => {
+                    self.exact_ids(&normalize_anime_title(&format!("{} {} {}", parsed.anime_title, n, episode_title)))
+                }
+                _ => Vec::new(),
+            };
+            if !merged.is_empty() {
+                titled = merged;
+                episode = None;
+                episode_alt = None;
+            } else if let Some(own) = parsed.own_title.as_deref().filter(|_| titled.is_empty()) {
+                // The season came from a "Season 2" folder, but the name already is the sequel's title
+                // ("Season 2\\Non Non Biyori Repeat - 01")
+                titled = self.exact_ids(own);
+            } else if let Some(year) = parsed.anime_year {
+                // "Kanon (2006)": the year picks the remake, and an entry that started in another year is
+                // another anime with the same title (Taiga looks up "Title (Year)" the same way)
+                match self.exact_norm.get(&format!("{} {}", norm, year)) {
+                    Some(ids) => titled = ids.clone(),
+                    None => titled.retain(|aid| !self.start_years.contains_key(aid)),
+                }
+            }
+        }
+
+        let mut fuzzy_says_more = cands.fuzzy_says_more;
+        let chosen: Option<(Vec<i64>, MatchKind)> = if let Some(alias) = cands.alias {
+            Some((vec![alias], MatchKind::Alias))
+        } else {
+            let agreed: Vec<i64> = titled.iter().copied().filter(|aid| folder.contains(aid)).collect();
+            let folder_entries = if agreed.is_empty()
+                && !folder.is_empty()
+                && (titled.is_empty() || self.folder_says_more(parsed, &titled, episode, folder))
+            {
+                self.folder_entries_for(folder, parsed)
+            } else {
+                Vec::new()
+            };
+            if !agreed.is_empty() {
+                Some((agreed, MatchKind::Title))
+            } else if !folder_entries.is_empty() {
+                match cands.fuzzy.filter(|aid| folder_entries.contains(aid)) {
+                    Some(aid) => Some((vec![aid], MatchKind::Fuzzy)),
+                    None => Some((folder_entries, MatchKind::Folder)),
+                }
+            } else if !titled.is_empty() {
+                Some((titled, MatchKind::Title))
+            } else if let Some(aid) = cands.fuzzy {
+                Some((vec![aid], MatchKind::Fuzzy))
+            } else if let Some((aid, says_more)) = self.own_title_fuzzy(parsed) {
+                fuzzy_says_more = says_more;
+                Some((vec![aid], MatchKind::Fuzzy))
+            } else {
+                parsed
+                    .parent_title
+                    .as_deref()
+                    .filter(|parent| *parent != norm)
+                    .map(|parent| self.exact_ids(parent))
+                    .filter(|ids| !ids.is_empty())
+                    .map(|ids| (ids, MatchKind::Directory))
+            }
+        };
+
+        let Some((set, kind)) = chosen else {
+            return self.match_by_relations_only(parsed, episode, episode_alt);
+        };
+        let aid = self.pick(set, parsed, episode, kind)?;
+        if matches!(kind, MatchKind::Fuzzy | MatchKind::Folder | MatchKind::Directory)
+            && self.names_a_special(parsed, aid, kind == MatchKind::Fuzzy && fuzzy_says_more)
+        {
+            return self.entry_match(aid, None, None, kind);
+        }
+        let found = self.finish(aid, kind, parsed, episode, episode_alt);
+        if found.is_none() && matches!(kind, MatchKind::Folder | MatchKind::Fuzzy) {
+            // The number is no episode of that anime (a guess that hit the one-episode OVA, a movie's
+            // folder inside the series' folder): another entry of the folder, or of the folders above,
+            // may hold it
+            for (depth, level) in levels.iter().enumerate() {
+                if depth == 0 && kind == MatchKind::Folder {
+                    continue;
+                }
+                let mut entries = self.folder_entries_for(level, parsed);
+                entries.retain(|other| *other != aid);
+                let held = self
+                    .pick(entries, parsed, episode, MatchKind::Folder)
+                    .and_then(|aid| self.finish(aid, MatchKind::Folder, parsed, episode, episode_alt));
+                if held.is_some() {
+                    return held;
+                }
+            }
+        }
+        found
+    }
+
+    /// "Season 3\\Show - Arc Name - 01" when nothing has that title: the season came only from a folder,
+    /// so the name is guessed without it ("Show - Arc Name"), among the entries that season does not rule
+    /// out. Returns the entry and whether the name says more than its title.
+    fn own_title_fuzzy(&self, parsed: &AnitomyElements) -> Option<(i64, bool)> {
+        let own = parsed.own_title.as_deref()?;
+        let cands = self.title_candidates(own);
+        let aid = cands.fuzzy?;
+        (!self.folder_entries_for(&[aid], parsed).is_empty()).then_some((aid, cands.fuzzy_says_more))
+    }
+
+    /// Match a parsed `AnitomyElements` against the index: [`Self::title_candidates`] then [`Self::resolve`].
+    pub fn match_episode(&self, parsed: &AnitomyElements, file_path: Option<&str>) -> Option<EpisodeMatch> {
+        let cands = self.title_candidates(&parsed.normalized_title);
+        self.resolve(&cands, parsed, file_path)
     }
 }
 
@@ -1136,8 +1737,11 @@ fn build_matcher_index_from(conn: &Connection) -> Result<AnimeMatcherIndex, Stri
     let mut by_anilist_id = HashMap::new();
     let mut by_mal_id = HashMap::new();
     let mut user_aliases = HashMap::new();
-    let mut exact_norm = HashMap::new();
-    let mut custom_folders = Vec::new();
+    let mut exact_norm: HashMap<String, Vec<i64>> = HashMap::new();
+    let mut custom_folders: HashMap<String, Vec<i64>> = HashMap::new();
+    let mut norms_by_id: HashMap<i64, Vec<String>> = HashMap::new();
+    let mut raw_titles: HashMap<i64, Vec<String>> = HashMap::new();
+    let mut start_years: HashMap<i64, u32> = HashMap::new();
     let mut norm_list: Vec<NormTitle> = Vec::new();
 
     {
@@ -1145,8 +1749,8 @@ fn build_matcher_index_from(conn: &Connection) -> Result<AnimeMatcherIndex, Stri
             .prepare(
                 "SELECT id, anilist_id, mal_id, title_romaji, title_english, title_native,
                         synonyms_json, cover_image, user_progress, episodes, custom_folder,
-                        normalized_titles_json
-                 FROM anime_entries",
+                        normalized_titles_json, start_date
+                 FROM anime_entries ORDER BY id",
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
@@ -1164,6 +1768,7 @@ fn build_matcher_index_from(conn: &Connection) -> Result<AnimeMatcherIndex, Stri
                     r.get::<_, Option<u32>>(9)?,
                     r.get::<_, Option<String>>(10)?,
                     r.get::<_, String>(11)?,
+                    r.get::<_, Option<String>>(12)?,
                 ))
             })
             .map_err(|e| e.to_string())?;
@@ -1182,16 +1787,32 @@ fn build_matcher_index_from(conn: &Connection) -> Result<AnimeMatcherIndex, Stri
                 eps,
                 cfolder,
                 norms_json,
+                start_date,
             ) = row;
+            let syns: Vec<String> = serde_json::from_str(&syns_json).unwrap_or_default();
             let mut norms: Vec<String> = serde_json::from_str(&norms_json).unwrap_or_default();
             if norms.is_empty() {
-                let syns: Vec<String> = serde_json::from_str(&syns_json).unwrap_or_default();
                 norms = Database::build_normalized_titles(
                     &romaji,
                     english.as_deref(),
                     native.as_deref(),
                     &syns,
                 );
+            }
+            let mut written: Vec<String> = std::iter::once(romaji.as_str())
+                .chain(english.as_deref())
+                .chain(syns.iter().map(String::as_str))
+                .map(str::to_lowercase)
+                .collect();
+            written.dedup();
+            raw_titles.insert(id, written);
+            let start_year = start_date
+                .as_deref()
+                .and_then(|d| d.get(..4))
+                .filter(|y| y.len() == 4 && y.chars().all(|c| c.is_ascii_digit()))
+                .map(str::to_string);
+            if let Some(year) = start_year.as_deref().and_then(|y| y.parse::<u32>().ok()) {
+                start_years.insert(id, year);
             }
             let mut effective_season = extract_effective_season(&romaji);
             if effective_season == 1 {
@@ -1209,12 +1830,20 @@ fn build_matcher_index_from(conn: &Connection) -> Result<AnimeMatcherIndex, Stri
                 by_mal_id.insert(mid, id);
             }
             if let Some(cf) = cfolder.filter(|s| !s.trim().is_empty()) {
-                custom_folders.push((cf.to_ascii_lowercase(), id));
+                custom_folders.entry(normalize_dir_key(&cf)).or_default().push(id);
             }
+            norms_by_id.insert(id, norms.clone());
             for n in norms {
                 if !n.is_empty() {
                     let s = extract_effective_season(&n).max(effective_season);
-                    exact_norm.entry(n.clone()).or_insert(id);
+                    exact_norm.entry(n.clone()).or_default().push(id);
+                    // "<title> <year>" (Taiga adds the same alternative title)
+                    if let Some(year) = start_year.as_deref().filter(|y| !n.split(' ').any(|w| w == *y)) {
+                        let with_year = exact_norm.entry(format!("{} {}", n, year)).or_default();
+                        if !with_year.contains(&id) {
+                            with_year.push(id);
+                        }
+                    }
                     if n.len() >= 4 {
                         norm_list.push(NormTitle {
                             core: PreparedTitle::new(strip_trailing_season(&n, s)),
@@ -1241,7 +1870,6 @@ fn build_matcher_index_from(conn: &Connection) -> Result<AnimeMatcherIndex, Stri
                 let entry_season = external_ids.get(&aid).map(|x| x.2).unwrap_or(1);
                 let s = extract_effective_season(&alias).max(entry_season);
                 user_aliases.insert(alias.clone(), aid);
-                exact_norm.insert(alias.clone(), aid);
                 if alias.len() >= 4 {
                     norm_list.push(NormTitle {
                         core: PreparedTitle::new(strip_trailing_season(&alias, s)),
@@ -1268,6 +1896,9 @@ fn build_matcher_index_from(conn: &Connection) -> Result<AnimeMatcherIndex, Stri
         exact_norm,
         custom_folders,
         norms_by_season,
+        norms_by_id,
+        raw_titles,
+        start_years,
     })
 }
 
@@ -1993,6 +2624,8 @@ impl Database {
                 checksum TEXT,
                 matched_anime_id INTEGER,
                 watched INTEGER NOT NULL DEFAULT 0,
+                parsed_episode INTEGER,
+                match_kind TEXT,
                 FOREIGN KEY(folder_id) REFERENCES library_folders(id) ON DELETE CASCADE
             );
 
@@ -2077,6 +2710,8 @@ impl Database {
         add_column_if_missing(&conn, "anime_entries", "end_date", "TEXT")?;
         add_column_if_missing(&conn, "anime_entries", "custom_synonyms_json", "TEXT")?;
         add_column_if_missing(&conn, "watch_history", "progress_from", "INTEGER")?;
+        add_column_if_missing(&conn, "local_episodes", "parsed_episode", "INTEGER")?;
+        add_column_if_missing(&conn, "local_episodes", "match_kind", "TEXT")?;
         activity::create_tables(&conn)?;
 
         run_data_migrations(&mut conn)?;
@@ -3422,6 +4057,66 @@ impl Database {
         Ok(discarded)
     }
 
+    /// Recompute `normalized_titles_json` of every entry and the keys of the user's title links with the
+    /// current `normalize_anime_title` (after a change to the normalization). Returns the rows changed.
+    pub fn rebuild_normalized_titles(&self) -> Result<usize, String> {
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let mut changed = 0usize;
+        {
+            let rows: Vec<(i64, String, Option<String>, Option<String>, String, String)> = {
+                let mut stmt = tx
+                    .prepare(
+                        "SELECT id, title_romaji, title_english, title_native, synonyms_json, normalized_titles_json
+                         FROM anime_entries",
+                    )
+                    .map_err(|e| e.to_string())?;
+                let rows = stmt
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))
+                    .map_err(|e| e.to_string())?;
+                rows.flatten().collect()
+            };
+            for (id, romaji, english, native, syns_json, stored) in rows {
+                let syns: Vec<String> = serde_json::from_str(&syns_json).unwrap_or_default();
+                let norms = Self::build_normalized_titles(&romaji, english.as_deref(), native.as_deref(), &syns);
+                let json = serde_json::to_string(&norms).unwrap_or_else(|_| "[]".into());
+                if json != stored {
+                    tx.execute(
+                        "UPDATE anime_entries SET normalized_titles_json = ?1 WHERE id = ?2",
+                        params![json, id],
+                    )
+                    .map_err(|e| e.to_string())?;
+                    changed += 1;
+                }
+            }
+
+            let aliases: Vec<(String, i64)> = {
+                let mut stmt = tx
+                    .prepare("SELECT normalized_alias, anime_id FROM title_aliases")
+                    .map_err(|e| e.to_string())?;
+                let rows = stmt
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                    .map_err(|e| e.to_string())?;
+                rows.flatten().collect()
+            };
+            for (alias, anime_id) in aliases {
+                let norm = normalize_anime_title(&alias);
+                if norm != alias && !norm.is_empty() {
+                    tx.execute("DELETE FROM title_aliases WHERE normalized_alias = ?1", params![alias])
+                        .map_err(|e| e.to_string())?;
+                    tx.execute(
+                        "INSERT OR REPLACE INTO title_aliases (normalized_alias, anime_id) VALUES (?1, ?2)",
+                        params![norm, anime_id],
+                    )
+                    .map_err(|e| e.to_string())?;
+                    changed += 1;
+                }
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(changed)
+    }
+
     /// Build a fresh (uncached) in-memory AnimeMatcherIndex in a single SQL pass.
     /// Prefer [`Database::matcher_index`], which reuses the cached index while nothing changed.
     pub fn build_matcher_index(&self) -> Result<AnimeMatcherIndex, String> {
@@ -3554,7 +4249,12 @@ impl Database {
         file_path: Option<&str>,
     ) -> Option<(i64, String, String, u32, Option<u32>)> {
         let index = self.matcher_index().ok()?;
-        index.match_title(normalized_title, file_path)
+        let parsed = AnitomyElements {
+            anime_title: normalized_title.to_string(),
+            normalized_title: normalized_title.to_string(),
+            ..Default::default()
+        };
+        index.match_episode(&parsed, file_path).map(EpisodeMatch::into_title_match)
     }
 
     /// Match a parsed `AnitomyElements` to an AnimeEntry in the database, applying episode bounds validation
@@ -3565,7 +4265,40 @@ impl Database {
         file_path: Option<&str>,
     ) -> Option<(i64, String, String, u32, Option<u32>)> {
         let index = self.matcher_index().ok()?;
-        index.match_episode(parsed, file_path)
+        let matched = index.match_episode(parsed, file_path)?;
+        // `parsed` now carries the episode of the matched entry (a relation may have moved it)
+        parsed.episode_number = matched.episode;
+        parsed.episode_number_alt = matched.episode_alt;
+        Some(matched.into_title_match())
+    }
+
+    /// Match what a media player is playing. A file the library already indexed is taken from its row, so
+    /// Now Playing and the Library never disagree; anything else is matched like a scanned file.
+    pub fn match_playback(
+        &self,
+        parsed: &mut AnitomyElements,
+        media_path: Option<&str>,
+    ) -> Option<TitleMatch> {
+        if let Some(path) = media_path {
+            let indexed = self.reader().ok().and_then(|conn| {
+                conn.query_row(
+                    "SELECT matched_anime_id, episode_number FROM local_episodes
+                     WHERE file_path = ?1 COLLATE NOCASE AND matched_anime_id IS NOT NULL",
+                    params![path],
+                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<u32>>(1)?)),
+                )
+                .optional()
+                .ok()
+                .flatten()
+            });
+            if let Some((anime_id, episode)) = indexed {
+                if let Some(found) = self.matcher_index().ok()?.title_match_for(anime_id) {
+                    parsed.episode_number = episode;
+                    return Some(found);
+                }
+            }
+        }
+        self.match_episode_to_anime(parsed, media_path)
     }
 
     pub fn record_watch_history(

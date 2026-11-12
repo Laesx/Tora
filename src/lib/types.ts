@@ -228,6 +228,10 @@ export interface LocalEpisodeFile {
   matched_anime_id: number | null;
   matched_anime_title: string | null;
   watched: boolean;
+  /** Episode number as written in the file name (`episode_number` is the matched anime's episode). */
+  parsed_episode: number | null;
+  /** What decided the match (`MatchKind` in `db/mod.rs`). */
+  match_kind: "alias" | "title" | "folder" | "directory" | "fuzzy" | "relation" | null;
 }
 
 export interface PlayerDefinition {

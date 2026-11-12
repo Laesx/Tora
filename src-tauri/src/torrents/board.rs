@@ -8,7 +8,7 @@ use super::config::{FansubOverride, FilterAction, PriorityConfig, TorrentFilter}
 use super::feed::RawRelease;
 use super::query::{Query, ReleaseFacts};
 use super::traits::ReleaseTraits;
-use crate::db::{AnimeEntry, AnimeMatcherIndex};
+use crate::db::{AnimeEntry, AnimeMatcherIndex, TitleCandidates};
 use rayon::prelude::*;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -100,19 +100,20 @@ pub struct MatchStats {
     pub fuzzy_hits: usize,
 }
 
-/// Matches each distinct normalized title of `releases` once, in parallel: title → anime id. The fuzzy step
+/// Runs the title step for each distinct normalized title of `releases` once, in parallel. The fuzzy step
 /// scans every list title, so it must never run once per release (a feed repeats each show many times).
-pub fn match_titles(matcher: &AnimeMatcherIndex, releases: &[FeedRelease]) -> (HashMap<String, Option<i64>>, MatchStats) {
+pub fn match_titles(
+    matcher: &AnimeMatcherIndex,
+    releases: &[FeedRelease],
+) -> (HashMap<String, TitleCandidates>, MatchStats) {
     let distinct: HashSet<&str> = releases.iter().map(|r| r.release.parsed.normalized_title.as_str()).collect();
-    let matches: HashMap<String, Option<i64>> = distinct
+    let matches: HashMap<String, TitleCandidates> = distinct
         .into_par_iter()
-        .map(|t| (t.to_string(), matcher.match_title_only(t)))
+        .map(|t| (t.to_string(), matcher.title_candidates(t)))
         .collect();
     let fuzzy_hits = matches
-        .iter()
-        .filter(|(t, aid)| {
-            aid.is_some() && !matcher.user_aliases.contains_key(*t) && !matcher.exact_norm.contains_key(*t)
-        })
+        .values()
+        .filter(|c| c.alias.is_none() && c.exact.is_empty() && c.fuzzy.is_some())
         .count();
     let stats = MatchStats { titles: matches.len(), fuzzy_hits };
     (matches, stats)
@@ -211,14 +212,14 @@ pub fn build_board(input: &BoardInput) -> TorrentBoard {
 
     for fr in input.releases {
         let r = &fr.release;
-        let mut parsed = r.parsed.clone();
+        let parsed = &r.parsed;
         let original_ep = parsed.episode_number;
-        // Same as `match_episode(&mut parsed, None)`, with the title step looked up from `title_matches`.
+        // Same as `match_episode(parsed, None)`, with the title step looked up from `title_matches`.
         let matched = input.matcher.and_then(|m| {
-            let aid = title_matches.get(&parsed.normalized_title).copied().flatten()?;
-            m.resolve_episode(m.title_match_for(aid)?, &mut parsed, None)
+            let cands = title_matches.get(&parsed.normalized_title)?;
+            m.resolve(cands, parsed, None)
         });
-        let anime_id = matched.as_ref().map(|m| m.0).filter(|id| input.entries.contains_key(id));
+        let anime_id = matched.as_ref().map(|m| m.anime_id).filter(|id| input.entries.contains_key(id));
         let entry = anime_id.and_then(|id| input.entries.get(&id));
         if entry.is_some_and(|e| input.hidden_statuses.contains(&e.user_status))
             && anime_id != input.focus_anime_id
@@ -226,7 +227,8 @@ pub fn build_board(input: &BoardInput) -> TorrentBoard {
             continue;
         }
 
-        let mut episode = parsed.episode_number;
+        // The matched entry's episode (a relation may have moved it); the name's number when unmatched
+        let mut episode = matched.as_ref().map_or(parsed.episode_number, |m| m.episode);
         let mut episode_end = r.traits.episode_end;
         if let (Some(orig), Some(now), Some(end)) = (original_ep, episode, episode_end) {
             // Relations redirection shifted the start; shift the end of a range the same way.
@@ -678,21 +680,15 @@ mod tests {
         let (titles, stats) = match_titles(&matcher, &rel);
         assert!(stats.titles <= rel.len());
         for r in &rel {
-            let mut expected = r.release.parsed.clone();
-            let want = matcher.match_episode(&mut expected, None).map(|m| m.0);
-            let mut parsed = r.release.parsed.clone();
+            let parsed = &r.release.parsed;
+            let want = matcher.match_episode(parsed, None);
             let got = titles
                 .get(&parsed.normalized_title)
-                .copied()
-                .flatten()
-                .and_then(|aid| matcher.resolve_episode(matcher.title_match_for(aid)?, &mut parsed, None))
-                .map(|m| m.0);
+                .and_then(|cands| matcher.resolve(cands, parsed, None));
             assert_eq!(got, want, "{}", r.release.title);
-            assert_eq!(parsed.episode_number, expected.episode_number, "{}", r.release.title);
         }
         // The relations redirect really happened (Kusuriya 51 → 3rd Season episode 3).
-        let mut k = rel[0].release.parsed.clone();
-        assert_eq!(matcher.match_episode(&mut k, None).map(|m| m.0), Some(195516));
-        assert_eq!(k.episode_number, Some(3));
+        let k = matcher.match_episode(&rel[0].release.parsed, None).expect("kusuriya 51");
+        assert_eq!((k.anime_id, k.episode), (195516, Some(3)));
     }
 }

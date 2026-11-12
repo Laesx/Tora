@@ -39,10 +39,18 @@ typedef void (*tora_anitomy_element_cb)(
     size_t position
 );
 
+// `flags` for `tora_anitomy_parse`: 0 parses everything (file names, window titles). Directory names
+// are parsed without the first three, as Taiga does for parent folders.
+#define TORA_ANITOMY_NO_EPISODE 1u
+#define TORA_ANITOMY_NO_EPISODE_TITLE 2u
+#define TORA_ANITOMY_NO_FILE_EXTENSION 4u
+#define TORA_ANITOMY_NO_RELEASE_GROUP 8u
+
 // Parse a filename or media title using the upstream C++ `anitomy::parse` library.
 void tora_anitomy_parse(
     const char* input_ptr,
     size_t input_len,
+    uint32_t flags,
     void* user_data,
     tora_anitomy_element_cb callback
 );

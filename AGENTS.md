@@ -46,6 +46,12 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 # Check Rust compilation quickly
 cargo check --manifest-path src-tauri/Cargo.toml
+
+# Before shipping a parser / matcher change: run the one-time repair on a COPY of a real library and
+# print every file that changes owner (never point it at %APPDATA%\Tora\tora_library.db itself)
+$env:TORA_AUDIT_DB = "C:\path\to\copy-of-tora_library.db"
+cargo test --manifest-path src-tauri/Cargo.toml --release matcher_audit -- --ignored --nocapture
+# $env:TORA_AUDIT_EXPLAIN = "part of a path|another" also prints how those files are parsed and matched
 ```
 
 ---
@@ -205,17 +211,17 @@ Tora/
         ├── tray.rs                       # Tray icon + menu (now playing, Show, detection toggle, Quit), minimize / close to tray, start with Windows
         ├── discord.rs                    # Discord Rich Presence worker thread ("Watching <anime>", cover, episode, AniList + GitHub buttons)
         ├── main.rs                       # Tauri binary entrypoint
-        ├── db/mod.rs                     # SQLite schema, `AnimeMatcherIndex`, season-isolated fuzzy matching & aliases
+        ├── db/mod.rs                     # SQLite schema, `AnimeMatcherIndex` (title vs folder rules, season-isolated fuzzy matching, relations by ID) & aliases
         ├── db/settings.rs                # Lenient `get_settings`, JSON config keys, rolling settings backups & restore
         ├── db/activity.rs                # Imported AniList activity tables, import state, merged History query (`list_history`), timeline
         ├── detection/
         │   ├── mod.rs                    # `DetectedMediaSession` and `FilenameTestResult` types
-        │   ├── anitomy.rs                # Safe Rust wrapper over `tora_anitomy_parse` + Taiga title normalization
+        │   ├── anitomy.rs                # Safe Rust wrapper over `tora_anitomy_parse`, pure `parse_filename` (parent folders, title extension), Taiga title normalization
         │   ├── anisthesia.rs             # Safe Rust wrapper over `tora_anisthesia_detect_windows` + player registry
-        │   └── relations.rs              # Parser & lookup engine for `erengy/anime-relations` sequential episodes
+        │   └── relations.rs              # Parser & lookup engine for `erengy/anime-relations` (by ID, or by exact title)
         ├── library/
         │   ├── mod.rs                    # Library module declaration
-        │   └── scanner.rs                # Fast filesystem scanner, Win32 IOCP directory watcher & batch episode matcher
+        │   └── scanner.rs                # Fast filesystem scanner, Win32 IOCP directory watcher, batch episode matcher, folder links, one-time match repair
         ├── plugins/
         │   ├── mod.rs                    # `TrackerPlugin` trait & `PluginManager`
         │   └── anilist.rs                # AniList GraphQL v2 search, user list fetch, save & delete mutations
@@ -253,22 +259,38 @@ Tora/
 ### 2. Native C++ FFI (`anitomy` & `anisthesia`)
 - Do **not** rewrite Anitomy or Anisthesia in Rust. Both libraries are compiled directly from `src-tauri/vendor/anitomy` and `src-tauri/vendor/anisthesia` via `src-tauri/build.rs` and exposed through `src-tauri/cpp/tora_ffi.h` / `tora_ffi.cpp`.
 - `anitomy` requires `/std:c++latest` (C++23 `std::views::slide`, `std::ranges`), while `anisthesia` is compiled with `/std:c++20` and links against `oleacc.lib` and `uiautomationcore.lib`.
+- The vendored Anitomy is `2.0.0-alpha`, upstream's `develop` rewrite. Taiga 1.4.1 builds against the older released line (`master`, commit `a538eff`). They were compared on a real library of 11,595 files (November 2026): the release found 10,872 episode numbers, the rewrite 10,886; the release fails on dotted names (`Show.S03E01.Title...`) and `01. Title`, the rewrite on "Title 13 - Episode title". So the rewrite stays, and `parse_filename` covers its gaps (section 3). Compare again before swapping.
+- `tora_anitomy_parse` takes `flags` (`TORA_ANITOMY_NO_*`): directory names are parsed without episode, episode title and extension, as Taiga does.
 
-### 3. Episode Recognition, Season Isolation & Matching Pipeline
-When a filename or media player window title is parsed (`parse_filename` in `src-tauri/src/detection/anitomy.rs` and `AnimeMatcherIndex` in `src-tauri/src/db/mod.rs`):
-1. **C++ Anitomy Tokenization**: Extracts raw `Title`, `Season`, `Episode`, `ReleaseGroup`, `VideoResolution`, etc. Note that Anitomy v2 strips `S02` / `2nd Season` / `Part 2` out of `ElementKind::Title`.
-2. **Parent Directory Fallback for Weak Titles**:
-   - If a video filename contains only numeric digits or generic episode markers (e.g., `Houseki no Kuni\01.mkv`, `special.mp4`, `ep.mkv`), the scanner inspects the parent folder name (`parse_filename(parent_name)`) to recover the true anime title.
-3. **Canonical Season & Title Extension**:
-   - `RelationsDatabase::resolve_canonical_season_title` checks `anime-relations.txt` to expand abbreviated titles with explicit seasons (e.g., `[Judas] Kusuriya - S03E03.mkv` $\rightarrow$ `"Kusuriya no Hitorigoto 3rd Season"`).
-   - Otherwise, Taiga's `ExtendAnimeTitle` logic appends `Season N` / `Part N` when `season > 1` or `part > 1`.
-4. **Sequential Episode Redirection (`erengy/anime-relations`)**:
-   - Continuous episode numbers (e.g., `Kusuriya no Hitorigoto - 51` $\rightarrow$ `Kusuriya no Hitorigoto 3rd Season` Episode `3`, or `Shingeki no Kyojin Season 4 - 87` $\rightarrow$ `Final Season Part 2` Episode `12`) are redirected using `RelationsDatabase::find_by_title` and `RelationsDatabase::find_by_id`.
-5. **Season-Isolated Matching (`AnimeMatcherIndex::match_title` / `match_episode`)**:
-   - Priority sequence: Custom folder path prefix $\rightarrow$ user-linked aliases (`title_aliases`) $\rightarrow$ exact normalized titles $\rightarrow$ season-isolated fuzzy core-title matching (`entry_season == query_season`).
-   - **Never** allow a Season 2/3 episode to fall back to a Season 1 library entry.
-6. **Unmatched Media Behavior**:
-   - If `matched_anime_id` is `None`, **never** auto-update or run the scrobble countdown. Focus the `Now Playing` tab and prompt the user to link the episode to an anime entry via `link_detected_episode_to_anime` (`Database::link_alias_to_anime`), which persists the relation in `title_aliases` and the anime's `synonyms` / `custom_synonyms` for all subsequent episodes.
+### 3. Episode Recognition: Parse, Then Match
+A match is a **pure function of (path, parse, index)**: nothing is remembered from an earlier match, the parser never rewrites what a name says, and relations are applied by ID after the anime is known (as Taiga does). Two steps, never mixed:
+
+**Parse** (`parse_filename` in `src-tauri/src/detection/anitomy.rs`), depends only on the input string:
+1. **C++ Anitomy tokenization**: raw `Title`, `Season`, `Episode`, `ReleaseGroup`, `VideoResolution`, etc. Anitomy v2 strips `S02` / `2nd Season` / `Part 2` out of the title.
+2. **Fallbacks for names Anitomy 2 does not split**: "Title 13 - Episode title" (`NUMBER_BEFORE_DASH`; the released Anitomy that Taiga uses reads it), a number that starts the name (`leading_number`, only used when the anime is known from its folder). Opening / ending / preview types never carry an episode number. Two Anitomy 2 misreads are undone: a checksum that starts with a type keyword (`[ED204890]` read as an ending, `fix_type_read_from_checksum`) and the number of an unknown release group read as the episode (`[Y-467] Movie Title`, `fix_episode_read_from_release_group`).
+3. **Parent folders** (the two nearest, like Taiga's `GetTitleFromPath`): a season-only folder gives the season, the first titled one gives `parent_title` (an ordering prefix like `06 - ` is dropped) and replaces a weak title (`01.mkv`). When the season only came from a folder, `own_title` keeps the title without it ("Season 2\Non Non Biyori Repeat - 01").
+4. **`ExtendAnimeTitle`**: appends `Season N` / `Part N` when `season > 1` or `part > 1`.
+5. **No relations, no list**: `parse_filename` must never call `relations_db()` or look at the user's entries.
+
+**Match** (`AnimeMatcherIndex` in `src-tauri/src/db/mod.rs`): `title_candidates(norm)` (alias, every entry with that exact title, one unambiguous fuzzy match; memoizable per title) then `resolve(&cands, &parsed, path)`:
+1. A user alias (`title_aliases`) wins.
+2. **Title against folder**. The folder is the *nearest* linked ancestor (`custom_folders`, whole path segments via `normalize_dir_key`, Unicode case-insensitive; several entries may share a folder).
+   - the exact title and the folder agree: that entry;
+   - the name is exactly another entry's title: **the title wins** ("Chihayafuru 2 - 01" in Chihayafuru's folder);
+   - unless the name is only a shorter form of the folder entry's title *and* the file's own folder is named after that entry, or the number is no episode of the titled entry ("Clannad - 01" in `Clannad ~After Story~`, "Black Lagoon 13" in the second season's folder): then the folder wins (`folder_says_more`). A name that states season 1 always means it;
+   - a name that matches no title belongs to the folder's entry ("Tambor Pinguino - 03").
+3. **Fuzzy** (`fuzzy_match`): same season only; a nearly identical title beats an abbreviation, which beats a title the name extends, which beats letters that are only similar (`FuzzyTier`); rivals within `FUZZY_RIVAL_MARGIN` are only accepted when their titles form one chain, otherwise the name is ambiguous and stays unmatched ("fate" against every Fate entry). When the season came only from a folder, the name without it is guessed the same way (`own_title_fuzzy`: `Season 3\Show - Goddesses Arc - 04` → "Show: Goddesses"). Then the parent folder's own name, exact only (`MatchKind::Directory`).
+4. **Never a file of one season on the entry of another**: `folder_entries_for` drops entries of the same series with another season, the series as the name states it or, when the season came from a `Season N` folder, as the folders do.
+5. **Specials are not episodes** (`names_a_special`): a guessed or folder match whose name adds a marker word (`SPECIAL_MARKERS`: "Especial", "OVA", "Mini"...) or, for a guess from a longer name, more than a short tag, keeps the anime but gets no episode number.
+6. **Episode** (`finish`, a port of Taiga's `ValidateEpisodeNumber`): in range, done. Episode 0 or past the total: `anime-relations` by ID from the entry, then from the base title's entries, then a rule for the exact title whose destination is on the list by ID, then the list's own "`<title> N`" seasons. A valid episode is never redirected. Still no home: unmatched (an alias keeps the file; a folder match tries the linked folders above).
+7. **Unmatched media**: if `matched_anime_id` is `None`, **never** auto-update or run the scrobble countdown. Focus the `Now Playing` tab and prompt the user to link the episode via `link_detected_episode_to_anime` (`Database::link_alias_to_anime`), which persists the relation in `title_aliases` and the anime's `synonyms` / `custom_synonyms`.
+
+Rules that keep it that way:
+- **When in doubt, unmatched.** A wrong match pushes wrong progress to AniList; an unmatched file costs one link.
+- `local_episodes.match_kind` (`alias | title | folder | directory | fuzzy | relation`) says what decided a match; `parsed_episode` is the number in the name, `episode_number` the matched entry's episode.
+- Relation lookups are by ID (`find_by_id`, `season_by_id`) or by **exact** title (`find_by_exact_title`): never by title prefix.
+- Stored matches are versioned by `LIBRARY_MATCH_VERSION` (`library/scanner.rs`). Bump it when a parser or matcher change should reach files that are already indexed: the next startup scan runs `repair_library_matches` (normalizes titles again, rematches everything, clears folder links the files contradict).
+- Check a matcher change against a real library before shipping: `matcher_audit` (below) runs the repair on a **copy** of a database and prints every file that changes owner.
 
 ### 4. Zero-Polling Win32 IOCP Directory Monitoring & Incremental Scanning
 - **Native Win32 IOCP Monitor (`LibraryMonitorHandle`)**:
@@ -279,9 +301,11 @@ When a filename or media player window title is parsed (`parse_filename` in `src
 - **Atomic Delta Handling (`Database::handle_directory_change_events`)**:
   - Handles `Added`, `Removed`, and `Renamed` notifications in a single SQLite transaction without full directory rescans.
   - Emits the `library-changed` Tauri event with `ScanSummary` so the frontend updates instantly.
-- **Subfolder Auto-Binding**:
-  - When episodes are scanned inside a dedicated anime subfolder, the scanner automatically populates `anime_entries.custom_folder` if it is currently unset, giving future files in that folder instant O(1) matching.
+- **Folder links (`custom_folder`) come from files, never from loose names**:
+  - An entry with no folder is linked to the folder where most of its files were found **by name** (`MatchKind::is_title_evidence`: alias, exact title, the folder's own exact name, a relation), never a library root. Several entries can share a folder (two seasons in one). There is no fuzzy matching of directory names: that once linked `python\lib\curses` to an anime.
+  - A link is a fallback for files whose title names nothing, not an override (section 3). After a scan links a folder, the unmatched files are matched again for those entries.
   - Folder renames in Windows Explorer automatically update `anime_entries.custom_folder`.
+- **Matches are never sticky**: scans and rematches write what the file resolves to now, also when that is "nothing". A full scan ("Rescan") ends with a rematch of every indexed file (each one parsed again from its path, ~1 s for 11,000 files), so it repairs wrong matches. A folder whose root is missing (unplugged drive) keeps its rows.
 - **System and Hidden File Filtering**:
   - The scanner filters out Windows hidden and system files/directories (`FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM`) such as `$RECYCLE.BIN`, `.git`, or hidden OS thumbnails.
 
@@ -333,7 +357,7 @@ When a filename or media player window title is parsed (`parse_filename` in `src
 - Scroll is restored on animation frames until the view is tall enough (≤ 90 frames); user scroll input stops it. An account switch clears the history.
 
 ### 6. Database Performance & In-Memory Matching (`src-tauri/src/db/mod.rs`)
-- Use the cached `AnimeMatcherIndex` (`db.matcher_index()`) for any matching (library scans, torrent RSS evaluation, playback recognition). It is built from the stored `normalized_titles_json` (keep that column correct on every title/synonym write) and cached until `matcher_generation` changes; an SQLite `update_hook` bumps the generation on any write to `anime_entries` or `title_aliases`, so writers never invalidate manually. Do not call the uncached `build_matcher_index()` in hot paths. The recognition poll only re-matches an unmatched session when the generation changed.
+- Use the cached `AnimeMatcherIndex` (`db.matcher_index()`) for any matching (library scans, torrent RSS evaluation, playback recognition). Batch callers run `title_candidates` once per distinct normalized title (it holds the fuzzy step) and `resolve` per file; `match_episode` is both for a single name. Playback goes through `Database::match_playback`: a file the library already indexed is taken from its row, so Now Playing and the Library never disagree. It is built from the stored `normalized_titles_json` (keep that column correct on every title/synonym write) and cached until `matcher_generation` changes; an SQLite `update_hook` bumps the generation on any write to `anime_entries` or `title_aliases`, so writers never invalidate manually. Do not call the uncached `build_matcher_index()` in hot paths. The recognition poll only re-matches an unmatched session when the generation changed.
 - **Fuzzy matching cost**: `NormTitle.core` is a `PreparedTitle` (sorted `u16` bigrams, word ranges + bigrams, a 64-bit bigram mask) and titles are bucketed by season (`norms_by_season`), so `core_title_similarity` never allocates: mask counts rule steps out with exact bounds, dice is a sorted merge. Scores must stay bit-identical to the reference in `merge_dice_equals_reference`; time changes with `cargo test --release fuzzy_bench -- --ignored --nocapture` (its checksum must not change).
 - UI read paths (`list_anime_entries`, `get_anime_entry_by_id`, `get_anime_entries_by_ids`, `list_local_episodes`, `get_settings`) use the query-only `Database::reader()` connection so they don't queue behind writes; never call a write method while holding it.
 - **Aliases**: `synonyms_json` is the matchable union (AniList synonyms + the user's own); `custom_synonyms_json` holds only the user's own aliases (`AnimeEntry.custom_synonyms`), the only ones shown and edited in the drawer. `UserStateChange.synonyms` / `ResolvedState.synonyms` replace the *custom* list (`replace_custom_synonyms` rebuilds the union). NULL `custom_synonyms_json` marks a legacy row: the next pull splits it once (`backfill_custom_synonyms`: stored − remote).
@@ -387,7 +411,7 @@ When a filename or media player window title is parsed (`parse_filename` in `src
 - **Push**: local write happens first with `sync_pending = 1`, then a background push. Success clears `sync_pending` (only if the row still equals what was pushed) and stores AniList's `updatedAt` and list-entry id. Failure keeps it pending and emits `tracker-sync-error`; `Unauthorized` also emits `tracker-auth-invalid`.
 - **Delete**: local delete is immediate and writes a tombstone in `tracker_pending_deletions`; the AniList delete is retried until it succeeds, and tombstoned media are never re-added by a pull.
 - **Pull**: serialized by `op_lock`; flushes tombstones and pending pushes first, then fetches the viewer's list with the light `MEDIA_LIST_FRAGMENT` and calls `Database::merge_remote_list` (newest `updated_at` wins per entry, pending entries keep local state, `custom_folder` preserved, remote-missing entries deleted locally unless pending — skipped on viewer mismatch or empty remote list). Emits `tracker-sync-started` / `tracker-list-synced` (`SyncSummary` delta: `changed` + `removed_ids`) / `tracker-sync-failed`. No background polling. Each pull logs one `[sync] pull(...)` timing line.
-- **Pulls must stay diff-only and must never rematch the library**: `merge_remote_list` writes nothing for unchanged entries, uses targeted UPDATEs for changed ones, rewrites `normalized_titles_json` only when titles/synonyms change, and only touches `local_episodes.watched` for entries whose progress changed. Heavy metadata (`fetch_media_details`) is fetched only for new entries. Episode matching after a pull is limited to `rematch_ids` (new or retitled entries) via `match_unmatched_episodes_for_ids` in a background task that emits `library-changed`. **Never** call `rematch_all_local_episodes()` from a pull.
+- **Pulls must stay diff-only and must never rematch the library**: `merge_remote_list` writes nothing for unchanged entries, uses targeted UPDATEs for changed ones, rewrites `normalized_titles_json` only when titles/synonyms change, and only touches `local_episodes.watched` for entries whose progress changed. Heavy metadata (`fetch_media_details`) is fetched only for new entries. Episode matching after a pull is limited to `rematch_ids` (new or retitled entries) via `match_unmatched_episodes_for_ids` (only files that are unmatched or matched by a weak rule, folder or fuzzy, and only when they now resolve to one of those entries) in a background task that emits `library-changed`. **Never** call `rematch_all_local_episodes()` from a pull.
 - **Invariants**: every `anime_entries` row has an `anilist_id`; there is no seed data. A signed-in AniList OAuth token is required for any push/pull.
 - **Account ownership**: the local list belongs to one AniList account, `Database::list_owner()` (an `app_settings` key kept out of `AppSettings` so frontend saves can't overwrite it). Edits and deletes are **always** queued (`sync_pending` / tombstones), signed in or not, and only sent while signed in, so signed-out changes reach AniList on the owner's next sign-in. Every sign-in goes through `TrackerSyncService::sign_in` (OAuth callback and `verify_tracker_account`): same owner keeps the list; a **different** account runs `Database::reset_for_account_switch` (wipes entries, queue, watch history and title aliases; keeps library folders, indexed files, settings, torrent rules and public caches), emits `tracker-account-switched` and imports fresh. `sign_out` flushes the queue before clearing the token and keeps the owner. Every pull resolves the token's account first (`TrackerPlugin::viewer_id`) and stops before flushing or merging if it differs from the owner or the stored user.
 - **Seasons** (`TrackerSyncService::fetch_season`): public data, no token. All pages of `Page.media(season, seasonYear)` (50/page, `hasNextPage`) go through the shared rate limiter. Each media (`SeasonalAnime`: full metadata + popularity + `MediaMetadata` tags/studios with ids/rankings/mean score/favourites) is upserted into `media_metadata` (one row per AniList id); `seasonal_cache` stores only the season's ordered id list. Browsing never writes `anime_entries`; list status in the Seasons view comes from the local list by id. Cached past seasons are only refetched on demand; current/upcoming ones are flagged `stale` after 24h and refreshed in the background by the frontend. `MediaMetadata.prequels` (direct anime `PREQUEL` relations, for the extended view) is `None` only in payloads stored before the field existed: such a season is flagged `stale` once, past or not, so opening it upgrades it.
@@ -417,7 +441,7 @@ When a filename or media player window title is parsed (`parse_filename` in `src
 - **Any RSS 2.0 feed.** `feed::parse_rss` is generic: tags are matched by local name (`nyaa:size`, `subsplease:size`, `torrent:contentLength`, `seeders`/`seeds`, `infoHash`, `magnetURI`, `<enclosure url length type>`). Info hashes are normalized to lowercase hex (`infoHash`, else the magnet's `btih`, base32 included, else a hash-shaped `guid`), so dedupe works across feeds. The release page is a URL `guid` / `comments` / a Nyaa view link derived from the .torrent link. `peers_known` is false when a feed has no seeder tags (the UI shows "—"; selection and filters treat peers as 0).
 - **General feeds** (`TorrentFeed { id, name, enabled, url }`, key `torrent_feeds`) and **search feeds** (`SearchFeed { id, name, url }` with `%title%`, key `torrent_search_feeds`, never empty: defaults to Nyaa English-translated and all categories). Feeds saved as Nyaa query / category / filter fields load once as their Nyaa URL (`load_feeds`), and the next save drops the old fields. All torrent config lives in its own `app_settings` keys (`torrent_feeds`, `torrent_search_feeds`, `torrent_filters`, `torrent_priority`, `torrent_fansubs`, `torrent_board_options`), never inside `AppSettings` (a stale Settings save would overwrite them), and is kept on account switch. There are no torrent tables; the old `torrent_rules` is converted once and dropped.
 - **RAM cache** (`TorrentCache` in `AppState`): raw items + Anitomy output per feed URL and the last search, keyed by its full filled-in URL. `get_torrent_board` **never fetches general feeds** unless `force` (the Refresh button); never-fetched selected feeds come back in `TorrentBoard.unfetched` and the tab waits for Refresh. Searches fetch on a cache miss. The background loop refreshes enabled feeds older than `torrent_refresh_minutes` (0 = never), only ones already fetched this session unless `torrent_auto_download` is on, and emits `torrent-feeds-refreshed`. Matching, filters and selection are recomputed from the cache on every board read — never refetch to re-select. The frontend keeps the last board in module memory so re-entering the tab shows it at once.
-- **Board matching**: `board::match_titles` matches each distinct normalized title once (rayon), then each release does `title_match_for` + `resolve_episode` (= `match_episode`). Never call `match_episode` per release in `build_board`. Each build logs `[torrents] board: … in N ms`.
+- **Board matching**: `board::match_titles` runs `title_candidates` for each distinct normalized title once (rayon), then each release does `resolve` (together = `match_episode`). Never call `match_episode` per release in `build_board`. Each build logs `[torrents] board: … in N ms`.
 - **Feed URLs** are stored percent-encoded (`feed::normalize_url` on save encodes spaces, the `DISPLAY_DECODED` characters such as `|`, `[`, `]`, control characters and non-ASCII; `%` is untouched so `%title%` survives) and shown decoded like a browser (`displayUrl` in `src/lib/torrents.ts`, the same set). Feed order is the saved array order (chips, search dropdown; the first search feed is the default).
 - **Searches** use `BoardOptions.search_feed_id` (the dropdown next to the search box; a deleted / unset choice = the first search feed, `config::resolve_search_feed`), filled by `feed::search_url` (`%title%`, any case → the URL-encoded query). The frontend saves the choice before reloading; it never sends a template.
 - **Anime-level search everywhere**: callers pass `torrentSearchFor(anime)` (Romaji title without season/part suffix, plus the anime id whose card is pinned first). Never search per episode.

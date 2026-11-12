@@ -2975,14 +2975,15 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO local_episodes (folder_id, file_path, file_name, drive_root, parsed_title, normalized_title, episode_number, matched_anime_id)
-             VALUES (1, ?1, ?1, 'C:', ?2, ?3, ?4, ?5)",
+            "INSERT INTO local_episodes (folder_id, file_path, file_name, drive_root, parsed_title, normalized_title, episode_number, matched_anime_id, match_kind)
+             VALUES (1, ?1, ?1, 'C:', ?2, ?3, ?4, ?5, ?6)",
             rusqlite::params![
                 file,
                 title,
                 crate::detection::anitomy::normalize_anime_title(title),
                 ep,
-                matched
+                matched,
+                matched.map(|_| "title")
             ],
         )
         .unwrap();
@@ -3011,9 +3012,9 @@ mod tests {
         alpha.synopsis = "Stored synopsis".into();
         db.upsert_anime_entries_batch(&[alpha.clone(), test_entry(5, "Old Entry")])
             .unwrap();
-        // Already matched file (deliberately "matched" to an id its title would not pick) + unmatched files
+        // A file already matched by its title (to an id the new entry would not change) + unmatched files
         insert_local_file(&db, "C:/lib/alpha-01.mkv", "Brand New Show", 1, Some(1));
-        insert_local_file(&db, "C:/lib/new-02.mkv", "Brand New Show", 2, None);
+        insert_local_file(&db, "C:/lib/[Group] Brand New Show - 02.mkv", "Brand New Show", 2, None);
         insert_local_file(&db, "C:/lib/other-01.mkv", "Unrelated Thing", 1, None);
 
         let mock = Arc::new(MockTracker {
@@ -3052,7 +3053,7 @@ mod tests {
 
         // Background matching binds the unmatched file to the new entry; matched files are untouched
         wait_until(|| names(&events).iter().any(|n| n == EVENT_LIBRARY_CHANGED)).await;
-        assert_eq!(matched_of(&db, "C:/lib/new-02.mkv"), Some(2));
+        assert_eq!(matched_of(&db, "C:/lib/[Group] Brand New Show - 02.mkv"), Some(2));
         assert_eq!(matched_of(&db, "C:/lib/alpha-01.mkv"), Some(1));
         assert_eq!(matched_of(&db, "C:/lib/other-01.mkv"), None);
         let lib_event = events

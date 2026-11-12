@@ -444,117 +444,51 @@ impl RelationsDatabase {
         None
     }
 
-    /// Find an episode redirection by normalized anime title (both extended title with season and base title,
-    /// including unambiguous word-prefix matches like `"kusuriya"` -> `"kusuriya no hitorigoto"`).
-    pub fn find_by_title(
+    /// Continuous-numbering rules written for a title (source range past episode 1), for when the source
+    /// anime is not on the list. Exact normalized title only: an abbreviated title has to resolve to a list
+    /// entry first and redirect by ID, otherwise "Fate Stay Night - 13" would follow the rule of
+    /// "Fate/stay night: Unlimited Blade Works".
+    pub fn find_by_exact_title(
         &self,
-        extended_norm_title: &str,
-        base_norm_title: &str,
+        norm_title: &str,
         episode: u32,
         episode_alt: Option<u32>,
     ) -> Option<EpisodeRedirection> {
-        if !extended_norm_title.is_empty() {
-            if let Some(rules) = self.by_norm_title.get(extended_norm_title) {
-                for rule in rules {
-                    if let Some(red) = Self::apply_rule(rule, episode, episode_alt) {
-                        return Some(red);
-                    }
-                }
-            }
-        }
-
-        if !base_norm_title.is_empty() && base_norm_title != extended_norm_title {
-            if let Some(rules) = self.by_norm_title.get(base_norm_title) {
-                for rule in rules {
-                    // Only redirect from base title when the episode number is a continuous/sequential
-                    // episode number beyond episode 1 (e.g. Shingeki no Kyojin Season 4 - 87 -> 76..=87 -> 1..=12).
-                    if rule.src_start > 1 {
-                        if let Some(red) = Self::apply_rule(rule, episode, episode_alt) {
-                            return Some(red);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Prefix fallback for abbreviated titles not directly in `by_norm_title` (e.g. "[Judas] Kusuriya - 51.mkv")
-        if base_norm_title.len() >= 4 && !self.by_norm_title.contains_key(base_norm_title) {
-            let prefix = format!("{} ", base_norm_title);
-            let mut matched_redirection: Option<EpisodeRedirection> = None;
-            let mut matched_dst: Option<&str> = None;
-
-            for (norm_key, rules) in &self.by_norm_title {
-                if norm_key.starts_with(&prefix) {
-                    for rule in rules {
-                        if rule.src_start > 1 {
-                            if let Some(red) = Self::apply_rule(rule, episode, episode_alt) {
-                                if let Some(prev_dst) = matched_dst {
-                                    if prev_dst != rule.dst_norm_title {
-                                        return None; // Ambiguous prefix
-                                    }
-                                } else {
-                                    matched_dst = Some(&rule.dst_norm_title);
-                                    matched_redirection = Some(red);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            if matched_redirection.is_some() {
-                return matched_redirection;
-            }
-        }
-
-        None
+        self.by_norm_title
+            .get(norm_title)?
+            .iter()
+            .filter(|rule| rule.src_start > 1)
+            .find_map(|rule| Self::apply_rule(rule, episode, episode_alt))
     }
 
-    /// Resolve a canonical sequel/season title from `anime-relations.txt` when a filename specifies
-    /// an explicit season > 1 (e.g. `[Judas] Kusuriya - S03E03.mkv` -> `"Kusuriya no Hitorigoto 3rd Season"`).
-    pub fn resolve_canonical_season_title(
+    /// `(AniList id, MyAnimeList id)` of the anime that rules call season `season` of this one
+    /// (`# Title -> ~ 3rd Season`), looked up by the source's IDs.
+    pub fn season_by_id(
         &self,
-        base_norm_title: &str,
+        anilist_id: Option<i64>,
+        mal_id: Option<i64>,
         season: u32,
-    ) -> Option<(String, String)> {
-        if base_norm_title.is_empty() || season <= 1 {
+    ) -> Option<(Option<i64>, Option<i64>)> {
+        let by_anilist = anilist_id.and_then(|id| self.by_anilist_id.get(&id));
+        let by_mal = mal_id.and_then(|id| self.by_mal_id.get(&id));
+        by_anilist
+            .into_iter()
+            .chain(by_mal)
+            .flatten()
+            .find(|rule| rule.dst_season == Some(season))
+            .map(|rule| (rule.dst_anilist_id, rule.dst_mal_id))
+    }
+
+    /// Same as [`Self::season_by_id`], by the source's exact normalized title (source not on the list).
+    pub fn season_by_exact_title(&self, norm_title: &str, season: u32) -> Option<(Option<i64>, Option<i64>)> {
+        if season <= 1 {
             return None;
         }
-
-        if let Some(rules) = self.by_norm_title.get(base_norm_title) {
-            for rule in rules {
-                if rule.dst_season == Some(season) && !rule.dst_title.is_empty() {
-                    return Some((rule.dst_title.clone(), rule.dst_norm_title.clone()));
-                }
-            }
-        }
-
-        if base_norm_title.len() >= 4 {
-            let prefix = format!("{} ", base_norm_title);
-            let mut candidate: Option<(String, String)> = None; // (dst_title, dst_norm)
-
-            for (norm_key, rules) in &self.by_norm_title {
-                if norm_key.starts_with(&prefix) {
-                    for rule in rules {
-                        if rule.dst_season == Some(season) && !rule.dst_title.is_empty() {
-                            if let Some((_, ref prev_dst_norm)) = candidate {
-                                if prev_dst_norm != &rule.dst_norm_title {
-                                    return None;
-                                }
-                            } else {
-                                candidate =
-                                    Some((rule.dst_title.clone(), rule.dst_norm_title.clone()));
-                            }
-                        }
-                    }
-                }
-            }
-
-            if let Some((dst_title, dst_norm)) = candidate {
-                return Some((dst_title, dst_norm));
-            }
-        }
-
-        None
+        self.by_norm_title
+            .get(norm_title)?
+            .iter()
+            .find(|rule| rule.dst_season == Some(season))
+            .map(|rule| (rule.dst_anilist_id, rule.dst_mal_id))
     }
 }
 
@@ -599,7 +533,6 @@ mod tests {
             parse_filename("[SubsPlease] Kusuriya no Hitorigoto - 26 (1080p).mkv");
         let m_k26 = db.match_episode_to_anime(&mut kusuriya_26, None);
         assert_eq!(m_k26.as_ref().map(|m| m.0), Some(176301));
-        assert_eq!(kusuriya_26.anime_season, Some(2));
         assert_eq!(kusuriya_26.episode_number, Some(2));
 
         // 4. English title "The Apothecary Diaries - 26" -> redirects via AniList ID 161645 -> 176301 (Season 2 Episode 2)
@@ -607,15 +540,30 @@ mod tests {
             parse_filename("[SubsPlease] The Apothecary Diaries - 26 (1080p).mkv");
         let m_a26 = db.match_episode_to_anime(&mut apothecary_26, None);
         assert_eq!(m_a26.as_ref().map(|m| m.0), Some(176301));
-        assert_eq!(apothecary_26.anime_season, Some(2));
         assert_eq!(apothecary_26.episode_number, Some(2));
 
         // 5. Kusuriya no Hitorigoto ep 51 -> Season 3 Episode 3
-        let kusuriya_51 =
+        let mut kusuriya_51 =
             parse_filename("[SubsPlease] Kusuriya no Hitorigoto - 51 (1080p).mkv");
-        assert_eq!(kusuriya_51.anime_title, "Kusuriya no Hitorigoto 3rd Season");
-        assert_eq!(kusuriya_51.anime_season, Some(3));
+        assert_eq!(kusuriya_51.episode_number, Some(51));
+        let m_k51 = db.match_episode_to_anime(&mut kusuriya_51, None);
+        assert_eq!(m_k51.as_ref().map(|m| m.0), Some(195516));
         assert_eq!(kusuriya_51.episode_number, Some(3));
+
+        // 6. A season in the name: "Kusuriya S03E03" -> Season 3, the episode as written
+        let mut judas_s3 = parse_filename("[Judas] Kusuriya - S03E03.mkv");
+        let m_s3 = db.match_episode_to_anime(&mut judas_s3, None);
+        assert_eq!(m_s3.as_ref().map(|m| m.0), Some(195516));
+        assert_eq!(judas_s3.episode_number, Some(3));
+
+        // 7. The source of a rule is not on the list, its destination is: the rule's exact title still applies
+        let relations = crate::detection::relations::relations_db();
+        let red = relations
+            .find_by_exact_title("kusuriya no hitorigoto", 51, None)
+            .expect("rule by exact title");
+        assert_eq!(red.dst_episode, 3);
+        assert!(relations.find_by_exact_title("kusuriya", 51, None).is_none());
+        assert!(relations.find_by_exact_title("fate stay night", 13, None).is_none());
 
         let _ = std::fs::remove_file(&tmp_db_path);
     }

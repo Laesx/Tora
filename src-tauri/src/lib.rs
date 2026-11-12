@@ -594,6 +594,14 @@ async fn create_demo_library_files(
     .map_err(|e| e.to_string())?
 }
 
+/// The media file of a detected session: Anisthesia reports a file path for players it can read open
+/// files from, and only the process name otherwise.
+fn media_file_path(executable_path: &str) -> Option<String> {
+    executable_path
+        .contains(['\\', '/'])
+        .then(|| executable_path.to_string())
+}
+
 #[tauri::command]
 async fn test_parse_filename(
     state: State<'_, AppState>,
@@ -840,21 +848,25 @@ async fn poll_session(
     let (continuing, replaced) = {
         let mut guard = state.active_session.lock().map_err(|e| e.to_string())?;
         match guard.as_ref().filter(|s| is_same_session(s)) {
-            Some(s) => (Some((s.matched_anime_id, s.parsed.clone())), None),
+            Some(s) => (
+                Some((s.matched_anime_id, s.parsed.clone(), media_file_path(&s.executable_path))),
+                None,
+            ),
             None => (None, guard.take()),
         }
     };
 
-    let Some((snapshot_matched_id, mut session_parsed)) = continuing else {
+    let Some((snapshot_matched_id, mut session_parsed, session_media_path)) = continuing else {
         // New playback session detected; the previous one may still owe its held update
         end_session(app, state, replaced).await;
 
         let db = state.db.clone();
+        let media_path = media_file_path(&exe_path);
         let (parsed, matched, generation) = tokio::task::spawn_blocking(move || {
             let mut parsed = parsed;
             // Read before matching: a change that lands meanwhile triggers one more attempt later.
             let generation = db.matcher_generation();
-            let matched = db.match_episode_to_anime(&mut parsed, None);
+            let matched = db.match_playback(&mut parsed, media_path.as_deref());
             (parsed, matched, generation)
         })
         .await
@@ -932,7 +944,7 @@ async fn poll_session(
         let mut checked_generation = None;
         let rematch = if snapshot_matched_id.is_none() && generation != last_checked_generation {
             checked_generation = Some(generation);
-            db.match_episode_to_anime(&mut session_parsed, None)
+            db.match_playback(&mut session_parsed, session_media_path.as_deref())
                 .map(|m| (m, session_parsed))
         } else {
             None

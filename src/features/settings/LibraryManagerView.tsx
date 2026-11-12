@@ -28,6 +28,26 @@ import { useAnimeTitle } from "@/contexts/titles";
 import { useToast } from "@/contexts/toast";
 import { useAnimeActions } from "@/contexts/animeActions";
 
+/** Tooltip saying what decided a file's match. */
+function matchKindHint(kind: LocalEpisodeFile["match_kind"]): string | undefined {
+  switch (kind) {
+    case "alias":
+      return "Matched by a title you linked";
+    case "title":
+      return "Matched by its title";
+    case "folder":
+      return "Matched by its linked folder";
+    case "directory":
+      return "Matched by its folder's name";
+    case "fuzzy":
+      return "Matched by a similar title";
+    case "relation":
+      return "Matched by its title, episode moved by anime-relations";
+    default:
+      return undefined;
+  }
+}
+
 interface LibraryManagerViewProps {
   animeList: AnimeEntry[];
   refreshTick?: number;
@@ -504,7 +524,15 @@ export const LibraryManagerView: React.FC<LibraryManagerViewProps> = ({
                               {ep.file_name}
                             </div>
                           </td>
-                          <td className="py-2 px-3 font-mono font-bold text-accent">
+                          <td
+                            className="py-2 px-3 font-mono font-bold text-accent"
+                            title={
+                              ep.parsed_episode != null &&
+                              ep.parsed_episode !== ep.episode_number
+                                ? `The file name says ${ep.parsed_episode}`
+                                : undefined
+                            }
+                          >
                             {ep.episode_number ?? "-"}
                           </td>
                           <td className="py-2 px-3">
@@ -535,6 +563,7 @@ export const LibraryManagerView: React.FC<LibraryManagerViewProps> = ({
                                 onClick={() =>
                                   linkedAnime && openAnime(linkedAnime)
                                 }
+                                title={matchKindHint(ep.match_kind)}
                                 className="flex items-center gap-1.5 text-emerald-400 hover:underline font-medium"
                               >
                                 <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
