@@ -19,9 +19,12 @@ pub const TORRENT_BOARD_OPTIONS_KEY: &str = "torrent_board_options";
 pub const TORRENT_SEARCH_FEEDS_KEY: &str = "torrent_search_feeds";
 /// AniList ids hidden from the Seasons view ("Not interested"): a JSON array, local only.
 pub const SEASONS_NOT_INTERESTED_KEY: &str = "seasons_not_interested";
+/// Preferred release per anime (`{"<anime id>": "<release key>"}`, keys built by `src/lib/releases.ts`):
+/// local only, kept on account switch (it describes the files, not the list).
+pub const RELEASE_PREFERENCES_KEY: &str = "release_preferences";
 
 /// Every key a backup snapshots (and a restore writes back).
-const BACKED_UP_KEYS: [&str; 8] = [
+const BACKED_UP_KEYS: [&str; 9] = [
     MAIN_SETTINGS_KEY,
     TORRENT_FEEDS_KEY,
     TORRENT_FILTERS_KEY,
@@ -30,6 +33,7 @@ const BACKED_UP_KEYS: [&str; 8] = [
     TORRENT_BOARD_OPTIONS_KEY,
     TORRENT_SEARCH_FEEDS_KEY,
     SEASONS_NOT_INTERESTED_KEY,
+    RELEASE_PREFERENCES_KEY,
 ];
 /// Account fields a restore never takes from the backup: an old token may be expired or belong to an
 /// account other than the list owner.

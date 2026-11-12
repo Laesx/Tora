@@ -48,6 +48,7 @@ import { useToast } from "@/contexts/toast";
 import { useAnimeActions } from "@/contexts/animeActions";
 import { UpdateCountdown } from "@/components/UpdateCountdown";
 import { log } from "@/lib/log";
+import { episodeFileMap, usePinnedRelease } from "@/lib/releases";
 
 interface NowPlayingHeroProps {
   session: DetectedMediaSession;
@@ -125,13 +126,13 @@ export const NowPlayingHero: React.FC<NowPlayingHeroProps> = ({
     };
   }, [entryId, onDiskCount]);
 
-  const fileByEpisode = useMemo(() => {
-    const map = new Map<number, LocalEpisodeFile>();
-    for (const f of localFiles) {
-      if (f.episode_number !== null && !map.has(f.episode_number)) map.set(f.episode_number, f);
-    }
-    return map;
-  }, [localFiles]);
+  // The file each episode button plays: the pinned (or oldest) release first
+  const pinned = usePinnedRelease(entryId);
+  const totalEpisodes = entry?.episodes ?? null;
+  const fileByEpisode = useMemo(
+    () => episodeFileMap(localFiles, totalEpisodes, pinned),
+    [localFiles, totalEpisodes, pinned]
+  );
 
   const ep = session.parsed.episode_number;
   const meta = media?.metadata;

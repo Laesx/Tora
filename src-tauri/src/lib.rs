@@ -148,6 +148,28 @@ async fn get_score_format(state: State<'_, AppState>) -> Result<String, String> 
 }
 
 #[tauri::command]
+async fn get_release_preferences(
+    state: State<'_, AppState>,
+) -> Result<std::collections::HashMap<i64, String>, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || db.release_preferences())
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn set_release_preference(
+    state: State<'_, AppState>,
+    anime_id: i64,
+    release: Option<String>,
+) -> Result<(), String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || db.set_release_preference(anime_id, release.as_deref()))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 async fn get_not_interested(state: State<'_, AppState>) -> Result<Vec<i64>, String> {
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || db.not_interested_ids())
@@ -2111,6 +2133,8 @@ pub fn run() {
             batch_update_anime_entries,
             get_custom_lists,
             get_score_format,
+            get_release_preferences,
+            set_release_preference,
             get_not_interested,
             set_not_interested,
             set_anime_custom_lists,

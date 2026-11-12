@@ -131,7 +131,8 @@ Tora/
 │   │   ├── episodes.ts                   # Episode ranges, aired / estimated totals, progress bar model
 │   │   ├── seasons.ts                    # Season helpers (current season, shift, labels; broadcast quarters)
 │   │   ├── fuzzy.ts                      # Shared fuzzy search (normalized index, char-mask prefilter, subsequence scoring, match ranges)
-│   │   └── torrents.ts                   # Anime-level torrent search (`torrentSearchFor`, season-suffix stripping), query field metadata, row → query text
+│   │   ├── torrents.ts                   # Anime-level torrent search (`torrentSearchFor`, season-suffix stripping), query field metadata, row → query text
+│   │   └── releases.ts                   # An anime's files as releases (`groupReleases`), extras, the file that plays an episode (`pickEpisodeFile`), pinned releases
 │   ├── components/                       # Shared UI used by several features
 │   │   ├── AnimeQuickMenu.tsx            # Context menu for anime cards (+1 episode, mark status, open folder, copy title)
 │   │   ├── SeasonAnimeMenu.tsx           # Right-click menu for remote anime posters (Seasons, Schedule)
@@ -158,7 +159,13 @@ Tora/
 │   │   │   ├── CustomListsChip.tsx       # Single "Lists ▾" chip at the end of the status ribbon (filterable popover of custom lists, "New list…" row, per-list delete)
 │   │   │   ├── NewCustomListModal.tsx    # Name prompt for creating an AniList custom list
 │   │   │   └── DeleteCustomListModal.tsx # Confirmation before deleting an AniList custom list
-│   │   ├── detail/AnimeDetailModal.tsx   # Slide-over drawer for editing progress, score, notes, custom folder & synonyms
+│   │   ├── detail/
+│   │   │   ├── AnimeDetailModal.tsx      # Slide-over drawer: composes the sections below (quick actions, custom lists, synopsis)
+│   │   │   ├── useEntryEditor.ts         # The drawer's editable copy of an entry, files on disk, saves (debounced ± step, staged dates flushed on close)
+│   │   │   ├── DetailHero.tsx            # Banner, cover / title (→ AniList), badges, meta line (season → Seasons, studios)
+│   │   │   ├── UserStatePanel.tsx        # Status, progress, score, rewatches, dates
+│   │   │   ├── EpisodesPanel.tsx         # Release chips (filter, pin), episode grid, windowed file list by episode, collapsed extras
+│   │   │   └── EntrySettings.tsx         # Aliases, custom folder, notes, remove / save
 │   │   ├── palette/
 │   │   │   ├── CommandPalette.tsx        # Ctrl+S keyboard palette: Anime / Commands tabs, recents, AniList row, Right-arrow anime actions
 │   │   │   └── animeActions.ts           # Keyboard action list for one anime (palette → Right arrow)
@@ -313,6 +320,7 @@ Rules that keep it that way:
 - **When in doubt, unmatched.** A wrong match pushes wrong progress to AniList; an unmatched file costs one link.
 - `local_episodes.match_kind` (`alias | title | folder | directory | fuzzy | relation`) says what decided a match; `parsed_episode` is the number in the name, `episode_number` the matched entry's episode.
 - Relation lookups are by ID (`find_by_id`, `season_by_id`) or by **exact** title (`find_by_exact_title`): never by title prefix.
+- **Releases and extras** (`src/lib/releases.ts`): a release is a folder, split by release group only when two groups hold the same episode there. Every "play episode N" (`playLocalEpisode`, the drawer, Now Playing) goes through `pickEpisodeFile` / `episodeFileMap`: the pinned release (`release_preferences` app_settings key, anime id → release key, local only, backed up, kept on account switch), else the oldest release on disk (earliest file date), then the most complete. A file with no episode number is an extra, labeled by `local_episodes.extra_kind` (`anitomy::extra_kind`, from the parse alone: opening / ending / preview / special / recap).
 - Stored matches are versioned by `LIBRARY_MATCH_VERSION` (`library/scanner.rs`). Bump it when a parser or matcher change should reach files that are already indexed: the next startup scan runs `repair_library_matches` (normalizes titles again, rematches everything, clears folder links the files contradict).
 - **Check every parser / matcher change in the match lab before shipping** (`src-tauri/examples/match_lab`, commands above). `run` copies the current snapshot, runs `Database::rematch_from_index` on the copy (the one-time repair without the disk walk: deterministic for a snapshot and the code) and saves a report: each file's parse and result (AniList ID, episode, `match_kind`), the folder links, the list. The review page scores every report against `.match-lab/truth.json`, the user's checked answer per file (`anilist_id: null` = must stay unmatched; an ID with `episode: null` = an extra): **wrong anime** and **unexpected** (matched, should not be) are the costly verdicts, then missed, wrong episode, correct, unreviewed. Keep a change only if it adds no costly verdict. Reports store raw output, so a corrected truth rescores every report. `verdict()` exists in `main.rs` (CLI summary, Reports view counts) and `index.html` (Review view): keep them equal.
 

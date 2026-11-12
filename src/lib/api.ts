@@ -99,6 +99,11 @@ export const toraApi = {
   // The list owner's AniList score format ("POINT_10_DECIMAL", …); pulls keep it current
   getScoreFormat: () => invoke<string>("get_score_format"),
 
+  // Preferred release per anime (`src/lib/releases.ts` keys): local only, never sent to AniList
+  getReleasePreferences: () => invoke<Record<string, string>>("get_release_preferences"),
+  setReleasePreference: (animeId: number, release: string | null) =>
+    invoke<void>("set_release_preference", { animeId, release }),
+
   // Seasons "Not interested": local only, never sent to AniList
   getNotInterested: () => invoke<number[]>("get_not_interested"),
   setNotInterested: (animeIds: number[], hidden: boolean) =>

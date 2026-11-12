@@ -1,5 +1,5 @@
 use crate::db::{AnimeMatcherIndex, Database, EpisodeMatch, LibraryFolder, LocalEpisodeFile, TitleCandidates};
-use crate::detection::anitomy::{directory_title, normalize_anime_title, parse_filename, AnitomyElements};
+use crate::detection::anitomy::{directory_title, extra_kind, normalize_anime_title, parse_filename, AnitomyElements};
 use rayon::prelude::*;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
@@ -137,7 +137,7 @@ fn is_hidden_or_system(entry: &DirEntry) -> bool {
 
 /// Bump when a parser or matcher change should be applied to files that are already indexed: the next
 /// startup scan then matches the whole library again ([`Database::repair_library_matches`]).
-const LIBRARY_MATCH_VERSION: i64 = 3;
+const LIBRARY_MATCH_VERSION: i64 = 4;
 /// `app_settings` key of the version the stored matches were made with (kept out of `AppSettings`).
 const LIBRARY_MATCH_VERSION_KEY: &str = "library_match_version";
 /// Separator of [`crate::db::normalize_dir_key`] keys.
@@ -164,6 +164,8 @@ struct ParsedEpisodeRow {
     checksum: Option<String>,
     matched_anime_id: Option<i64>,
     match_kind: Option<&'static str>,
+    /// Kind of extra the name says it is (`anitomy::extra_kind`).
+    extra_kind: Option<&'static str>,
     watched: i32,
     /// `(anime, folder)` when the file's own name proves that its folder holds this anime.
     folder_evidence: Option<(i64, String)>,
@@ -223,6 +225,7 @@ fn parse_and_match_video_file(
     let matched = matcher.match_episode(&elements, Some(&full_str));
     let (matched_anime_id, match_kind, episode_number, watched) = match_columns(matched.as_ref(), &elements);
     let folder_evidence = folder_evidence(matched.as_ref(), root_path, file_path);
+    let extra_kind = extra_kind(&elements);
 
     let video_terms_json =
         serde_json::to_string(&elements.video_term).unwrap_or_else(|_| "[]".into());
@@ -248,6 +251,7 @@ fn parse_and_match_video_file(
         checksum: elements.file_checksum,
         matched_anime_id,
         match_kind,
+        extra_kind,
         watched,
         folder_evidence,
     }
@@ -267,6 +271,7 @@ struct RematchRow {
     anime_season: Option<u32>,
     matched_anime_id: Option<i64>,
     match_kind: Option<String>,
+    extra_kind: Option<String>,
     watched: i32,
 }
 
@@ -282,6 +287,7 @@ struct RematchUpdate {
     anime_season: Option<u32>,
     parsed_title: String,
     normalized_title: String,
+    extra_kind: Option<&'static str>,
 }
 
 /// Result of a rematch pass.
@@ -325,6 +331,7 @@ fn finish_rematch(
 
     let (new_aid, new_kind, new_episode, new_watched) = match_columns(matched.as_ref(), &elements);
     let folder_evidence = folder_evidence(matched.as_ref(), Path::new(&row.root_path), Path::new(&row.file_path));
+    let new_extra = extra_kind(&elements);
 
     let changed = row.matched_anime_id != new_aid
         || row.match_kind.as_deref() != new_kind
@@ -333,7 +340,8 @@ fn finish_rematch(
         || row.parsed_episode != elements.episode_number
         || row.anime_season != elements.anime_season
         || row.parsed_title != elements.anime_title
-        || row.normalized_title != elements.normalized_title;
+        || row.normalized_title != elements.normalized_title
+        || row.extra_kind.as_deref() != new_extra;
 
     RematchOutcome {
         matched: new_aid.is_some(),
@@ -347,6 +355,7 @@ fn finish_rematch(
             anime_season: elements.anime_season,
             parsed_title: elements.anime_title,
             normalized_title: elements.normalized_title,
+            extra_kind: new_extra,
         }),
         folder_evidence,
     }
@@ -449,8 +458,8 @@ fn upsert_episode_rows(
                 folder_id, file_path, file_name, drive_root, file_size, modified_unix,
                 parsed_title, normalized_title, episode_number, anime_season,
                 release_group, resolution, video_terms_json, audio_terms_json, checksum,
-                matched_anime_id, watched, parsed_episode, match_kind
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+                matched_anime_id, watched, parsed_episode, match_kind, extra_kind
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
             ON CONFLICT(file_path) DO UPDATE SET
                 folder_id = excluded.folder_id,
                 file_name = excluded.file_name,
@@ -469,7 +478,8 @@ fn upsert_episode_rows(
                 matched_anime_id = excluded.matched_anime_id,
                 watched = excluded.watched,
                 parsed_episode = excluded.parsed_episode,
-                match_kind = excluded.match_kind",
+                match_kind = excluded.match_kind,
+                extra_kind = excluded.extra_kind",
         )
         .map_err(|e| e.to_string())?;
 
@@ -494,6 +504,7 @@ fn upsert_episode_rows(
             r.watched,
             r.parsed_episode,
             r.match_kind,
+            r.extra_kind,
         ])
         .map_err(|e| e.to_string())?;
     }
@@ -1323,7 +1334,7 @@ impl Database {
                 };
                 let sql = format!(
                     "SELECT le.id, le.file_path, lf.path, le.parsed_title, le.normalized_title, le.parsed_episode,
-                            le.episode_number, le.anime_season, le.matched_anime_id, le.match_kind, le.watched
+                            le.episode_number, le.anime_season, le.matched_anime_id, le.match_kind, le.watched, le.extra_kind
                      FROM local_episodes le JOIN library_folders lf ON lf.id = le.folder_id {filter}"
                 );
                 let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
@@ -1341,6 +1352,7 @@ impl Database {
                             matched_anime_id: r.get(8)?,
                             match_kind: r.get(9)?,
                             watched: r.get(10)?,
+                            extra_kind: r.get(11)?,
                         })
                     })
                     .map_err(|e| e.to_string())?;
@@ -1376,7 +1388,8 @@ impl Database {
                         .prepare(
                             "UPDATE local_episodes
                              SET matched_anime_id = ?1, watched = ?2, episode_number = ?3, anime_season = ?4,
-                                 parsed_title = ?5, normalized_title = ?6, parsed_episode = ?7, match_kind = ?8
+                                 parsed_title = ?5, normalized_title = ?6, parsed_episode = ?7, match_kind = ?8,
+                                 extra_kind = ?10
                              WHERE id = ?9",
                         )
                         .map_err(|e| e.to_string())?;
@@ -1390,7 +1403,8 @@ impl Database {
                             u.normalized_title,
                             u.parsed_episode,
                             u.match_kind,
-                            u.id
+                            u.id,
+                            u.extra_kind
                         ])
                         .map_err(|e| e.to_string())?;
                     }
@@ -1429,7 +1443,7 @@ impl Database {
                 le.modified_unix, le.parsed_title, le.normalized_title, le.episode_number,
                 le.anime_season, le.release_group, le.resolution, le.video_terms_json,
                 le.audio_terms_json, le.checksum, le.matched_anime_id, ae.title_romaji, le.watched,
-                le.parsed_episode, le.match_kind
+                le.parsed_episode, le.match_kind, le.extra_kind
              FROM local_episodes le
              LEFT JOIN anime_entries ae ON le.matched_anime_id = ae.id
              WHERE le.matched_anime_id = ?1
@@ -1440,7 +1454,7 @@ impl Database {
                 le.modified_unix, le.parsed_title, le.normalized_title, le.episode_number,
                 le.anime_season, le.release_group, le.resolution, le.video_terms_json,
                 le.audio_terms_json, le.checksum, le.matched_anime_id, ae.title_romaji, le.watched,
-                le.parsed_episode, le.match_kind
+                le.parsed_episode, le.match_kind, le.extra_kind
              FROM local_episodes le
              LEFT JOIN anime_entries ae ON le.matched_anime_id = ae.id
              ORDER BY le.parsed_title ASC, le.episode_number ASC"
@@ -1472,6 +1486,7 @@ impl Database {
                 watched: r.get::<_, i32>(18)? != 0,
                 parsed_episode: r.get(19)?,
                 match_kind: r.get(20)?,
+                extra_kind: r.get(21)?,
             })
         };
 
@@ -2071,7 +2086,7 @@ mod tests {
         let mut stmt = conn
             .prepare(
                 "SELECT le.id, le.file_path, lf.path, le.parsed_title, le.normalized_title, le.parsed_episode,
-                        le.episode_number, le.anime_season, le.matched_anime_id, le.match_kind, le.watched
+                        le.episode_number, le.anime_season, le.matched_anime_id, le.match_kind, le.watched, le.extra_kind
                  FROM local_episodes le JOIN library_folders lf ON lf.id = le.folder_id ORDER BY le.id",
             )
             .unwrap();
@@ -2089,6 +2104,7 @@ mod tests {
                     matched_anime_id: r.get(8)?,
                     match_kind: r.get(9)?,
                     watched: r.get(10)?,
+                    extra_kind: r.get(11)?,
                 })
             })
             .unwrap();

@@ -232,6 +232,8 @@ export interface LocalEpisodeFile {
   parsed_episode: number | null;
   /** What decided the match (`MatchKind` in `db/mod.rs`). */
   match_kind: "alias" | "title" | "folder" | "directory" | "fuzzy" | "relation" | null;
+  /** Kind of extra the name says it is; only meaningful when `episode_number` is null. */
+  extra_kind: "opening" | "ending" | "preview" | "special" | "recap" | null;
 }
 
 export interface PlayerDefinition {

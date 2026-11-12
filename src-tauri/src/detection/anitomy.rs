@@ -515,6 +515,29 @@ fn is_extra_type(anime_type: Option<&str>) -> bool {
     })
 }
 
+/// What kind of extra a name says it is, from the parse alone (stored in `local_episodes.extra_kind`; the
+/// UI only reads it for files that ended up with no episode number): `opening`, `ending`, `preview`
+/// (previews, trailers, commercials, menus), `special` (season 0, OVA / OAD / SP / special types) or `recap`
+/// (a number between two episodes, "05.5").
+pub fn extra_kind(elements: &AnitomyElements) -> Option<&'static str> {
+    if let Some(t) = elements.anime_type.as_deref() {
+        match t.to_ascii_lowercase().as_str() {
+            "op" | "opening" | "ncop" => return Some("opening"),
+            "ed" | "ending" | "nced" => return Some("ending"),
+            "preview" | "pv" | "cm" | "menu" | "trailer" => return Some("preview"),
+            "ova" | "oad" | "oav" | "sp" | "special" | "specials" => return Some("special"),
+            _ => {}
+        }
+    }
+    if elements.anime_season == Some(0) {
+        return Some("special");
+    }
+    if elements.between_episodes {
+        return Some("recap");
+    }
+    None
+}
+
 /// A number that starts the file name: "25 Spice Girl", "14 Justice - Parte 1", "06_title".
 static LEADING_NUMBER: Lazy<Regex> = Lazy::new(|| Regex::new(r"^(\d{1,3})[\s._-]+\S").expect("regex"));
 
@@ -826,6 +849,20 @@ mod tests {
         let fixed: Vec<&str> = ANITOMY_CORPUS_KNOWN_FAILURES.iter().copied().filter(|i| !failing.contains(i)).collect();
         assert!(new.is_empty(), "{} corpus case(s) newly differ:\n{}", new.len(), new.join("\n"));
         assert!(fixed.is_empty(), "now parsed as data.json says, remove from ANITOMY_CORPUS_KNOWN_FAILURES:\n{}", fixed.join("\n"));
+    }
+
+    #[test]
+    fn extra_kinds_come_from_the_name() {
+        for (name, kind) in [
+            ("[Group] Show - NCOP 2 [1080p].mkv", Some("opening")),
+            ("[Group] Show - NCED [1080p].mkv", Some("ending")),
+            ("[Group] Show - PV [1080p].mkv", Some("preview")),
+            ("[Group] Show S00E03 [1080p].mkv", Some("special")),
+            ("[Coalgirls]_Hyouka_11.5_(1920x1080_Blu-Ray_FLAC)_[0428AD73].mkv", Some("recap")),
+            ("[Group] Show - 05 [1080p].mkv", None),
+        ] {
+            assert_eq!(extra_kind(&parse_filename(name)), kind, "{name}");
+        }
     }
 
     #[test]

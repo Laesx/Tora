@@ -226,6 +226,9 @@ pub struct LocalEpisodeFile {
     pub parsed_episode: Option<u32>,
     /// What decided the match: `alias`, `title`, `folder`, `directory`, `fuzzy` or `relation`.
     pub match_kind: Option<String>,
+    /// Kind of extra the name says it is (`opening`, `ending`, `preview`, `special`, `recap`); only
+    /// meaningful for files with no episode number.
+    pub extra_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2271,6 +2274,20 @@ fn run_data_migrations(conn: &mut Connection) -> Result<(), String> {
     tx.commit().map_err(|e| e.to_string())
 }
 
+fn read_release_preferences(conn: &Connection) -> Result<HashMap<i64, String>, String> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT value_json FROM app_settings WHERE key = ?1",
+            params![settings::RELEASE_PREFERENCES_KEY],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    Ok(raw
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default())
+}
+
 fn read_not_interested(conn: &Connection) -> Result<Vec<i64>, String> {
     let raw: Option<String> = conn
         .query_row(
@@ -2764,6 +2781,7 @@ impl Database {
         add_column_if_missing(&conn, "watch_history", "progress_from", "INTEGER")?;
         add_column_if_missing(&conn, "local_episodes", "parsed_episode", "INTEGER")?;
         add_column_if_missing(&conn, "local_episodes", "match_kind", "TEXT")?;
+        add_column_if_missing(&conn, "local_episodes", "extra_kind", "TEXT")?;
         activity::create_tables(&conn)?;
 
         run_data_migrations(&mut conn)?;
@@ -4042,6 +4060,34 @@ impl Database {
         tx.execute(
             "INSERT OR REPLACE INTO app_settings (key, value_json) VALUES (?1, ?2)",
             params![settings::SEASONS_NOT_INTERESTED_KEY, json],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())
+    }
+
+    /// Preferred release per anime (`anime id → release key`); unreadable JSON reads as none.
+    pub fn release_preferences(&self) -> Result<HashMap<i64, String>, String> {
+        let conn = self.reader()?;
+        read_release_preferences(&conn)
+    }
+
+    /// Sets the anime's preferred release, or clears it (`None`). Local only, never pushed.
+    pub fn set_release_preference(&self, anime_id: i64, release: Option<&str>) -> Result<(), String> {
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let mut stored = read_release_preferences(&tx)?;
+        match release {
+            Some(key) => {
+                stored.insert(anime_id, key.to_string());
+            }
+            None => {
+                stored.remove(&anime_id);
+            }
+        }
+        let json = serde_json::to_string(&stored).map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT OR REPLACE INTO app_settings (key, value_json) VALUES (?1, ?2)",
+            params![settings::RELEASE_PREFERENCES_KEY, json],
         )
         .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())
@@ -5862,6 +5908,20 @@ mod tests {
         assert_eq!(db.get_custom_lists().unwrap().members.len(), 1);
         db.reset_for_account_switch(7).unwrap();
         assert_eq!(db.get_custom_lists().unwrap(), CustomListsState::default());
+    }
+
+    #[test]
+    fn release_preferences_set_clear_and_survive_account_switch() {
+        let db = Database::open_in_memory().unwrap();
+        assert!(db.release_preferences().unwrap().is_empty());
+        db.set_release_preference(5, Some("d:/anime/show|*")).unwrap();
+        db.set_release_preference(9, Some("e:/x|Group")).unwrap();
+        db.set_release_preference(9, None).unwrap();
+        let prefs = db.release_preferences().unwrap();
+        assert_eq!(prefs.len(), 1);
+        assert_eq!(prefs[&5], "d:/anime/show|*");
+        db.reset_for_account_switch(7).unwrap();
+        assert_eq!(db.release_preferences().unwrap().len(), 1);
     }
 
     #[test]

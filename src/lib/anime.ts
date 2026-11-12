@@ -5,6 +5,7 @@ import { displayTitle } from "@/contexts/titles";
 
 import type { ShowToast } from "@/contexts/toast";
 import { dateLocale } from "./dates";
+import { loadReleasePreferences, pickEpisodeFile, pinnedRelease } from "./releases";
 
 const ANILIST = "https://anilist.co";
 
@@ -27,9 +28,9 @@ export async function openExternal(url: string, showToast: ShowToast) {
 /** Play episode `ep` of `anime` from the local library. */
 export async function playLocalEpisode(anime: AnimeEntry, ep: number, showToast: ShowToast) {
   try {
-    const files = await toraApi.getLocalEpisodes(anime.id);
+    const [files] = await Promise.all([toraApi.getLocalEpisodes(anime.id), loadReleasePreferences()]);
     const match =
-      files.find((f) => f.episode_number === ep) ||
+      pickEpisodeFile(files, ep, anime.episodes, pinnedRelease(anime.id)) ||
       (ep === 1 && files.length === 1 ? files[0] : undefined);
     if (!match) {
       showToast(`Episode ${ep} of "${displayTitle(anime)}" not found on disk`, "error");
