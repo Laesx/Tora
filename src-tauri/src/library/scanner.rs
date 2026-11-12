@@ -2466,6 +2466,8 @@ mod tests {
         let mut kiss_x_sis = entry(9000215, 9000215, "kiss×sis", 12, 0);
         kiss_x_sis.format = "OVA".into();
         kiss_x_sis.synonyms = vec!["Kiss x Sis".into()];
+        let mut oreimo = entry(9000216, 9000216, "Ore no Imouto ga Konna ni Kawaii Wake ga Nai", 12, 0);
+        oreimo.synonyms = vec!["My Little Sister Can't Be This Cute".into()];
         db.upsert_anime_entries_batch(&[
             entry(9000201, 9000201, "Overlord II", 13, 0),
             maidragon,
@@ -2482,6 +2484,7 @@ mod tests {
             rozen,
             rozen_2013,
             kiss_x_sis,
+            oreimo,
         ])
         .unwrap();
         link_folder(&db, 9000211, "C:\\lib\\The World God Only Knows");
@@ -2501,10 +2504,11 @@ mod tests {
         let remake = "C:\\lib\\Rozen Maiden\\Season 3\\[Zaphod] Rozen Maiden (2013) - 01 [BDRip 1920x1080 x264 Hi10P FLAC].[7D15878E].mkv";
         let season_zero = "C:\\lib\\Sword Art Online\\Specials\\Sword Art Online - S00E10 - Sword Art Online Extra Edition.mkv";
         let between = "C:\\lib\\Overlord II\\[Commie] Overlord II - 5.5 [56CF43E1].mkv";
+        let joined_words = "C:\\lib\\Oreimo\\[Commie] Ore no Imouto ga Konnani Kawaii Wake ga Nai. - My Little Sister Can't Be This Cute. - 01v2 [EAEEE2B8].mkv";
         let ova_entry = "C:\\lib\\Kiss x Sis\\[Tsundere] Kiss X Sis OVA - 01 [BDRip h264 1280x720 10bit FLAC][E712B9F5].mkv";
         for path in [
             special, episode, respelled, one_letter, season_folder, no_accent, in_between, remake, season_zero,
-            ova_entry, between,
+            ova_entry, between, joined_words,
         ] {
             seed_episode(&db, path, None, 0);
         }
@@ -2529,6 +2533,8 @@ mod tests {
         assert_eq!(owner(&db, remake), (Some(9000214), Some(1)));
         // Season 0 holds specials: the anime, no episode of the series
         assert_eq!(owner(&db, season_zero), (Some(9000209), None));
+        // "Konnani" is "Konna ni" written together, and the rest is the English title: an episode, no special
+        assert_eq!(owner(&db, joined_words), (Some(9000216), Some(1)));
         // "5.5" is found as episode 5 would be, then is an extra
         assert_eq!(owner(&db, between), (Some(9000201), None));
         // An entry that is itself the OVA keeps the episode numbers of "OVA - 01"

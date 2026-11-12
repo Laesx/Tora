@@ -1045,10 +1045,23 @@ impl AnimeMatcherIndex {
             // Not for a folder's entry ("Especial 02" in a folder linked to a one-episode special).
             known.extend(["ova", "ona", "sp", "especial", "especiales"]);
         }
+        // Title words written together are no added words: "Konnani" for "Konna ni", "Dainanaouji" for
+        // "Dai Nana Ouji"
+        let mut joined: HashSet<String> = HashSet::new();
+        for title in titles {
+            let words: Vec<&str> = title.split(' ').collect();
+            for i in 0..words.len() {
+                for j in i + 2..=(i + 4).min(words.len()) {
+                    joined.insert(words[i..j].concat());
+                }
+            }
+        }
         let extra: Vec<&str> = parsed
             .normalized_title
             .split(' ')
-            .filter(|w| !w.is_empty() && !known.contains(w) && !w.chars().all(|c| c.is_ascii_digit()))
+            .filter(|w| {
+                !w.is_empty() && !known.contains(w) && !joined.contains(*w) && !w.chars().all(|c| c.is_ascii_digit())
+            })
             .collect();
         if extra.iter().any(|w| SPECIAL_MARKERS.contains(w)) {
             return true;
