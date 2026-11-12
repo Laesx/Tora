@@ -128,6 +128,7 @@ export const App: React.FC = () => {
   // Before every jump; stable, so views can call it from the navigation context
   const remember = useCallback(() => nav.push(currentLocationRef.current()), [nav.push]);
   const navigation = useMemo<Navigation>(() => ({ remember }), [remember]);
+  const listById = useMemo(() => new Map(animeList.map((a) => [a.id, a])), [animeList]);
 
   // Back / forward: each view takes its state back through its own request
   const applyLocation = (loc: NavLocation) => {
@@ -821,7 +822,8 @@ export const App: React.FC = () => {
                       <AnimeDetailModal
                         anime={selectedAnime}
                         onOpenSeason={openSeason}
-                        inList={animeList.some((a) => a.id === selectedAnime.id)}
+                        inList={listById.has(selectedAnime.id)}
+                        listById={listById}
                         onAddToList={(status) => list.addAnime(selectedAnime, status)}
                         onClose={closeDrawer}
                         onUpdated={(updated) => {

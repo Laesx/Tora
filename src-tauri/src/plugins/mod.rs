@@ -188,8 +188,29 @@ pub struct MediaPrequel {
     pub title_native: Option<String>,
 }
 
-/// Non-essential metadata shown by the Now Playing hero and the Seasons view. Written only by season
-/// fetches (or one fetch for media that have none yet); never refreshed by playback.
+/// One AniList relation of a media (sequel, side story, source manga…), for the anime drawer. Only the
+/// light fields a card needs: the related media itself is fetched when it is opened.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MediaRelation {
+    pub id: i64,
+    /// AniList `MediaRelation` (version 2): `PREQUEL`, `SEQUEL`, `PARENT`, `SIDE_STORY`, `SOURCE`…
+    pub relation_type: String,
+    /// `ANIME` or `MANGA`
+    pub media_type: String,
+    pub title_romaji: String,
+    pub title_english: Option<String>,
+    pub title_native: Option<String>,
+    pub format: Option<String>,
+    pub status: Option<String>,
+    pub episodes: Option<u32>,
+    /// Year it started (season year, else start date)
+    pub year: Option<u32>,
+    pub cover_image: Option<String>,
+}
+
+/// Non-essential metadata shown by the Now Playing hero, the Seasons view and the anime drawer. Written by
+/// season fetches, or one fetch for media that have none yet (or were stored without `relations`); never
+/// refreshed by playback.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct MediaMetadata {
     pub mean_score: Option<u32>,
@@ -200,6 +221,10 @@ pub struct MediaMetadata {
     /// `None` only in payloads stored before this field existed (`fetch_season` refreshes those once)
     #[serde(default)]
     pub prequels: Option<Vec<MediaPrequel>>,
+    /// Every relation, anime and not; `None` only in payloads stored before this field existed (the
+    /// drawer's `media_metadata` read refreshes those once)
+    #[serde(default)]
+    pub relations: Option<Vec<MediaRelation>>,
 }
 
 /// One media of a seasonal listing (or of `media_metadata`): full metadata plus the fields only the

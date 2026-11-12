@@ -110,6 +110,25 @@ export interface MediaMetadata {
   rankings: MediaRanking[];
   /** `null` only on media stored before this field existed (the season refreshes itself once) */
   prequels: MediaPrequel[] | null;
+  /** Every relation (anime and not); `null` only on media stored before this field existed */
+  relations?: MediaRelation[] | null;
+}
+
+/** One AniList relation of a media, with the light fields a card needs. */
+export interface MediaRelation {
+  id: number;
+  /** `PREQUEL`, `SEQUEL`, `PARENT`, `SIDE_STORY`, `SPIN_OFF`, `ALTERNATIVE`, `SOURCE`, `ADAPTATION`… */
+  relation_type: string;
+  /** `ANIME` or `MANGA` */
+  media_type: string;
+  title_romaji: string;
+  title_english: string | null;
+  title_native: string | null;
+  format: string | null;
+  status: string | null;
+  episodes: number | null;
+  year: number | null;
+  cover_image: string | null;
 }
 
 /** One anime of a seasonal listing / of the media metadata store (never a list entry by itself). */

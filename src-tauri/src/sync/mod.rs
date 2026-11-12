@@ -1759,19 +1759,27 @@ impl TrackerSyncService {
     /// Stored metadata of one media (as written by season fetches). Only when none is stored yet is it
     /// fetched once (through the rate limiter) and stored; it is never refreshed here — season refreshes do that.
     pub async fn media_metadata(&self, anilist_id: i64) -> Result<Option<SeasonalAnime>, String> {
-        if let Some((_, item)) = self
+        let stored = self
             .blocking(move |db| db.get_media_metadata(anilist_id))
             .await?
-        {
-            return Ok(Some(item));
-        }
-        let plugin = self.plugin()?;
-        let Some(item) = self
-            .limiter
-            .run(|| plugin.fetch_media_metadata(anilist_id))
-            .await?
-        else {
-            return Ok(None);
+            .map(|(_, item)| item);
+        // Stored before relations existed: fetched once more, the stored copy serves if that fails
+        let stored = match stored {
+            Some(item) if item.metadata.relations.is_some() => return Ok(Some(item)),
+            other => other,
+        };
+        let fetched = match self.plugin() {
+            Ok(plugin) => self.limiter.run(|| plugin.fetch_media_metadata(anilist_id)).await,
+            Err(e) => Err(e),
+        };
+        let item = match (fetched, stored) {
+            (Ok(Some(item)), _) => item,
+            (Ok(None), stored) => return Ok(stored),
+            (Err(e), Some(stored)) => {
+                log::warn!(target: "sync", "metadata of {} not refreshed: {}", anilist_id, e);
+                return Ok(Some(stored));
+            }
+            (Err(e), None) => return Err(e.into()),
         };
         let fetched_at = chrono::Utc::now().timestamp();
         let to_store = item.clone();
@@ -2397,6 +2405,7 @@ mod tests {
                         popularity: Some(1000 - e.id as u32),
                         metadata: crate::plugins::MediaMetadata {
                             prequels: Some(vec![]),
+                            relations: Some(vec![]),
                             ..Default::default()
                         },
                     })
@@ -2434,6 +2443,7 @@ mod tests {
                     popularity: Some(5),
                     metadata: crate::plugins::MediaMetadata {
                         favourites: Some(7),
+                        relations: Some(vec![]),
                         ..Default::default()
                     },
                 }))
@@ -3421,6 +3431,23 @@ mod tests {
         svc.fetch_season("SUMMER", 2025, false).await.unwrap();
         assert_eq!(svc.media_metadata(7).await.unwrap().unwrap().entry.title_romaji, "Seasonal");
         assert_eq!(*mock.metadata_calls.lock().unwrap(), vec![42]);
+    }
+
+    #[tokio::test]
+    async fn media_metadata_stored_without_relations_is_fetched_once_more() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let mock = Arc::new(MockTracker::default());
+        let (svc, _events) = service(db.clone(), mock.clone());
+        let old = SeasonalAnime {
+            entry: test_entry(9, "Stored"),
+            popularity: None,
+            metadata: crate::plugins::MediaMetadata::default(),
+        };
+        db.put_media_metadata(1, &old).unwrap();
+
+        assert_eq!(svc.media_metadata(9).await.unwrap().unwrap().entry.title_romaji, "Fetched");
+        assert_eq!(svc.media_metadata(9).await.unwrap().unwrap().entry.title_romaji, "Fetched");
+        assert_eq!(*mock.metadata_calls.lock().unwrap(), vec![9]);
     }
 
     fn activity(id: i64, media_id: i64, status: &str, range: Option<(u32, u32)>, at: i64) -> RemoteListActivity {
