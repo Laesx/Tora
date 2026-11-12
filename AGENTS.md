@@ -224,7 +224,7 @@ Tora/
     │   ├── anitomy/                      # `erengy/anitomy` C++23 source, copied from the `Laesx/anitomy` fork (never edited here)
     │   ├── anitomy.source                # Fork commit and tree hash of that copy, upstream base (`scripts/sync-anitomy.ps1`)
     │   ├── anisthesia/                   # Upstream `erengy/anisthesia` C++20 source + `data/players.anisthesia`
-    │   └── anime-relations/              # Upstream `erengy/anime-relations` (`anime-relations.txt`)
+    │   └── anime-relations/              # Upstream `erengy/anime-relations` (`anime-relations.txt`); a rule added here must also go upstream as a PR (bump `last_modified`): a newer downloaded copy replaces this one
     └── src/
         ├── data_migration.rs             # Moves data from the old `app.tora.anime` identifier's folders (runs in `run()` before the builder)
         ├── logging.rs                    # `tauri-plugin-log` setup (`%APPDATA%\Tora\logs\tora.log`, rotated), panic hook, log tail
