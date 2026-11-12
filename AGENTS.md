@@ -47,11 +47,27 @@ cargo test --manifest-path src-tauri/Cargo.toml
 # Check Rust compilation quickly
 cargo check --manifest-path src-tauri/Cargo.toml
 
-# Before shipping a parser / matcher change: run the one-time repair on a COPY of a real library and
-# print every file that changes owner (never point it at %APPDATA%\Tora\tora_library.db itself)
-$env:TORA_AUDIT_DB = "C:\path\to\copy-of-tora_library.db"
-cargo test --manifest-path src-tauri/Cargo.toml --release matcher_audit -- --ignored --nocapture
-# $env:TORA_AUDIT_EXPLAIN = "part of a path|another" also prints how those files are parsed and matched
+```
+
+### Match Lab (parser / matcher changes) & Anitomy Fork
+```powershell
+# Snapshot the library database (read-only VACUUM INTO; the app's file is never written) into .match-lab\
+scripts/match-lab.ps1 snapshot
+
+# Match every file of the snapshot with the current code, save a report, open the review page
+# (http://127.0.0.1:4719: ground truth review, verdicts, compare with any earlier report)
+scripts/match-lab.ps1 run "label of this iteration"
+
+# Only the review page
+scripts/match-lab.ps1 serve
+
+# Check the obviously right files of the newest report (single-anime folders, by exact title or a folder
+# named after the anime; never changes an existing check), so a person reviews only the rest. Counts without --write
+python scripts/match-lab-accept-obvious.py --write
+
+# Copy Anitomy from a local clone of the fork (never edit src-tauri\vendor\anitomy directly); -Check verifies the copy
+scripts/sync-anitomy.ps1 -Fork D:\path\to\anitomy -Ref tora
+scripts/sync-anitomy.ps1 -Check
 ```
 
 ---
@@ -187,7 +203,11 @@ Tora/
 │   │   └── tora-mark.svg                 # Brand mark (sidebar); same art as the app icon (`design/icons/tora-mark.svg` → `src-tauri/icons`)
 │   └── styles/
 │       └── index.css                     # Tailwind CSS v3 stylesheets, custom theme variables & scrollbars
+├── .match-lab/                           # Match lab data, gitignored (private paths): `snapshots/`, `lab.json`, `truth.json`, `reports/`
 ├── scripts/
+│   ├── match-lab.ps1                     # Builds and runs the match lab (`snapshot`, `run "<label>"`, `serve`) from a copy of its exe
+│   ├── match-lab-accept-obvious.py       # Pre-checks the obviously right files of a report (note "auto: …"; the page's Auto-checked filter)
+│   ├── sync-anitomy.ps1                  # Vendors Anitomy from the fork (`-Fork <clone> -Ref tora`), `-Check` that the copy is the recorded commit
 │   ├── mem-snapshot.ps1                  # Per-process memory / CPU of a running Tora (core + each WebView2 process), `-Watch`, `-Csv`, `-PassThru`
 │   └── bench/
 │       ├── mem-compare.ps1               # Release-builds the working tree (and `-Ref <git ref>`, cached by hash), runs mem-tour on each, prints averages + diff
@@ -199,8 +219,10 @@ Tora/
     ├── cpp/
     │   ├── tora_ffi.h                    # C ABI header bridging C++ Anitomy & Anisthesia to Rust
     │   └── tora_ffi.cpp                  # C++ implementation calling `anitomy::parse` & `anisthesia::win::GetResults`
+    ├── examples/match_lab/               # Match lab (`main.rs`: snapshot / run / review server; `index.html`: the review page)
     ├── vendor/
-    │   ├── anitomy/                      # Upstream `erengy/anitomy` C++23 source
+    │   ├── anitomy/                      # `erengy/anitomy` C++23 source, copied from the `Laesx/anitomy` fork (never edited here)
+    │   ├── anitomy.source                # Fork commit and tree hash of that copy, upstream base (`scripts/sync-anitomy.ps1`)
     │   ├── anisthesia/                   # Upstream `erengy/anisthesia` C++20 source + `data/players.anisthesia`
     │   └── anime-relations/              # Upstream `erengy/anime-relations` (`anime-relations.txt`)
     └── src/
@@ -260,6 +282,8 @@ Tora/
 - Do **not** rewrite Anitomy or Anisthesia in Rust. Both libraries are compiled directly from `src-tauri/vendor/anitomy` and `src-tauri/vendor/anisthesia` via `src-tauri/build.rs` and exposed through `src-tauri/cpp/tora_ffi.h` / `tora_ffi.cpp`.
 - `anitomy` requires `/std:c++latest` (C++23 `std::views::slide`, `std::ranges`), while `anisthesia` is compiled with `/std:c++20` and links against `oleacc.lib` and `uiautomationcore.lib`.
 - The vendored Anitomy is `2.0.0-alpha`, upstream's `develop` rewrite. Taiga 1.4.1 builds against the older released line (`master`, commit `a538eff`). They were compared on a real library of 11,595 files (November 2026): the release found 10,872 episode numbers, the rewrite 10,886; the release fails on dotted names (`Show.S03E01.Title...`) and `01. Title`, the rewrite on "Title 13 - Episode title". So the rewrite stays, and `parse_filename` covers its gaps (section 3). Compare again before swapping.
+- **Anitomy is changed in the fork, `Laesx/anitomy`, never in `src-tauri/vendor/anitomy`.** Its branches: `develop` tracks upstream unchanged; `fix/<name>` holds one fix plus its case in `test/data.json`, cut from `develop` and opened as a PR to `erengy/anitomy`; `tora` = `develop` + our merged fixes, the branch Tora vendors. `scripts/sync-anitomy.ps1 -Fork <clone> -Ref tora` copies it (`git archive`) and writes `src-tauri/vendor/anitomy.source` (commit, tree hash, upstream base); `-Check` fails when the copy differs from the recorded tree. A fix moves into the fork when it is about one name (a checksum read as a type, a release group's number read as the episode); what needs the path or the list stays in `parse_filename`, as in Taiga. Clone the fork outside the repo (e.g. `D:\dev\anitomy`, `upstream` = erengy); run the sync from PowerShell (Git Bash's `tar` can't read Windows paths). `build.rs` watches `vendor/anitomy/include`, so a sync rebuilds the FFI.
+- `anitomy_corpus` (`detection/anitomy.rs`) runs upstream's corpus (`test/data.json`) through Tora's FFI and build flags, compared like upstream's `test/main.cpp --test-data`. `ANITOMY_CORPUS_KNOWN_FAILURES` lists the cases the vendored version parses differently: a fork change that breaks another case fails the test, and one that fixes a listed case must remove it.
 - `tora_anitomy_parse` takes `flags` (`TORA_ANITOMY_NO_*`): directory names are parsed without episode, episode title and extension, as Taiga does.
 
 ### 3. Episode Recognition: Parse, Then Match
@@ -267,7 +291,7 @@ A match is a **pure function of (path, parse, index)**: nothing is remembered fr
 
 **Parse** (`parse_filename` in `src-tauri/src/detection/anitomy.rs`), depends only on the input string:
 1. **C++ Anitomy tokenization**: raw `Title`, `Season`, `Episode`, `ReleaseGroup`, `VideoResolution`, etc. Anitomy v2 strips `S02` / `2nd Season` / `Part 2` out of the title.
-2. **Fallbacks for names Anitomy 2 does not split**: "Title 13 - Episode title" (`NUMBER_BEFORE_DASH`; the released Anitomy that Taiga uses reads it), a number that starts the name (`leading_number`, only used when the anime is known from its folder). Opening / ending / preview types never carry an episode number. Two Anitomy 2 misreads are undone: a checksum that starts with a type keyword (`[ED204890]` read as an ending, `fix_type_read_from_checksum`) and the number of an unknown release group read as the episode (`[Y-467] Movie Title`, `fix_episode_read_from_release_group`).
+2. **Fallbacks**: a number that starts the name (`leading_number`, only used when the anime is known from its folder). Opening / ending / preview types never carry an episode number. Name-only misreads are fixed in the fork, not here: `[ED204890]` read as an ending, `[Y-467] Movie Title` read as episode 467, "Title 13 - Episode title" without an episode (the `tora` branch's `fix/*` commits, cases in `test/data.json`).
 3. **Parent folders** (the two nearest, like Taiga's `GetTitleFromPath`): a season-only folder gives the season, the first titled one gives `parent_title` (an ordering prefix like `06 - ` is dropped) and replaces a weak title (`01.mkv`). When the season only came from a folder, `own_title` keeps the title without it ("Season 2\Non Non Biyori Repeat - 01").
 4. **`ExtendAnimeTitle`**: appends `Season N` / `Part N` when `season > 1` or `part > 1`.
 5. **No relations, no list**: `parse_filename` must never call `relations_db()` or look at the user's entries.
@@ -281,7 +305,7 @@ A match is a **pure function of (path, parse, index)**: nothing is remembered fr
    - a name that matches no title belongs to the folder's entry ("Tambor Pinguino - 03").
 3. **Fuzzy** (`fuzzy_match`): same season only; a nearly identical title beats an abbreviation, which beats a title the name extends, which beats letters that are only similar (`FuzzyTier`); rivals within `FUZZY_RIVAL_MARGIN` are only accepted when their titles form one chain, otherwise the name is ambiguous and stays unmatched ("fate" against every Fate entry). When the season came only from a folder, the name without it is guessed the same way (`own_title_fuzzy`: `Season 3\Show - Goddesses Arc - 04` → "Show: Goddesses"). Then the parent folder's own name, exact only (`MatchKind::Directory`).
 4. **Never a file of one season on the entry of another**: `folder_entries_for` drops entries of the same series with another season, the series as the name states it or, when the season came from a `Season N` folder, as the folders do.
-5. **Specials are not episodes** (`names_a_special`): a guessed or folder match whose name adds a marker word (`SPECIAL_MARKERS`: "Especial", "OVA", "Mini"...) or, for a guess from a longer name, more than a short tag, keeps the anime but gets no episode number.
+5. **Specials are not episodes** (`names_a_special`): a guessed or folder match whose name adds a marker word (`SPECIAL_MARKERS`: "Especial", "OVA", "Mini"...) or, for a guess from a longer name, more than a short tag, keeps the anime but gets no episode number. A guess that hit an entry whose AniList format is OVA / special / ONA (`special_formats`) keeps its number ("Kiss X Sis OVA - 01"). Season 0 (`S00E10`) is the specials season: never an episode of the series (except on an alias or a special-format entry). A name between two episodes ("05.5", `between_episodes`) is a recap or an OVA: it is matched as episode 5 would be, then loses the number (`resolve`), so "play episode 5" never opens it. A year in the name picks the entry that started that year, also for `own_title` ("Season 3\Rozen Maiden (2013) - 01").
 6. **Episode** (`finish`, a port of Taiga's `ValidateEpisodeNumber`): in range, done. Episode 0 or past the total: `anime-relations` by ID from the entry, then from the base title's entries, then a rule for the exact title whose destination is on the list by ID, then the list's own "`<title> N`" seasons. A valid episode is never redirected. Still no home: unmatched (an alias keeps the file; a folder match tries the linked folders above).
 7. **Unmatched media**: if `matched_anime_id` is `None`, **never** auto-update or run the scrobble countdown. Focus the `Now Playing` tab and prompt the user to link the episode via `link_detected_episode_to_anime` (`Database::link_alias_to_anime`), which persists the relation in `title_aliases` and the anime's `synonyms` / `custom_synonyms`.
 
@@ -290,7 +314,7 @@ Rules that keep it that way:
 - `local_episodes.match_kind` (`alias | title | folder | directory | fuzzy | relation`) says what decided a match; `parsed_episode` is the number in the name, `episode_number` the matched entry's episode.
 - Relation lookups are by ID (`find_by_id`, `season_by_id`) or by **exact** title (`find_by_exact_title`): never by title prefix.
 - Stored matches are versioned by `LIBRARY_MATCH_VERSION` (`library/scanner.rs`). Bump it when a parser or matcher change should reach files that are already indexed: the next startup scan runs `repair_library_matches` (normalizes titles again, rematches everything, clears folder links the files contradict).
-- Check a matcher change against a real library before shipping: `matcher_audit` (below) runs the repair on a **copy** of a database and prints every file that changes owner.
+- **Check every parser / matcher change in the match lab before shipping** (`src-tauri/examples/match_lab`, commands above). `run` copies the current snapshot, runs `Database::rematch_from_index` on the copy (the one-time repair without the disk walk: deterministic for a snapshot and the code) and saves a report: each file's parse and result (AniList ID, episode, `match_kind`), the folder links, the list. The review page scores every report against `.match-lab/truth.json`, the user's checked answer per file (`anilist_id: null` = must stay unmatched; an ID with `episode: null` = an extra): **wrong anime** and **unexpected** (matched, should not be) are the costly verdicts, then missed, wrong episode, correct, unreviewed. Keep a change only if it adds no costly verdict. Reports store raw output, so a corrected truth rescores every report. `verdict()` exists in `main.rs` (CLI summary, Reports view counts) and `index.html` (Review view): keep them equal.
 
 ### 4. Zero-Polling Win32 IOCP Directory Monitoring & Incremental Scanning
 - **Native Win32 IOCP Monitor (`LibraryMonitorHandle`)**:
@@ -391,7 +415,7 @@ Rules that keep it that way:
 - **Dates and times**: WebView2's locale follows the Windows display language (wry sets it), not the regional format, and `<input type="date">` can't be told otherwise. So the app formats them itself: `AppSettings.date_locale` (empty = Auto, the Windows regional locale from `get_system_locale`) and `time_format` (`auto` | `24h` | `12h`), mirrored into `src/lib/dates.ts` from App's body. Pass `dateLocale()` to `toLocaleDateString`, use `formatTime` / `formatDateTime` for anything showing a time (`hourCycle`, because `hour12: false` shows midnight as 24:00 in en-US), `formatDate` for stored `YYYY-MM-DD` values, `todayIso()` for today, and `DateInput` for editing. No module-level constants holding formatted dates: App keys the tab content on these settings so a change redraws every label.
 
 ### 7b. Logging & Crash Reporting
-- **Rust**: use the `log` macros with a short subsystem target (`log::warn!(target: "sync", …)`: `app`, `sync`, `anilist`, `playback`, `scrobble`, `library`, `matcher`, `torrents`, `relations`, `settings`, `discord`, `webview`), never `println!` / `eprintln!` (exception: `data_migration`, which runs before the logger exists, and benchmark output in tests). `logging::plugin` is registered right after single-instance in `run()`: a file in `%APPDATA%\Tora\logs` (`tora.log`, 5 MB, last 5 kept) plus stdout in debug builds; `Debug` level in debug builds, `Info` in release, dependencies at `Warn`. A panic hook logs panics with their location.
+- **Rust**: use the `log` macros with a short subsystem target (`log::warn!(target: "sync", …)`: `app`, `sync`, `anilist`, `playback`, `scrobble`, `library`, `matcher`, `torrents`, `relations`, `settings`, `discord`, `webview`), never `println!` / `eprintln!` (exception: `data_migration`, which runs before the logger exists, benchmark output in tests, and the match lab, a command-line tool). `logging::plugin` is registered right after single-instance in `run()`: a file in `%APPDATA%\Tora\logs` (`tora.log`, 5 MB, last 5 kept) plus stdout in debug builds; `Debug` level in debug builds, `Info` in release, dependencies at `Warn`. A panic hook logs panics with their location.
 - **Frontend**: `log` from `src/lib/log.ts` writes to the same file (`@tauri-apps/plugin-log`, `log:default` capability) and to the console in dev; no bare `console.*`. `toraApi` logs every failed command (rate-limited per command); uncaught errors and unhandled rejections are logged from `main.tsx`; `ErrorBoundary` wraps the root and the tab content (keyed by tab) so a render error never leaves an empty window.
 - **Levels**: `error` = a bug or lost work, `warn` = a failed operation that the user may notice (sync, network, file), `info` = one line per meaningful event (startup, pull summary, scan, session start/end, scrobble, downloads), `debug` = detail (each AniList request, watcher batches).
 - **Never log** the AniList token, GraphQL variables, request bodies, notes or file contents; titles and paths are fine. Hot paths (the 2.5 s recognition poll, per-file matching, per-release evaluation) log only state changes, never every pass.

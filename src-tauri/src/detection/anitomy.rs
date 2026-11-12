@@ -43,6 +43,10 @@ pub struct AnitomyElements {
     /// ("25 Spice Girl.mkv"). Only used when the anime is known from its folder.
     #[serde(skip)]
     pub leading_number: Option<u32>,
+    /// The name puts the file between two episodes ("05.5", "S01E05.5"): `episode_number` is the one
+    /// before it, used to find the anime, but the file is a recap or an OVA, not that episode.
+    #[serde(skip)]
+    pub between_episodes: bool,
 }
 
 /// Matches `anitomy::ElementKind` from `vendor/anitomy/include/anitomy/element.hpp`.
@@ -511,63 +515,12 @@ fn is_extra_type(anime_type: Option<&str>) -> bool {
     })
 }
 
-/// "Black Lagoon 13 - Llegan los vampiros": title, episode number, episode title. Anitomy 2 leaves a number
-/// between two words in the title; the released Anitomy (Taiga) reads it as the episode.
-static NUMBER_BEFORE_DASH: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^(.*?\p{L}.*?)\s+(\d{1,3})\s+[-\x{2013}]\s+(\S.*)$").expect("regex"));
-
 /// A number that starts the file name: "25 Spice Girl", "14 Justice - Parte 1", "06_title".
 static LEADING_NUMBER: Lazy<Regex> = Lazy::new(|| Regex::new(r"^(\d{1,3})[\s._-]+\S").expect("regex"));
 
-/// A CRC32 checksum in brackets: "[ED204890]".
-static BRACKETED_CHECKSUM: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"[\[(]([0-9A-Fa-f]{8})[\])]").expect("regex"));
-
-/// The bracket that starts a name ("[Y-467] Title ..."), usually the release group.
-static LEADING_BRACKET: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\[([^\[\]]+)\]").expect("regex"));
-
-static DIGITS: Lazy<Regex> = Lazy::new(|| Regex::new(r"\d+").expect("regex"));
-
-/// Anitomy 2 reads a checksum that starts with a type keyword as that type: "[ED204890]" becomes the
-/// type "ED" (an ending) and no checksum. Gives the checksum back and drops the type.
-fn fix_type_read_from_checksum(base_name: &str, elements: &mut AnitomyElements) {
-    if elements.file_checksum.is_some() {
-        return;
-    }
-    let Some(kind) = elements.anime_type.as_deref().map(str::to_ascii_uppercase) else { return };
-    let checksum = BRACKETED_CHECKSUM
-        .captures_iter(base_name)
-        .map(|caps| caps[1].to_string())
-        .find(|crc| crc.to_ascii_uppercase().starts_with(&kind));
-    if let Some(crc) = checksum {
-        elements.file_checksum = Some(crc);
-        elements.anime_type = None;
-    }
-}
-
-/// Anitomy 2 takes the number of a release group it does not know for the episode: "[Y-467] Josee to
-/// Tora to Sakanatachi 804p BD" is no episode 467. When the only place the number appears is the
-/// leading bracket, that bracket is the release group and the name has no episode.
-fn fix_episode_read_from_release_group(base_name: &str, elements: &mut AnitomyElements) {
-    if elements.release_group.is_some() {
-        return;
-    }
-    let Some(episode) = elements.episode_number else { return };
-    let Some(caps) = LEADING_BRACKET.captures(base_name) else { return };
-    let group = caps[1].trim();
-    if !group.chars().any(|c| c.is_alphabetic()) {
-        return; // "[01] Title": a number in brackets can be the episode
-    }
-    let is_episode = |m: regex::Match| m.as_str().parse::<u32>().ok() == Some(episode);
-    let in_group = DIGITS.find_iter(group).last().map_or(false, is_episode);
-    let elsewhere = DIGITS.find_iter(&base_name[caps.get(0).map_or(0, |m| m.end())..]).any(is_episode);
-    if in_group && !elsewhere {
-        elements.release_group = Some(group.to_string());
-        elements.episode_number = None;
-        elements.episode_number_alt = None;
-        elements.is_batch = false;
-    }
-}
+/// "05.5", "S01E05.5", "Hyouka_11.5_": a file between episode 5 and 6 (a recap, an OVA). Not "5.1" audio,
+/// "2.0x4", "3.33".
+static HALF_EPISODE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?:^|[^\d.])(\d{1,4})\.5(?:[^\d.]|\.\p{L}|$)").expect("regex"));
 
 /// "06 - Initial D Fourth Stage", "2 - Zero no Tsukaima F": a number that only orders the folders of a
 /// franchise.
@@ -638,8 +591,11 @@ pub fn parse_filename(input: &str) -> AnitomyElements {
     let mut state = parse_raw_with_cpp_anitomy(base_name, 0);
     state.elements.file_name = input.to_string();
     state.elements.anime_year = state.anime_year;
-    fix_type_read_from_checksum(base_name, &mut state.elements);
-    fix_episode_read_from_release_group(base_name, &mut state.elements);
+    state.elements.between_episodes = state.elements.episode_number.map_or(false, |n| {
+        HALF_EPISODE
+            .captures_iter(base_name)
+            .any(|caps| caps[1].parse::<u32>().ok() == Some(n))
+    });
 
     if is_extra_type(state.elements.anime_type.as_deref()) {
         // "NCOP 2", "ED 01": the number counts openings, not episodes
@@ -647,19 +603,9 @@ pub fn parse_filename(input: &str) -> AnitomyElements {
         state.elements.episode_number_alt = None;
         state.elements.is_batch = false;
     } else if state.elements.episode_number.is_none() && state.elements.volume_number.is_none() {
-        let split = NUMBER_BEFORE_DASH.captures(&state.elements.anime_title).and_then(|caps| {
-            let episode = caps[2].parse::<u32>().ok()?;
-            Some((caps[1].trim().to_string(), episode, caps[3].trim().to_string()))
-        });
-        if let Some((title, episode, episode_title)) = split {
-            state.elements.anime_title = title;
-            state.elements.episode_number = Some(episode);
-            state.elements.episode_title = Some(episode_title);
-        } else {
-            state.elements.leading_number = LEADING_NUMBER
-                .captures(base_name)
-                .and_then(|caps| caps[1].parse::<u32>().ok());
-        }
+        state.elements.leading_number = LEADING_NUMBER
+            .captures(base_name)
+            .and_then(|caps| caps[1].parse::<u32>().ok());
     }
 
     // Parent directories (the two nearest, like Taiga): a season-only folder ("Season 2") gives the season,
@@ -731,8 +677,180 @@ pub fn parse_filename(input: &str) -> AnitomyElements {
 mod tests {
     use super::*;
 
+    /// Inputs of upstream's corpus that the vendored Anitomy parses differently from `data.json`.
+    /// A fork change that fixes one must remove it here; one that breaks another case fails the test.
+    const ANITOMY_CORPUS_KNOWN_FAILURES: &[&str] = &[
+        r#"[BakaWolf-m.3.3.w] Special A 01 (H.264) [C83164B9].mkv"#,
+        r#"[Juuni.Kokki]-(Les.12.Royaumes)-[Ep.24]-[x264+OGG]-[JAP+FR+Sub.FR]-[Chap]-[AzF].mkv"#,
+        r#"Code_Geass_R2_TV_[20_of_25]_[ru_jp]_[HDTV]_[Varies_&_Cuba77_&_AnimeReactor_RU].mkv"#,
+        r#"Noein_[01_of_24]_[ru_jp]_[bodlerov_&_torrents_ru].mkv"#,
+        r#"Fate_Stay_Night_Ep05_The_Two_Magi_Part1_[720p,BluRay,x264]_-_THORA.mkv"#,
+        r#"[Keroro].148.[Xvid.mp3].[FE68D5F1].avi"#,
+        r#"Macross Frontier - Sayonara no Tsubasa (Central Anime, 720p) [46B35E25].mkv"#,
+        r#"[Raizel] Persona 4 The Animation Episode 13 - A Stormy Summer Vacation Part 1  [BD_1080p_Dual_Audio_FLAC_Hi10p][8A45634B].mkv"#,
+        r#"[Mobile Suit Gundam Seed Destiny HD REMASTER][07][Big5][720p][AVC_AAC][encoded by SEED].mp4"#,
+        r#"「K」 Image Blu-ray WHITE & BLACK - Main (BD 1280x720 AVC AAC).mp4"#,
+        r#"[[Zero-Raws] Shingeki no Kyojin - 05 (MBS 1280x720 x264 AAC).mp4"#,
+        r#"[Hakugetsu&MGRT][Evangelion 3.0 You Can (Not) Redo][480P][V0].mp4"#,
+        r#"[TV-J] Kidou Senshi Gundam UC Unicorn - episode.02 [BD 1920x1080 h264+AAC(5.1ch JP+EN) +Sub(JP-EN-SP-FR-CH) Chap].mp4"#,
+        r#"[UTW-THORA] Evangelion 3.33 You Can (Not) Redo [BD][1080p,x264,flac][F2060CF5].mkv"#,
+        r#"[Zero-Raws] Shingeki no Kyojin - 25 END (MBS 1280x720 x264 AAC).mp4"#,
+        r#"【MMZYSUB】★【Golden Time】[24（END）][GB][720P_MP4]"#,
+        r#"[異域字幕組][漆黑的子彈][Black Bullet][11][1280x720][繁体].mp4"#,
+        r#"[AoJiaoZero][Mangaka-san to Assistant-san to the Animation] 02 [BIG][X264_AAC][720P].mp4"#,
+        r#"Attack on Titan - Episode 3 - A Dim Light Amid Despair / Humanity's Comeback, Part 1"#,
+        r#"DRAMAtical Murder Episode 1 - Data_01_Login"#,
+        r#"__BLUE DROP 10 (1).avi"#,
+        r#"37 [Ruberia]_Death_Note_-_37v2_[FINAL]_[XviD][6FA7D273].avi"#,
+        r#"[UTW]_Accel_World_-_EX01_[BD][h264-720p_AAC][3E56EE18].mkv"#,
+        r#"[Urusai]_Bokura_Ga_Ita_01_[DVD_h264_AC3]_[BFCE1627][Fixed].mkv"#,
+        r#"[CH] Sword Art Online Extra Edition Dual Audio [BD 480p][10bitH.264+Vorbis]"#,
+        r#"EvoBot.[Watakushi]_Akuma_no_Riddle_-_01v2_[720p][69A307A2].mkv"#,
+        r#"Episode 14 Ore no Imouto ga Konnani Kawaii Wake ga Nai. (saison 2) VOSTFR"#,
+        r#"[Yuurisan-Subs]_Darker_than_Black_-_Gemini_of_the_Meteor_-_01v2_[65274FDE].patch.7z"#,
+        r#"[Coalgirls]_Fate_Zero_OVA3.5_(1280x720_Blu-ray_FLAC)_[5F5AD026].mkv"#,
+        r#"[SpoonSubs]_Hidamari_Sketch_x365_-_04.1_(DVD)[B6CE8458].mkv"#,
+        r#"[Hatsuyuki]_Kuroko_no_Basuke_S3_-_01_(51)_[720p][10bit][619C57A0].mkv"#,
+        r#"[Elysium]Sora.no.Woto.EP07.5(BD.720p.AAC)[C37580F8].mkv"#,
+        r#"[Hiryuu] Maji de Watashi ni Koi Shinasai!! - 02 [720].mkv"#,
+        r#"[ANE] Yosuga no Sora - Ep01 Preview (Yorihime ver) [BDRip 1080p x264 FLAC].mkv"#,
+        r#"[B-G_&_m.3.3.w]_Myself_Yourself_12.DVD(H.264_DD2.0)_[CB2B37F1].mkv"#,
+        r#"The.Animatrix.08.A.Detective.Story.720p.BluRay.DTS.x264-ESiR.mkv"#,
+        r#"[ReDone] Memories Off 3.5 - 04 (DVD 10-bit).mkv"#,
+        r#"[Hatsuyuki] Dragon Ball Kai (2014) - 002 (100) [1280x720][DD66AFB7].mkv"#,
+        r#"[Deep] Tegami Bachi (REVERSE) - Letter Bee - 29 (04) [5203142B].mkv"#,
+        r#"[FB] Crayon Shin-Chan Movie 2 The Secret of Buri Buri Kingdom [DivX5 AC3] 1994 [852X480] V2.avi"#,
+        r#"[Hatsuyuki-Kaitou]_Fairy_Tail_2_-_52_(227)_[720p][10bit][9DF6B8D5].mkv"#,
+        r#"[5F] RWBY 14 Forever Fall Part 2 pt-BR.mp4"#,
+        r#"[Anime"#,
+        r#"[BM&T] Toradora! - 07v2 - Pool Opening [720p Hi10 ] [BD] [8F59F2BA]"#,
+        r#"Fairy Tail - S06E32 - Tartaros Arc Iron Fist of the Fire Dragon [Episode 83]"#,
+        r#"Noragami - S02E06 - What Must Be Done [Episode 6]"#,
+        r#"[GS] Classroom Crisis Vol.1&2 (BD 1080p 10bit FLAC)"#,
+        r#"[(´• ω •`)] Nintama Rantarou - S23E1821 - Buddhist Priest-sama is a Ninja.mkv"#,
+        r#"05 - Hidan no Aria - Butei Charter Article 1 - [UTW](E7724B68).mkv"#,
+        r#"Piano no Mori 2 (TV)"#,
+        r#"One Piece - 1080"#,
+        r#"Detective-Conan-656 Professor's Video Site (Part 1)"#,
+        r#"The.Eminence.in.Shadow.S01E05.I.Am....1080p.BluRay.DD2.0.x265-ExCaLiBuR.mkv"#,
+        r#"[xPearse] Great Mazinger - Episode 55 Preview [English Sub] [480p].mkv"#,
+        r#"[Erai-raws] NieR-Automata Ver1_1a - 02 [1080p][Multiple Subtitle][5BCD4615].mkv"#,
+        r#"[Erai-raws] NieR-Automata Ver1_1a Part 2 - 03 [1080p][Multiple Subtitle][AAF0612D].mkv"#,
+        r#"Highschool.of.the.Dead.S00E01.v2.Drifters.of.the.Dead.1080p-Hi10p.BluRay.FLAC5.1.x264-CTR.[32FD04E5].mkv"#,
+        r#"[CBM]_Monster_-_11_-_511_Kinderheim_[6C70C4E4].mkv"#,
+        r#"Mahoutsukai Reimeiki E06v1.5 [1080p][AAC][JapDub][GerEngSub][Web-DL].mkv"#,
+        r#"[Erai-raws] Ranma 1-2 (2024) - 03 [1080p][Multiple Subtitle]"#,
+        r#"[Genderbender] Ranma 1+2 (2024) - 01 [HEVC 1080p] [Dual Audio].mkv"#,
+        r#"Ranma.1-2.2024.S01E11.You.I.Love.1080p.NF.WEB-DL.AAC2.0.H.264.MULTi-VARYG.mkv"#,
+        r#"[Erai-raws] Vanitas no Karte 2nd Cour - 01 [1080p][Multiple Subtitle][DE38A9CD].mkv"#,
+        r#"[pat-e] The Devil is a Part-Timer! - Season 1 (BD 1080p AV1 Opus) [Dual Audio] | Hataraku Maou-sama! - S01"#,
+        r#"[Judas] Sword Art Online S3 P2 - 01.mkv"#,
+        r#"My.Hero.Academia.S04.P2.CRF-16.1080p.Blu-Ray.10-Bit.Dual-Audio.TrueHD.x265-iAHD"#,
+    ];
+
+    /// Anitomy's own corpus (`vendor/anitomy/test/data.json`) through Tora's FFI and build flags, compared
+    /// the way upstream's `test/main.cpp --test-data` does: per element kind, values joined with ", ",
+    /// both missing and extra elements. Upstream builds it with CMake; this catches a fork change that
+    /// behaves differently in Tora's build.
     #[test]
-    fn anitomy_misreads_that_are_undone() {
+    fn anitomy_corpus() {
+        // `anitomy::ElementKind` order (`detail/format.hpp`)
+        const KIND_NAMES: [&str; 21] = [
+            "audio_term", "device", "episode", "episode_title", "file_checksum", "file_extension", "language",
+            "other", "part", "release_group", "release_information", "release_version", "season", "source",
+            "subtitles", "title", "type", "video_resolution", "video_term", "volume", "year",
+        ];
+        extern "C" fn collect(user_data: *mut c_void, kind: c_int, value_ptr: *const c_char, value_len: usize, _pos: usize) {
+            let elements = unsafe { &mut *(user_data as *mut Vec<(c_int, String)>) };
+            let value = if value_ptr.is_null() {
+                String::new()
+            } else {
+                String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(value_ptr as *const u8, value_len) })
+                    .into_owned()
+            };
+            elements.push((kind, value));
+        }
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("vendor/anitomy/test/data.json");
+        let data: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read data.json")).expect("parse data.json");
+        let mut failures: Vec<(String, Vec<String>)> = Vec::new();
+        for case in data.as_array().expect("an array of cases") {
+            let input = case["input"].as_str().expect("input");
+            let mut raw: Vec<(c_int, String)> = Vec::new();
+            unsafe {
+                tora_anitomy_parse(
+                    input.as_ptr() as *const c_char,
+                    input.len(),
+                    0,
+                    &mut raw as *mut Vec<(c_int, String)> as *mut c_void,
+                    collect,
+                );
+            }
+            let mut parsed: std::collections::BTreeMap<&str, Vec<String>> = Default::default();
+            for (kind, value) in raw {
+                let name = KIND_NAMES.get(kind as usize).copied().unwrap_or("?");
+                parsed.entry(name).or_default().push(value);
+            }
+            let expected = case["output"].as_object().expect("output");
+            let mut diffs = Vec::new();
+            for (name, value) in expected {
+                let want = match value {
+                    serde_json::Value::Array(values) => {
+                        values.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", ")
+                    }
+                    other => other.as_str().unwrap_or_default().to_string(),
+                };
+                let got = parsed.get(name.as_str()).map(|v| v.join(", ")).unwrap_or_default();
+                if want != got {
+                    diffs.push(format!("{name}: expected {want:?}, got {got:?}"));
+                }
+            }
+            for (name, values) in &parsed {
+                if !expected.contains_key(*name) {
+                    diffs.push(format!("{name}: expected nothing, got {:?}", values.join(", ")));
+                }
+            }
+            if !diffs.is_empty() {
+                failures.push((input.to_string(), diffs));
+            }
+        }
+
+        let known: std::collections::HashSet<&str> = ANITOMY_CORPUS_KNOWN_FAILURES.iter().copied().collect();
+        let new: Vec<String> = failures
+            .iter()
+            .filter(|(input, _)| !known.contains(input.as_str()))
+            .map(|(input, diffs)| format!("{input}\n    {}", diffs.join("\n    ")))
+            .collect();
+        let failing: std::collections::HashSet<&str> = failures.iter().map(|(i, _)| i.as_str()).collect();
+        let fixed: Vec<&str> = ANITOMY_CORPUS_KNOWN_FAILURES.iter().copied().filter(|i| !failing.contains(i)).collect();
+        assert!(new.is_empty(), "{} corpus case(s) newly differ:\n{}", new.len(), new.join("\n"));
+        assert!(fixed.is_empty(), "now parsed as data.json says, remove from ANITOMY_CORPUS_KNOWN_FAILURES:\n{}", fixed.join("\n"));
+    }
+
+    #[test]
+    fn half_episodes_are_between_episodes() {
+        for name in [
+            "[Commie] Girls und Panzer - 5.5 [56CF43E1].mkv",
+            "Link Click S01E05.5.mkv",
+            "[Coalgirls]_Hyouka_11.5_(1920x1080_Blu-Ray_FLAC)_[0428AD73].mkv",
+        ] {
+            let res = parse_filename(name);
+            assert!(res.between_episodes, "{name}");
+            assert!(res.episode_number.is_some(), "{name}");
+        }
+        for name in [
+            "[Group] Show - 05 [BD 1080p DDP5.1].mkv",
+            "Evangelion 3.33 You Can (Not) Redo [BD].mkv",
+            "[Group] Show - 05 (BDRip x265 AC3 2.0x2).mkv",
+        ] {
+            assert!(!parse_filename(name).between_episodes, "{name}");
+        }
+    }
+
+    #[test]
+    fn names_anitomy_used_to_misread() {
+        // Fixed in the fork (`Laesx/anitomy`, AGENTS.md section 2); kept here as the names that broke.
         // A checksum that starts with "ED" is no ending
         let ed = parse_filename("[AD]Clannad ~AFTER STORY~ - 10 (BD 1080p) [ED204890].mkv");
         assert_eq!(ed.episode_number, Some(10));

@@ -327,6 +327,49 @@ inline std::vector<Element> parse_episode(std::span<Token> tokens) noexcept {
     }
   }
 
+  // Number before a dash (e.g. `Title 13 - Episode Title`), when no other rule found an episode
+  {
+    static constexpr auto is_space_token = [](const Token& token) {
+      return is_delimiter_token(token) && (is_space(token.value.front()) || token.value == "_");
+    };
+
+    static constexpr auto is_dash_like_token = [](const Token& token) {
+      return is_dash_token(token) || token.value == "\xE2\x80\x93";  // `-`, `–`
+    };
+
+    // Spaces, a dash, spaces, then a word
+    static constexpr auto is_followed_by_dash = [](std::span<Token> tokens, auto it) {
+      auto at = std::next(it);
+      if (at == tokens.end() || !is_space_token(*at)) return false;
+      at = std::ranges::find_if_not(at, tokens.end(), is_space_token);
+      if (at == tokens.end() || !is_dash_like_token(*at)) return false;
+      auto after = std::next(at);
+      if (after == tokens.end() || !is_space_token(*after)) return false;
+      after = std::ranges::find_if_not(after, tokens.end(), is_space_token);
+      return after != tokens.end() && is_free_token(*after) && !is_enclosed_token(*after);
+    };
+
+    for (auto it = tokens.begin(); it != tokens.end(); ++it) {
+      if (!is_free_token(*it) || !is_numeric_token(*it) || is_enclosed_token(*it)) continue;
+      // One digit after a title is more often a sequel (e.g. `Kiddy Grade 2 - Pilot`)
+      if (it->value.size() < 2 || it->value.size() > 3) continue;
+      if (it == tokens.begin() || !is_space_token(*std::prev(it))) continue;
+
+      const auto prev_token = find_prev_token(tokens, it, is_not_delimiter_token);
+      if (prev_token == tokens.end() || !is_free_token(*prev_token)) continue;
+      if (is_numeric_token(*prev_token) || is_enclosed_token(*prev_token)) continue;
+      const auto& value = prev_token->value;
+      if (equal(value, "Cour") || equal(value, "Part")) continue;  // e.g. `Part 2 - Title`
+      if (equal(value, "Movie")) continue;                         // e.g. `Movie 9 - Title`
+      if (equal(value, "No")) continue;                            // e.g. `No. 6 - Title`
+
+      if (!is_followed_by_dash(tokens, it)) continue;
+
+      add_element_from_token(ElementKind::Episode, *it);
+      return elements;
+    }
+  }
+
   return elements;
 }
 

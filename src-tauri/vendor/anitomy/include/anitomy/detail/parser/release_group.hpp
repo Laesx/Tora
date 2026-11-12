@@ -71,4 +71,25 @@ inline std::optional<Element> parse_release_group(std::span<Token> tokens) noexc
   };
 }
 
+// A bracket that starts the name and holds a word is the release group (e.g. `[Y-467] Title`).
+// It is parsed before the episode, so that a number in it is never read as the episode.
+inline std::optional<Element> parse_leading_release_group(std::span<Token> tokens) noexcept {
+  if (tokens.empty() || !is_open_bracket_token(tokens.front())) return {};
+
+  const auto first = std::next(tokens.begin());
+  const auto last = std::find_if(first, tokens.end(), is_bracket_token);
+  if (last == tokens.end() || !is_close_bracket_token(*last)) return {};
+
+  const auto is_free_or_delimiter = [](const Token& token) {
+    return is_free_token(token) || is_delimiter_token(token);
+  };
+  const auto is_word = [](const Token& token) {
+    return is_free_token(token) && !is_numeric_token(token);
+  };
+  if (!std::all_of(first, last, is_free_or_delimiter)) return {};
+  if (!std::any_of(first, last, is_word)) return {};
+
+  return parse_release_group({first, last});
+}
+
 }  // namespace anitomy::detail

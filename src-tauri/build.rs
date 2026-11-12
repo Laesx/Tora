@@ -42,6 +42,9 @@ fn main() {
 
     println!("cargo:rerun-if-changed=cpp/tora_ffi.h");
     println!("cargo:rerun-if-changed=cpp/tora_ffi.cpp");
+    // The vendored libraries are header-only: a sync must rebuild the FFI (a directory is watched whole)
+    println!("cargo:rerun-if-changed=vendor/anitomy/include");
+    println!("cargo:rerun-if-changed=vendor/anisthesia/include");
     println!("cargo:rerun-if-changed=vendor/anisthesia/data/players.anisthesia");
     println!("cargo:rerun-if-changed=vendor/anime-relations/anime-relations.txt");
 

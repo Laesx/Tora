@@ -1,0 +1,1025 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Match lab</title>
+<style>
+  :root {
+    --bg: #f6f6f4; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --line: #e3e2dd; --hover: #f0efeb;
+    --focus: #2f6fdb; --accent: #2f6fdb;
+    --ok: #2e7d4f; --ok-bg: #e3f2e8; --bad: #b3261e; --bad-bg: #fbe4e1; --warn: #8a5a00; --warn-bg: #fdf0d5;
+    --info: #3d5a99; --info-bg: #e5ebf8; --none: #6b6b66; --none-bg: #ecebe7;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161615; --panel: #1f1f1d; --text: #e8e7e3; --muted: #9a9993; --line: #33332f; --hover: #2a2a27;
+      --focus: #6f9cf0; --accent: #6f9cf0;
+      --ok: #7dcf9c; --ok-bg: #1f3428; --bad: #f2a097; --bad-bg: #3d2220; --warn: #f0c46a; --warn-bg: #3a2f17;
+      --info: #a9bdf0; --info-bg: #232c42; --none: #9a9993; --none-bg: #2c2c29;
+    }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.4 system-ui, "Segoe UI", sans-serif; }
+  header { position: sticky; top: 0; z-index: 5; background: var(--panel); border-bottom: 1px solid var(--line); padding: 10px 16px; display: grid; gap: 8px; }
+  .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  h1 { font-size: 15px; margin: 0 12px 0 0; }
+  button, select, input { font: inherit; color: inherit; }
+  button { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 3px 9px; cursor: pointer; }
+  button:hover { background: var(--hover); }
+  button.on { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  button.small { padding: 1px 6px; font-size: 12px; }
+  select, input[type=search] { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; max-width: 420px; }
+  input[type=search] { width: 280px; }
+  .muted { color: var(--muted); }
+  .spacer { flex: 1; }
+  .chip { display: inline-flex; gap: 4px; align-items: baseline; border-radius: 10px; padding: 0 7px; font-size: 12px; white-space: nowrap; }
+  .v-correct { background: var(--ok-bg); color: var(--ok); }
+  .v-wrong, .v-unexpected { background: var(--bad-bg); color: var(--bad); }
+  .v-missed, .v-episode { background: var(--warn-bg); color: var(--warn); }
+  .v-unreviewed { background: var(--none-bg); color: var(--none); }
+  .v-changed { background: var(--info-bg); color: var(--info); }
+  .delta { font-size: 11px; opacity: .8; }
+  main { padding: 10px 16px 80px; }
+  .group { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; margin-bottom: 4px; }
+  .ghead { display: grid; grid-template-columns: 16px minmax(220px, 2fr) minmax(200px, 3fr) auto; gap: 10px; align-items: center; padding: 5px 10px; cursor: pointer; }
+  .ghead:hover { background: var(--hover); }
+  .focus { outline: 2px solid var(--focus); outline-offset: -2px; border-radius: 8px; }
+  .gpath { overflow-wrap: anywhere; }
+  .gpath .root { color: var(--muted); }
+  .gsum { color: var(--muted); overflow-wrap: anywhere; }
+  .gbadges { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+  .gactions { display: flex; gap: 6px; flex-wrap: wrap; padding: 4px 10px 6px 36px; border-top: 1px solid var(--line); }
+  table { width: 100%; border-collapse: collapse; }
+  table.files { table-layout: fixed; }
+  td { border-top: 1px solid var(--line); padding: 4px 8px; vertical-align: top; overflow-wrap: anywhere; }
+  tr.file.focus td { background: var(--hover); }
+  tr.file.focus { outline: none; }
+  tr.file.focus td:first-child { box-shadow: inset 3px 0 var(--focus); }
+  .ghead.sel, tr.file.sel td { background: var(--info-bg); }
+  #selbar { background: var(--info-bg); color: var(--info); border-radius: 8px; padding: 4px 10px; }
+  #selbar button { color: var(--text); }
+  #note { font-size: 12px; color: var(--info); }
+  .fname { overflow-wrap: anywhere; }
+  .parse { color: var(--muted); font-size: 12px; }
+  .out b { font-weight: 600; }
+  .kind { color: var(--muted); font-size: 11px; }
+  .bout { color: var(--info); font-size: 12px; }
+  .acts button { margin: 0 2px 2px 0; }
+  .clear { border: none; background: none; color: var(--muted); padding: 0 4px; }
+  .empty { padding: 40px; text-align: center; color: var(--muted); }
+  .status { font-size: 12px; }
+  .status.err { color: var(--bad); }
+  .scroll-x { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+  #reports th { text-align: left; font-weight: 600; padding: 6px 8px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+  #reports td { white-space: nowrap; overflow-wrap: normal; }
+  #reports td.label { white-space: normal; min-width: 180px; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  dialog { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--text); width: min(640px, 92vw); padding: 12px; }
+  dialog::backdrop { background: rgb(0 0 0 / .35); }
+  #pick-input { width: 100%; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
+  #pick-list { max-height: 50vh; overflow: auto; margin-top: 8px; }
+  .pick { padding: 5px 8px; border-radius: 6px; cursor: pointer; }
+  .pick.sel, .pick:hover { background: var(--hover); }
+  .pick .muted { font-size: 12px; }
+  kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; font-size: 11px; }
+  /* Compare view: B (before) -> A (after) */
+  .cmp-intro { margin: 0 0 8px; }
+  .cmp-bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 6px; }
+  .cmp-bar button.chip { border: 1px solid transparent; cursor: pointer; padding: 2px 9px; font-size: 12px; }
+  .cmp-bar button.chip.on { border-color: currentColor; font-weight: 600; }
+  .cmp-bar .label { color: var(--muted); font-size: 12px; min-width: 64px; }
+  .c-fixed, .c-improved { background: var(--ok-bg); color: var(--ok); }
+  .c-regressed, .c-worse { background: var(--bad-bg); color: var(--bad); }
+  .c-still { background: var(--warn-bg); color: var(--warn); }
+  .c-unreviewed, .c-new { background: var(--none-bg); color: var(--none); }
+  .cmp-section { background: var(--panel); border: 1px solid var(--line); border-left-width: 4px; border-radius: 8px; margin: 10px 0; overflow: hidden; }
+  .cmp-section.k-fixed, .cmp-section.k-improved { border-left-color: var(--ok); }
+  .cmp-section.k-regressed, .cmp-section.k-worse { border-left-color: var(--bad); }
+  .cmp-section.k-still { border-left-color: var(--warn); }
+  .cmp-section.k-unreviewed, .cmp-section.k-new { border-left-color: var(--none); }
+  .cmp-section > h2 { font-size: 13px; margin: 0; padding: 7px 10px; display: flex; gap: 8px; align-items: baseline; }
+  .cmp-section > h2 .muted { font-weight: 400; font-size: 12px; }
+  .cmp-folder td { background: var(--hover); color: var(--muted); font-size: 12px; padding: 3px 8px; }
+  .cmp-folder button { font-size: 11px; padding: 0 6px; margin-left: 6px; }
+  table.cmp { table-layout: fixed; }
+  .cmp td.arrow { text-align: center; color: var(--muted); padding: 4px 0; }
+  .cmp .side { display: grid; gap: 2px; }
+  .cmp .side.before { opacity: .8; }
+  .cmp tr.k-fixed td.after, .cmp tr.k-improved td.after { box-shadow: inset 3px 0 var(--ok); }
+  .cmp tr.k-regressed td.after, .cmp tr.k-worse td.after { box-shadow: inset 3px 0 var(--bad); }
+  .cmp tr.k-still td.after { box-shadow: inset 3px 0 var(--warn); }
+  @media (max-width: 760px) {
+    .ghead { grid-template-columns: 16px 1fr; }
+    .gsum, .gbadges { grid-column: 2; justify-content: flex-start; }
+    input[type=search] { width: 100%; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="row">
+    <h1>Match lab</h1>
+    <button id="tab-review" class="on">Review</button>
+    <button id="tab-compare" title="Every file whose result changed from A (before) to B (after): fixed, regressed…">Compare A → B</button>
+    <button id="tab-reports">Reports</button>
+    <span class="spacer"></span>
+    <span id="note"></span>
+    <span id="save-status" class="status muted"></span>
+    <button id="undo" title="Undo the last truth change (Ctrl+Z)">Undo</button>
+  </div>
+  <div class="row">
+    <label title="The older report">A (before) <select id="sel-a"></select></label>
+    <label title="The newer report, shown in Review">B (after) <select id="sel-b"></select></label>
+    <button class="small" id="swap" title="Swap A and B">⇄ Swap</button>
+    <span id="order-warn" class="chip v-wrong" hidden>A is newer than B: changes read backwards</span>
+  </div>
+  <div class="row" id="summary"></div>
+  <div class="row" id="filters">
+    <button data-filter="all">All</button>
+    <button data-filter="costly">Costly</button>
+    <button data-filter="missed">Missed</button>
+    <button data-filter="episode">Wrong episode</button>
+    <button data-filter="unreviewed">Unreviewed</button>
+    <button data-filter="changed">Changed from A</button>
+    <button data-filter="auto" title="Checks written by a script (note “auto: …”), to spot-check">Auto-checked</button>
+    <input id="search" type="search" placeholder="Search folders, files, anime  ( / )">
+    <span id="shown" class="muted"></span>
+    <span class="spacer"></span>
+    <span class="muted"><kbd>↑</kbd><kbd>↓</kbd> move · <kbd>Enter</kbd> open · <kbd>A</kbd> accept · <kbd>P</kbd> accept A's · <kbd>U</kbd> unmatched · <kbd>X</kbd> extra · <kbd>E</kbd> anime · <kbd>N</kbd> episode · <kbd>Ctrl</kbd>/<kbd>Shift</kbd>+click, <kbd>Space</kbd>, <kbd>Shift</kbd>+<kbd>↑</kbd><kbd>↓</kbd> select · <kbd>Esc</kbd> clear</span>
+  </div>
+  <div class="row" id="selbar" hidden>
+    <b id="sel-count"></b>
+    <button class="small" data-sact="accept">Accept as shown</button>
+    <button class="small" data-sact="accept-b" id="sel-accept-b">Accept A</button>
+    <button class="small" data-sact="unmatched">Unmatched</button>
+    <button class="small" data-sact="extra">Extra</button>
+    <button class="small" data-sact="anime">Anime… (episode from name)</button>
+    <button class="small" data-sact="clear">Forget checks</button>
+    <button class="small" data-sact="deselect">Clear selection</button>
+    <span class="muted" id="sel-hint"></span>
+  </div>
+</header>
+<main>
+  <div id="review"></div>
+  <div id="compare" hidden></div>
+  <div id="reports" hidden></div>
+</main>
+<dialog id="picker">
+  <input id="pick-input" placeholder="Anime title…" autocomplete="off">
+  <div id="pick-list"></div>
+</dialog>
+
+<script>
+"use strict";
+// ----------------------------------------------------------------------------------------------------------
+// State
+
+const S = {
+  reports: [],          // meta of every report, newest first (with server-side counts)
+  after: null,          // the report under review (shown as B, the newer one)
+  before: null,         // the report it is compared with (shown as A, the older one)
+  entries: new Map(),   // anilist_id -> entry (both reports' lists)
+  groups: [],           // [{ key, root, files: [file of `after`] }]
+  beforeFiles: new Map(),  // path -> `before`'s out
+  truth: { files: {} },
+  filter: "all",
+  query: "",
+  expanded: new Set(),
+  focus: 0,             // index into nav
+  nav: [],              // visible rows: { type: "group", key } | { type: "file", key, path }
+  undo: [],             // batches of [path, previous truth value | undefined]
+  view: "review",
+};
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const prefs = (() => { try { return JSON.parse(localStorage.getItem("match-lab") || "{}"); } catch { return {}; } })();
+const savePrefs = () => { try { localStorage.setItem("match-lab", JSON.stringify({ filter: S.filter })); } catch {} };
+S.filter = prefs.filter || "all";
+
+async function api(path, options) {
+  const res = await fetch(path, options);
+  if (!res.ok) throw new Error((await res.text()) || res.statusText);
+  return res.json();
+}
+
+// ----------------------------------------------------------------------------------------------------------
+// Verdicts (same rules as `verdict()` in main.rs: keep them equal)
+
+const COSTLY = new Set(["wrong", "unexpected"]);
+const VERDICTS = [
+  ["wrong", "Wrong anime"], ["unexpected", "Unexpected"], ["missed", "Missed"],
+  ["episode", "Wrong episode"], ["correct", "Correct"], ["unreviewed", "Unreviewed"],
+];
+const LABEL = Object.fromEntries(VERDICTS);
+
+function verdict(out, t) {
+  if (!t) return "unreviewed";
+  const want = t.anilist_id ?? null, got = out.anilist_id ?? null;
+  if (want === null) return got === null ? "correct" : "unexpected";
+  if (got === null) return "missed";
+  if (want !== got) return "wrong";
+  return (t.episode ?? null) === (out.episode ?? null) ? "correct" : "episode";
+}
+const isAuto = (t) => typeof t?.note === "string" && t.note.startsWith("auto");
+const sameOut = (a, b) => (a?.anilist_id ?? null) === (b?.anilist_id ?? null) && (a?.episode ?? null) === (b?.episode ?? null);
+function changed(f) {
+  if (!S.before) return false;
+  const b = S.beforeFiles.get(f.path);
+  return !b || !sameOut(b, f.out);
+}
+function counts(files, truth) {
+  const c = {};
+  for (const f of files) { const v = verdict(f.out, truth.files[f.path]); c[v] = (c[v] || 0) + 1; }
+  return c;
+}
+
+// ----------------------------------------------------------------------------------------------------------
+// Formatting
+
+const title = (id) => { const e = S.entries.get(id); return e ? e.title : `#${id}`; };
+function outText(out) {
+  if (!out || out.anilist_id == null) return `<span class="muted">unmatched</span>`;
+  const ep = out.episode == null ? "extra" : `ep ${out.episode}`;
+  return `<b>${esc(title(out.anilist_id))}</b> · ${ep}`;
+}
+function ranges(nums) {
+  const s = [...new Set(nums)].sort((a, b) => a - b), parts = [];
+  for (let i = 0; i < s.length; ) {
+    let j = i;
+    while (j + 1 < s.length && s[j + 1] === s[j] + 1) j++;
+    parts.push(i === j ? `${s[i]}` : `${s[i]}–${s[j]}`);
+    i = j + 1;
+  }
+  return parts.join(", ");
+}
+function summarize(outs) {
+  const by = new Map(); let unmatched = 0;
+  for (const o of outs) {
+    if (o.anilist_id == null) { unmatched++; continue; }
+    if (!by.has(o.anilist_id)) by.set(o.anilist_id, { eps: [], extras: 0 });
+    const g = by.get(o.anilist_id);
+    if (o.episode == null) g.extras++; else g.eps.push(o.episode);
+  }
+  const parts = [...by].map(([id, g]) => {
+    const bits = [];
+    if (g.eps.length) bits.push(ranges(g.eps));
+    if (g.extras) bits.push(`${g.extras} extra${g.extras > 1 ? "s" : ""}`);
+    return `${esc(title(id))}: ${bits.join(" + ")}`;
+  });
+  if (unmatched) parts.push(`${unmatched} unmatched`);
+  return parts.join(" · ");
+}
+const fileName = (p) => p.slice(p.lastIndexOf("\\") + 1);
+const dirOf = (p) => p.slice(0, p.lastIndexOf("\\"));
+function parseText(p) {
+  const bits = [esc(p.title)];
+  if (p.season != null) bits.push(`S${p.season}`);
+  if (p.episode != null) bits.push(`E${p.episode}${p.episode_alt != null ? `–${p.episode_alt}` : ""}`);
+  if (p.type) bits.push(esc(p.type));
+  if (p.own) bits.push(`own “${esc(p.own)}”`);
+  if (p.parent) bits.push(`folder “${esc(p.parent)}”`);
+  return bits.join(" · ");
+}
+
+// ----------------------------------------------------------------------------------------------------------
+// Loading
+
+async function loadReports() {
+  S.reports = await api("/api/reports");
+}
+async function loadReport(id) {
+  return id ? api(`/api/reports/${encodeURIComponent(id)}`) : null;
+}
+// A is the older report (before), B the newer one (after), which the Review tab shows
+async function choose(beforeId, afterId) {
+  [S.before, S.after] = await Promise.all([loadReport(beforeId), loadReport(afterId)]);
+  S.entries = new Map();
+  for (const r of [S.before, S.after]) for (const e of r?.entries || []) S.entries.set(e.anilist_id, e);
+  S.beforeFiles = new Map((S.before?.files || []).map((f) => [f.path, f.out]));
+  S.beforeParse = new Map((S.before?.files || []).map((f) => [f.path, f.parse]));
+  const groups = new Map();
+  for (const f of S.after?.files || []) {
+    const key = dirOf(f.path);
+    if (!groups.has(key)) groups.set(key, { key, root: f.root, files: [] });
+    groups.get(key).files.push(f);
+  }
+  S.groups = [...groups.values()];
+  S.linksAfter = linkMap(S.after); S.linksBefore = linkMap(S.before);
+  location.hash = `a=${beforeId || ""}&b=${afterId || ""}`;
+  fillSelects();
+  render();
+}
+function linkMap(r) {
+  const m = new Map();
+  for (const l of r?.links || []) {
+    const k = l.folder.toLowerCase().replace(/\//g, "\\").replace(/\\+$/, "");
+    if (!m.has(k)) m.set(k, []);
+    m.get(k).push(l.anilist_id);
+  }
+  return m;
+}
+function fillSelects() {
+  const opt = (r, sel) => `<option value="${esc(r.id)}"${sel ? " selected" : ""}>${esc(r.label)} — ${new Date(r.created * 1000).toLocaleString()}${r.dirty ? " (uncommitted)" : ""}</option>`;
+  const a = S.before?.meta.id, b = S.after?.meta.id;
+  $("sel-a").innerHTML = `<option value="">(none)</option>` + S.reports.map((r) => opt(r, r.id === a)).join("");
+  $("sel-b").innerHTML = S.reports.map((r) => opt(r, r.id === b)).join("");
+  $("swap").hidden = !S.before;
+  $("order-warn").hidden = !(S.before && S.after && S.before.meta.created > S.after.meta.created);
+}
+
+// ----------------------------------------------------------------------------------------------------------
+// Truth edits
+
+// Edits not saved yet: path -> new value (undefined = forget). A save applies only these to the file as
+// it is on disk, so checks written by someone else meanwhile (another tab, a script) are kept.
+S.pending = new Map();
+let saveTimer = null, saving = Promise.resolve();
+function put(path, value) {
+  if (value === undefined) delete S.truth.files[path]; else S.truth.files[path] = value;
+  S.pending.set(path, value);
+}
+function setTruth(changes) {
+  const batch = [];
+  for (const [path, value] of changes) {
+    batch.push([path, S.truth.files[path]]);
+    put(path, value === undefined ? undefined : { ...value, at: Math.floor(Date.now() / 1000) });
+  }
+  if (!batch.length) return;
+  S.undo.push(batch);
+  if (S.undo.length > 200) S.undo.shift();
+  scheduleSave();
+  render();
+}
+function undo() {
+  const batch = S.undo.pop();
+  if (!batch) return;
+  for (const [path, prev] of batch) put(path, prev);
+  scheduleSave();
+  render();
+}
+function scheduleSave() {
+  $("save-status").textContent = "Saving…";
+  $("save-status").className = "status muted";
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(flushSave, 400);
+}
+function flushSave() {
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  const changes = S.pending;
+  S.pending = new Map();
+  saving = saving.then(async () => {
+    const current = await api("/api/truth");
+    current.files ||= {};
+    for (const [path, value] of changes) {
+      if (value === undefined) delete current.files[path]; else current.files[path] = value;
+    }
+    await api("/api/truth", { method: "PUT", body: JSON.stringify(current) });
+    // The file is now the truth, plus whatever was edited while saving
+    for (const [path, value] of S.pending) {
+      if (value === undefined) delete current.files[path]; else current.files[path] = value;
+    }
+    S.truth = current;
+    $("save-status").textContent = `Saved · ${Object.keys(S.truth.files).length} files checked`;
+    render();
+  }).catch((e) => {
+    for (const [path, value] of changes) if (!S.pending.has(path)) S.pending.set(path, value);
+    $("save-status").textContent = `Save failed: ${e.message}`;
+    $("save-status").className = "status err";
+  });
+  return saving;
+}
+const asTruth = (out) => ({ anilist_id: out?.anilist_id ?? null, episode: out?.anilist_id == null ? null : (out.episode ?? null) });
+
+const groupByKey = (key) => S.groups.find((g) => g.key === key);
+const fileByPath = (path) => S.after.files.find((f) => f.path === path);
+
+// ----------------------------------------------------------------------------------------------------------
+// Selection (Ctrl / Shift + click, Space, Shift + arrows): rows are folders or files
+
+const rowId = (r) => (r.type === "group" ? `g:${r.key}` : `f:${r.path}`);
+S.selected = new Map();   // rowId -> nav row
+S.anchor = null;          // rowId where a Shift range starts
+
+function selectRow(r, on = !S.selected.has(rowId(r))) {
+  if (on) S.selected.set(rowId(r), r); else S.selected.delete(rowId(r));
+}
+function selectRange(toIndex) {
+  const from = S.nav.findIndex((r) => rowId(r) === S.anchor);
+  const start = from >= 0 ? from : S.focus;
+  S.selected.clear();
+  for (let i = Math.min(start, toIndex); i <= Math.max(start, toIndex); i++) selectRow(S.nav[i], true);
+}
+function clearSelection() {
+  S.selected.clear();
+  S.anchor = null;
+  paintSelection();
+}
+
+/** The files a set of rows covers. A folder brings all its files; a file picked on its own is "explicit". */
+function targetsOf(rows) {
+  const out = new Map();
+  for (const r of rows) {
+    if (r.type === "group") for (const f of groupByKey(r.key)?.files || []) if (!out.has(f.path)) out.set(f.path, { f, explicit: false });
+  }
+  for (const r of rows) {
+    if (r.type === "file") { const f = fileByPath(r.path); if (f) out.set(f.path, { f, explicit: true }); }
+  }
+  return [...out.values()];
+}
+const byHand = (t) => !!t && !isAuto(t);
+
+function paintSelection() {
+  document.querySelectorAll("[data-i]").forEach((el) => {
+    const r = S.nav[Number(el.dataset.i)];
+    el.classList.toggle("sel", !!r && S.selected.has(rowId(r)));
+  });
+  const rows = [...S.selected.values()];
+  $("selbar").hidden = !rows.length || S.view !== "review";
+  if (!rows.length) return;
+  const folders = rows.filter((r) => r.type === "group").length;
+  const targets = targetsOf(rows);
+  const kept = targets.filter((t) => !t.explicit && byHand(S.truth.files[t.f.path])).length;
+  $("sel-count").textContent = `${folders ? `${folders} folder${folders > 1 ? "s" : ""}, ` : ""}${targets.length} file${targets.length === 1 ? "" : "s"} selected`;
+  $("sel-accept-b").hidden = !S.before;
+  $("sel-hint").textContent = kept ? `${kept} checked by hand in these folders: kept unless picked on their own` : "";
+}
+
+let noteTimer = null;
+function note(text) {
+  $("note").textContent = text;
+  clearTimeout(noteTimer);
+  noteTimer = setTimeout(() => { $("note").textContent = ""; }, 6000);
+}
+
+// Actions that set an answer. Applied to whole folders they never replace a check made by hand
+// (only a script's "auto" one): a file picked on its own, or by its own row, is always changed.
+const SETS_ANSWER = new Set(["accept", "accept-b", "unmatched", "extra", "anime"]);
+
+function act(action, row) {
+  // The selection when the row is part of it (or for the selection bar), else just the row
+  const useSelection = S.selected.size > 0 && (!row || S.selected.has(rowId(row)));
+  const rows = useSelection ? [...S.selected.values()] : row ? [row] : [];
+  if (!rows.length) return;
+  if (action === "episode") {
+    // One file at a time: the number is asked for
+    if (row?.type !== "file") return;
+    return askEpisode(fileByPath(row.path));
+  }
+  const all = targetsOf(rows);
+  const files = SETS_ANSWER.has(action)
+    ? all.filter((t) => t.explicit || !byHand(S.truth.files[t.f.path])).map((t) => t.f)
+    : all.map((t) => t.f);
+  const kept = all.length - files.length;
+  const apply = (changes) => {
+    if (useSelection) { S.selected.clear(); S.anchor = null; }
+    setTruth(changes);
+    if (useSelection) paintSelection();
+    if (kept) note(`Kept ${kept} check${kept > 1 ? "s" : ""} you made by hand`);
+  };
+  switch (action) {
+    case "accept": return apply(files.map((f) => [f.path, asTruth(f.out)]));
+    case "accept-b": return apply(files.filter((f) => S.beforeFiles.has(f.path)).map((f) => [f.path, asTruth(S.beforeFiles.get(f.path))]));
+    case "unmatched": return apply(files.map((f) => [f.path, { anilist_id: null, episode: null }]));
+    case "extra": return apply(files.map((f) => {
+      const id = S.truth.files[f.path]?.anilist_id ?? f.out.anilist_id;
+      return id == null ? null : [f.path, { anilist_id: id, episode: null }];
+    }).filter(Boolean));
+    case "anime": return pickAnime((id) => apply(files.map((f) => [f.path, { anilist_id: id, episode: f.parse.episode ?? null }])));
+    case "clear": return apply(files.map((f) => [f.path, undefined]));
+  }
+}
+
+function askEpisode(f) {
+  if (!f) return;
+  const id = S.truth.files[f.path]?.anilist_id ?? f.out.anilist_id;
+  if (id == null) return pickAnime(() => {}, "Pick the anime first (E)");
+  const text = prompt(`Episode of ${title(id)} (empty = extra, no episode)`, S.truth.files[f.path]?.episode ?? f.out.episode ?? f.parse.episode ?? "");
+  if (text === null) return;
+  const n = text.trim() === "" ? null : Number(text);
+  if (n !== null && !(Number.isInteger(n) && n >= 0)) return alert("A whole number, or empty");
+  return setTruth([[f.path, { anilist_id: id, episode: n }]]);
+}
+
+// ----------------------------------------------------------------------------------------------------------
+// Anime picker
+
+let pickDone = null, pickRows = [], pickSel = 0;
+function pickAnime(done, placeholder) {
+  pickDone = done;
+  $("pick-input").value = "";
+  $("pick-input").placeholder = placeholder || "Anime title…";
+  renderPicks();
+  $("picker").showModal();
+  $("pick-input").focus();
+}
+function renderPicks() {
+  const words = $("pick-input").value.toLowerCase().split(/\s+/).filter(Boolean);
+  const all = [...S.entries.values()];
+  pickRows = (words.length ? all.filter((e) => {
+    const text = `${e.title} ${e.english || ""} ${e.anilist_id}`.toLowerCase();
+    return words.every((w) => text.includes(w));
+  }) : all).slice(0, 60);
+  pickSel = 0;
+  $("pick-list").innerHTML = pickRows.map((e, i) => `<div class="pick${i === 0 ? " sel" : ""}" data-i="${i}">${esc(e.title)}
+    <span class="muted">${esc(e.english || "")} · ${esc(e.format || "")} · ${e.episodes ?? "?"} eps · ${esc((e.start || "").slice(0, 4))} · #${e.anilist_id}</span></div>`).join("")
+    || `<div class="muted">No anime on the list matches.</div>`;
+}
+function choosePick(i) {
+  const e = pickRows[i];
+  $("picker").close();
+  if (e && pickDone) pickDone(e.anilist_id);
+}
+$("pick-input").addEventListener("input", renderPicks);
+$("pick-input").addEventListener("keydown", (ev) => {
+  if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
+    ev.preventDefault();
+    pickSel = Math.max(0, Math.min(pickRows.length - 1, pickSel + (ev.key === "ArrowDown" ? 1 : -1)));
+    [...$("pick-list").children].forEach((el, i) => el.classList.toggle("sel", i === pickSel));
+    $("pick-list").children[pickSel]?.scrollIntoView({ block: "nearest" });
+  } else if (ev.key === "Enter") { ev.preventDefault(); choosePick(pickSel); }
+});
+$("pick-list").addEventListener("click", (ev) => { const el = ev.target.closest(".pick"); if (el) choosePick(Number(el.dataset.i)); });
+
+// ----------------------------------------------------------------------------------------------------------
+// Rendering
+
+function matchesFilter(f) {
+  const v = verdict(f.out, S.truth.files[f.path]);
+  switch (S.filter) {
+    case "costly": return COSTLY.has(v);
+    case "missed": return v === "missed";
+    case "episode": return v === "episode";
+    case "unreviewed": return v === "unreviewed";
+    case "changed": return changed(f);
+    case "auto": return isAuto(S.truth.files[f.path]);
+    default: return true;
+  }
+}
+function matchesQuery(g) {
+  if (!S.query) return true;
+  const q = S.query;
+  if (g.key.toLowerCase().includes(q)) return true;
+  return g.files.some((f) => fileName(f.path).toLowerCase().includes(q)
+    || (f.out.anilist_id != null && title(f.out.anilist_id).toLowerCase().includes(q)));
+}
+
+function renderSummary() {
+  if (!S.after) { $("summary").innerHTML = ""; return; }
+  const a = counts(S.after.files, S.truth), b = S.before ? counts(S.before.files, S.truth) : null;
+  const chips = VERDICTS.map(([v, label]) => {
+    const n = a[v] || 0;
+    let delta = "";
+    if (b) { const d = n - (b[v] || 0); if (d) delta = `<span class="delta">${d > 0 ? "+" : ""}${d}</span>`; }
+    return `<span class="chip v-${v}">${label} ${n}${delta}</span>`;
+  });
+  const ch = S.before ? S.after.files.filter(changed).length : 0;
+  if (S.before) chips.push(`<span class="chip v-changed">Changed from A ${ch}</span>`);
+  const m = S.after.meta;
+  chips.push(`<span class="muted">${m.files} files · ${m.matched} matched · ${esc(m.commit || "?")}${m.dirty ? "+dirty" : ""} · snapshot ${esc(m.snapshot)} · ${m.elapsed_ms} ms</span>`);
+  $("summary").innerHTML = chips.join("");
+}
+
+function badges(files) {
+  const c = {}; let ch = 0;
+  for (const f of files) {
+    const v = verdict(f.out, S.truth.files[f.path]);
+    c[v] = (c[v] || 0) + 1;
+    if (changed(f)) ch++;
+  }
+  const out = [];
+  const costly = (c.wrong || 0) + (c.unexpected || 0);
+  if (costly) out.push(`<span class="chip v-wrong">${costly} costly</span>`);
+  if (c.missed) out.push(`<span class="chip v-missed">${c.missed} missed</span>`);
+  if (c.episode) out.push(`<span class="chip v-episode">${c.episode} episode</span>`);
+  if (c.unreviewed) out.push(`<span class="chip v-unreviewed">${c.unreviewed} to check</span>`);
+  if (!costly && !c.missed && !c.episode && !c.unreviewed) out.push(`<span class="chip v-correct">✓ ${files.length}</span>`);
+  if (ch) out.push(`<span class="chip v-changed">${ch} changed</span>`);
+  return out.join("");
+}
+
+function fileRow(f, key, focused) {
+  const t = S.truth.files[f.path];
+  const v = verdict(f.out, t);
+  const b = S.beforeFiles.get(f.path);
+  const bText = S.before && (!b ? `<div class="bout">A: (not in A)</div>` : !sameOut(b, f.out) ? `<div class="bout">A: ${outText(b)}</div>` : "");
+  const auto = isAuto(t) ? ` <span class="kind" title="${esc(t.note)}">auto</span>` : "";
+  const truthText = t ? `${outText(t)}${auto} <button class="clear" data-act="clear" title="Forget this check">×</button>` : `<span class="muted">—</span>`;
+  return `<tr class="file${focused ? " focus" : ""}" data-key="${esc(key)}" data-path="${esc(f.path)}">
+    <td class="fname">${esc(fileName(f.path))}<div class="parse">${parseText(f.parse)}</div></td>
+    <td class="out">${outText(f.out)} ${f.out.kind ? `<span class="kind">by ${esc(f.out.kind)}</span>` : ""}${bText || ""}</td>
+    <td class="truth"><span class="chip v-${v}">${LABEL[v]}</span><div>${truthText}</div></td>
+    <td class="acts">
+      <button class="small" data-act="accept" title="The answer is what B says (key A)">Accept</button>${S.before && b && !sameOut(b, f.out) ? `<button class="small" data-act="accept-b" title="The answer is what A says (key P)">Accept A</button>` : ""}
+      <button class="small" data-act="unmatched" title="U">Unmatched</button><button class="small" data-act="extra" title="X">Extra</button>
+      <button class="small" data-act="anime" title="E">Anime…</button><button class="small" data-act="episode" title="N">Episode…</button>
+    </td></tr>`;
+}
+
+function render() {
+  if (S.view === "compare") return renderCompare();
+  if (S.view !== "review") return;
+  renderSummary();
+  document.querySelectorAll("#filters [data-filter]").forEach((b) => b.classList.toggle("on", b.dataset.filter === S.filter));
+  if (!S.after) {
+    $("review").innerHTML = `<div class="empty">No reports yet. Take a snapshot and run the matcher:<br><br>
+      <code>scripts/match-lab.ps1 snapshot</code><br><code>scripts/match-lab.ps1 run "baseline"</code></div>`;
+    return;
+  }
+  const visible = S.groups.filter((g) => matchesQuery(g) && g.files.some(matchesFilter));
+  const prevRow = S.nav[S.focus];
+  S.nav = [];
+  const html = [];
+  for (const g of visible) {
+    const open = S.expanded.has(g.key);
+    const gi = S.nav.length;
+    S.nav.push({ type: "group", key: g.key });
+    const rel = g.key.length > g.root.length ? g.key.slice(g.root.length).replace(/^\\/, "") : "(library root)";
+    const dirKey = g.key.toLowerCase();
+    const la = S.linksAfter.get(dirKey), lb = S.linksBefore.get(dirKey);
+    const linkA = la ? ` <span class="chip v-changed">linked: ${la.map((id) => esc(title(id))).join(", ")}</span>` : "";
+    const linkB = S.before && JSON.stringify(la || []) !== JSON.stringify(lb || []) ? ` <span class="bout">A linked: ${lb ? lb.map((id) => esc(title(id))).join(", ") : "nothing"}</span>` : "";
+    const rows = [];
+    if (open) {
+      for (const f of g.files) {
+        S.nav.push({ type: "file", key: g.key, path: f.path });
+        rows.push({ f, i: S.nav.length - 1 });
+      }
+    }
+    html.push(`<div class="group" data-key="${esc(g.key)}">
+      <div class="ghead" data-i="${gi}">
+        <span>${open ? "▾" : "▸"}</span>
+        <span class="gpath"><span class="root">${esc(g.root)}\\</span>${esc(rel)} <span class="muted">(${g.files.length})</span>${linkA}${linkB}</span>
+        <span class="gsum">${summarize(g.files.map((f) => f.out))}</span>
+        <span class="gbadges">${badges(g.files)}</span>
+      </div>
+      ${open ? `<div class="gactions" data-key="${esc(g.key)}">
+          <button class="small" data-gact="accept" title="Files you checked by hand keep their check">Accept all as shown</button>
+          ${S.before ? `<button class="small" data-gact="accept-b">Accept all of A</button>` : ""}
+          <button class="small" data-gact="unmatched">All unmatched</button>
+          <button class="small" data-gact="anime">All to anime… (episode from name)</button>
+          <button class="small" data-gact="clear">Forget checks</button>
+        </div>
+        <table class="files"><colgroup><col style="width:36%"><col style="width:24%"><col style="width:20%"><col style="width:20%"></colgroup>${rows.map(({ f, i }) => fileRow(f, g.key, false).replace('class="file', `data-i="${i}" class="file`)).join("")}</table>` : ""}
+    </div>`);
+  }
+  $("review").innerHTML = html.join("") || `<div class="empty">Nothing matches this filter.</div>`;
+  $("shown").textContent = `${visible.length} of ${S.groups.length} folders`;
+  // Keep the focus on the same row when it is still visible
+  if (prevRow) {
+    const i = S.nav.findIndex((r) => r.type === prevRow.type && r.key === prevRow.key && r.path === prevRow.path);
+    S.focus = i >= 0 ? i : Math.min(S.focus, S.nav.length - 1);
+  }
+  paintFocus(false);
+  paintSelection();
+}
+
+function paintFocus(scroll) {
+  document.querySelectorAll(".focus").forEach((el) => el.classList.remove("focus"));
+  const el = document.querySelector(`[data-i="${S.focus}"]`);
+  if (!el) return;
+  el.classList.add("focus");
+  if (scroll) el.scrollIntoView({ block: "nearest" });
+}
+
+// ----------------------------------------------------------------------------------------------------------
+// Compare view: every file whose result changed from A (before) to B (after), scored against the truth
+
+// How far a verdict is from right (wrong anime and unexpected cost the most)
+const RANK = { correct: 0, episode: 1, missed: 2, unexpected: 3, wrong: 3 };
+const CATEGORIES = [
+  ["regressed", "Regressed", "Was right in A, wrong in B"],
+  ["worse", "Worse", "Wrong in both, B is further from the answer"],
+  ["fixed", "Fixed", "Wrong in A, right in B"],
+  ["improved", "Improved", "Wrong in both, B is closer (or a wrong match lost its episode number, so it no longer moves progress)"],
+  ["still", "Still wrong", "Wrong in both, differently"],
+  ["unreviewed", "Not checked", "No answer in the truth yet"],
+  ["new", "Not in A", "The file is only in B's snapshot"],
+];
+const CAT_LABEL = Object.fromEntries(CATEGORIES.map(([k, l]) => [k, l]));
+S.cmpFilter = "all";  // "all" | "cat:<category>" | "move:<B verdict>><A verdict>"
+
+function compareCategory(va, vb, a, b, hasB) {
+  if (!hasB) return "new";
+  if (va === "unreviewed") return "unreviewed";
+  if (va === vb) {
+    // Same verdict: a costly match that lost its episode number no longer moves progress
+    if (COSTLY.has(va) && b.episode != null && a.episode == null) return "improved";
+    return "still";
+  }
+  if (va === "correct") return "fixed";
+  if (vb === "correct") return "regressed";
+  return RANK[va] < RANK[vb] ? "improved" : RANK[va] > RANK[vb] ? "worse" : "still";
+}
+
+/** Changed files with their verdicts in A (before) and B (after). */
+function comparison() {
+  const rows = [];
+  for (const f of S.after.files) {
+    const b = S.beforeFiles.get(f.path);
+    if (b && sameOut(b, f.out)) continue;
+    const t = S.truth.files[f.path];
+    const va = verdict(f.out, t), vb = b ? verdict(b, t) : "unreviewed";
+    rows.push({ f, b, t, va, vb, cat: compareCategory(va, vb, f.out, b, !!b) });
+  }
+  return rows;
+}
+
+function renderCompare() {
+  renderSummary();
+  const el = $("compare");
+  if (!S.after || !S.before) {
+    el.innerHTML = `<div class="empty">Pick a report A (before) to see what changed from A to B.</div>`;
+    return;
+  }
+  const all = comparison();
+  const byCat = new Map(), byMove = new Map();
+  for (const r of all) {
+    byCat.set(r.cat, (byCat.get(r.cat) || 0) + 1);
+    const m = `${r.vb}>${r.va}`;
+    byMove.set(m, (byMove.get(m) || 0) + 1);
+  }
+  const on = (key) => (S.cmpFilter === key ? " on" : "");
+  const catChips = CATEGORIES.filter(([k]) => byCat.get(k)).map(([k, l, tip]) =>
+    `<button class="chip c-${k}${on(`cat:${k}`)}" data-cmp="cat:${k}" title="${esc(tip)}">${l} ${byCat.get(k)}</button>`);
+  // Each move is colored by what it means (fixed green, regressed red...)
+  const moves = [...byMove].sort((x, y) => y[1] - x[1]).map(([m, n]) => {
+    const [vb, va] = m.split(">");
+    const sample = all.find((r) => r.vb === vb && r.va === va);
+    return `<button class="chip c-${sample.cat}${on(`move:${m}`)}" data-cmp="move:${m}">${LABEL[vb]} → ${LABEL[va]} ${n}</button>`;
+  });
+  const parseOnly = S.after.files.filter((f) => {
+    const b = S.beforeFiles.get(f.path), p = S.beforeParse.get(f.path);
+    return b && sameOut(b, f.out) && p && JSON.stringify(p) !== JSON.stringify(f.parse);
+  }).length;
+
+  const shown = all.filter((r) => S.cmpFilter === "all"
+    || S.cmpFilter === `cat:${r.cat}` || S.cmpFilter === `move:${r.vb}>${r.va}`);
+  const sections = CATEGORIES.map(([k, l, tip]) => {
+    const rows = shown.filter((r) => r.cat === k);
+    if (!rows.length) return "";
+    const folders = new Map();
+    for (const r of rows) {
+      const d = dirOf(r.f.path);
+      if (!folders.has(d)) folders.set(d, []);
+      folders.get(d).push(r);
+    }
+    const body = [...folders].map(([d, rs]) => `
+      <tr class="cmp-folder"><td colspan="5">${esc(d)} <span>(${rs.length})</span><button data-open="${esc(d)}" title="Open this folder in Review">Review</button></td></tr>
+      ${rs.map(compareRow).join("")}`).join("");
+    return `<section class="cmp-section k-${k}"><h2><span class="chip c-${k}">${l} ${rows.length}</span><span class="muted">${esc(tip)}</span></h2>
+      <table class="cmp"><colgroup><col style="width:30%"><col style="width:21%"><col style="width:3%"><col style="width:21%"><col style="width:25%"></colgroup>${body}</table></section>`;
+  }).join("");
+
+  const label = (r) => `<b>${esc(r.meta.label)}</b> <span class="muted">${new Date(r.meta.created * 1000).toLocaleString()}</span>`;
+  el.innerHTML = `
+    <p class="cmp-intro">Before: A ${label(S.before)} &nbsp;→&nbsp; After: B ${label(S.after)} · <b>${all.length}</b> files changed${parseOnly ? ` <span class="muted">(${parseOnly} more parse differently with the same result)</span>` : ""}</p>
+    <div class="cmp-bar"><span class="label">Outcome</span><button class="chip c-new${on("all")}" data-cmp="all">All ${all.length}</button>${catChips.join("")}</div>
+    <div class="cmp-bar"><span class="label">A → B</span>${moves.join("")}</div>
+    ${sections || `<div class="empty">${all.length ? "Nothing in this filter." : "A and B give every file the same result."}</div>`}`;
+}
+
+function compareRow(r) {
+  const { f, b, t } = r;
+  const pb = S.beforeParse.get(f.path);
+  const parseB = pb && JSON.stringify(pb) !== JSON.stringify(f.parse) ? `<div class="parse">A parsed: ${parseText(pb)}</div>` : "";
+  const auto = isAuto(t) ? ` <span class="kind" title="${esc(t.note)}">auto</span>` : "";
+  const truthText = t ? `${outText(t)}${auto}` : `<span class="muted">not checked</span>`;
+  return `<tr class="file k-${r.cat}" data-path="${esc(f.path)}">
+    <td class="fname">${esc(fileName(f.path))}<div class="parse">${parseText(f.parse)}</div>${parseB}</td>
+    <td><div class="side before">${b ? outText(b) : `<span class="muted">(not in A)</span>`} ${b?.kind ? `<span class="kind">by ${esc(b.kind)}</span>` : ""}
+      <span><span class="chip v-${r.vb}">${LABEL[r.vb]}</span></span></div></td>
+    <td class="arrow">→</td>
+    <td class="after"><div class="side">${outText(f.out)} ${f.out.kind ? `<span class="kind">by ${esc(f.out.kind)}</span>` : ""}
+      <span><span class="chip v-${r.va}">${LABEL[r.va]}</span></span></div></td>
+    <td><div>Truth: ${truthText}</div><div class="acts">
+      ${b ? `<button class="small" data-act="accept-b" title="The answer is what A (before) says">A is right</button>` : ""}<button class="small" data-act="accept" title="The answer is what B (after) says">B is right</button>
+      <button class="small" data-act="unmatched">Unmatched</button><button class="small" data-act="extra">Extra</button>
+      <button class="small" data-act="anime">Anime…</button><button class="small" data-act="episode">Episode…</button>
+    </div></td></tr>`;
+}
+
+$("compare").addEventListener("click", (ev) => {
+  const filter = ev.target.closest("[data-cmp]");
+  if (filter) { S.cmpFilter = S.cmpFilter === filter.dataset.cmp ? "all" : filter.dataset.cmp; return renderCompare(); }
+  const open = ev.target.closest("[data-open]");
+  if (open) {
+    // The folder in Review, opened, with every filter off
+    S.filter = "all"; S.query = open.dataset.open.toLowerCase(); $("search").value = open.dataset.open;
+    S.expanded.add(open.dataset.open);
+    return showView("review");
+  }
+  const btn = ev.target.closest("button[data-act]");
+  if (btn) {
+    const tr = btn.closest("tr.file");
+    act(btn.dataset.act, { type: "file", key: dirOf(tr.dataset.path), path: tr.dataset.path });
+  }
+});
+
+// ----------------------------------------------------------------------------------------------------------
+// Reports view
+
+async function renderReports() {
+  if (saveTimer) await flushSave();
+  await saving;
+  await loadReports();
+  const a = S.before?.meta.id, b = S.after?.meta.id;
+  const head = `<tr><th title="The older report (before)">A</th><th title="The newer report (after), shown in Review">B</th><th>Report</th><th>When</th><th>Commit</th><th>Snapshot</th><th class="num">Files</th><th class="num">Matched</th>
+    ${VERDICTS.map(([, l]) => `<th class="num">${l}</th>`).join("")}<th></th></tr>`;
+  const rows = S.reports.map((r) => `<tr data-id="${esc(r.id)}">
+    <td><input type="radio" name="ra" value="${esc(r.id)}"${r.id === a ? " checked" : ""}></td>
+    <td><input type="radio" name="rb" value="${esc(r.id)}"${r.id === b ? " checked" : ""}></td>
+    <td class="label"><b>${esc(r.label)}</b> <button class="small" data-rename>Rename</button></td>
+    <td>${new Date(r.created * 1000).toLocaleString()}</td>
+    <td>${esc(r.commit || "?")}${r.dirty ? " +dirty" : ""}</td>
+    <td>${esc(r.snapshot)}</td>
+    <td class="num">${r.files}</td><td class="num">${r.matched}</td>
+    ${VERDICTS.map(([v]) => `<td class="num"><span class="chip v-${v}">${r.counts?.[v] || 0}</span></td>`).join("")}
+    <td><button class="small" data-delete>Delete</button></td></tr>`).join("");
+  $("reports").innerHTML = S.reports.length
+    ? `<p class="muted">Counts are against the current truth, so every report is rescored when you correct it. Pick A (before) and B (after), then Review or Compare.</p><div class="scroll-x"><table>${head}${rows}</table></div>`
+    : `<div class="empty">No reports yet.</div>`;
+}
+$("reports").addEventListener("change", async (ev) => {
+  if (ev.target.name === "ra") await choose(ev.target.value, S.after?.meta.id);
+  if (ev.target.name === "rb") await choose(S.before?.meta.id, ev.target.value);
+});
+$("reports").addEventListener("click", async (ev) => {
+  const tr = ev.target.closest("tr[data-id]");
+  if (!tr) return;
+  const id = tr.dataset.id;
+  if (ev.target.matches("[data-rename]")) {
+    const r = S.reports.find((x) => x.id === id);
+    const label = prompt("Report name", r?.label || "");
+    if (!label) return;
+    await api(`/api/reports/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ label }) });
+    if (S.after?.meta.id === id) S.after.meta.label = label;
+    if (S.before?.meta.id === id) S.before.meta.label = label;
+    await renderReports(); fillSelects();
+  } else if (ev.target.matches("[data-delete]")) {
+    if (!confirm("Delete this report? Its file is removed from .match-lab\\reports.")) return;
+    await api(`/api/reports/${encodeURIComponent(id)}`, { method: "DELETE" });
+    await renderReports();
+    if (S.after?.meta.id === id || S.before?.meta.id === id) {
+      await choose(S.reports[1]?.id, S.reports[0]?.id);
+    } else fillSelects();
+  }
+});
+
+function showView(view) {
+  S.view = view;
+  for (const v of ["review", "compare", "reports"]) {
+    $(`tab-${v}`).classList.toggle("on", view === v);
+    $(v).hidden = view !== v;
+  }
+  $("filters").hidden = view !== "review";
+  if (view !== "review" && S.selected.size) { S.selected.clear(); S.anchor = null; }
+  paintSelection();
+  if (view === "reports") renderReports(); else render();
+  try { localStorage.setItem("match-lab.view", view); } catch {}
+}
+
+// ----------------------------------------------------------------------------------------------------------
+// Events
+
+$("tab-review").onclick = () => showView("review");
+$("tab-compare").onclick = () => showView("compare");
+$("swap").onclick = () => S.before && choose(S.after?.meta.id, S.before.meta.id);
+$("tab-reports").onclick = () => showView("reports");
+$("undo").onclick = undo;
+$("sel-a").onchange = () => choose($("sel-a").value, $("sel-b").value);
+$("sel-b").onchange = () => choose($("sel-a").value, $("sel-b").value);
+$("filters").addEventListener("click", (ev) => {
+  const b = ev.target.closest("[data-filter]");
+  if (!b) return;
+  S.filter = b.dataset.filter; S.focus = 0; savePrefs(); render();
+});
+let searchTimer = null;
+$("search").addEventListener("input", () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => { S.query = $("search").value.trim().toLowerCase(); S.focus = 0; render(); }, 150);
+});
+
+$("review").addEventListener("click", (ev) => {
+  const btn = ev.target.closest("button");
+  if (btn?.dataset.gact) return act(btn.dataset.gact, { type: "group", key: btn.closest(".gactions").dataset.key });
+  if (btn?.dataset.act) {
+    const tr = btn.closest("tr.file");
+    S.focus = Number(tr.dataset.i);
+    return act(btn.dataset.act, { type: "file", key: tr.dataset.key, path: tr.dataset.path });
+  }
+  const rowEl = ev.target.closest(".ghead, tr.file");
+  if (!rowEl) return;
+  const i = Number(rowEl.dataset.i);
+  const r = S.nav[i];
+  if (!r) return;
+  if (ev.ctrlKey || ev.metaKey) {
+    // Ctrl + click: add or remove this row; Ctrl + Shift + click: add the range
+    if (ev.shiftKey) { const keep = new Map(S.selected); selectRange(i); for (const [k, v] of keep) S.selected.set(k, v); }
+    else { selectRow(r); S.anchor = rowId(r); }
+    S.focus = i;
+    paintFocus(false);
+    paintSelection();
+    return;
+  }
+  if (ev.shiftKey) {
+    selectRange(i);
+    S.focus = i;
+    paintFocus(false);
+    paintSelection();
+    return;
+  }
+  if (S.selected.size) clearSelection();
+  S.anchor = rowId(r);
+  S.focus = i;
+  if (r.type === "group") toggle(r.key); else paintFocus(false);
+});
+// Shift / Ctrl + click would select text instead
+$("review").addEventListener("mousedown", (ev) => {
+  if ((ev.shiftKey || ev.ctrlKey || ev.metaKey) && ev.target.closest(".ghead, tr.file") && !ev.target.closest("button")) ev.preventDefault();
+});
+$("selbar").addEventListener("click", (ev) => {
+  const b = ev.target.closest("[data-sact]");
+  if (!b) return;
+  if (b.dataset.sact === "deselect") return clearSelection();
+  act(b.dataset.sact, null);
+});
+
+function toggle(key, open) {
+  const isOpen = S.expanded.has(key);
+  if (open === undefined) open = !isOpen;
+  if (open === isOpen) return;
+  if (open) S.expanded.add(key); else S.expanded.delete(key);
+  render();
+  paintFocus(true);
+}
+
+document.addEventListener("keydown", (ev) => {
+  if ($("picker").open) return;
+  if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "z" && document.activeElement?.tagName !== "INPUT") { ev.preventDefault(); undo(); return; }
+  if (S.view !== "review" || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+  if (["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement?.tagName)) {
+    if (ev.key === "Escape") document.activeElement.blur();
+    return;
+  }
+  const row = S.nav[S.focus];
+  const move = (d) => {
+    // Shift + arrow: the rows passed over join the selection
+    if (ev.shiftKey && row) selectRow(row, true);
+    S.focus = Math.max(0, Math.min(S.nav.length - 1, S.focus + d));
+    if (ev.shiftKey && S.nav[S.focus]) selectRow(S.nav[S.focus], true);
+    paintFocus(true);
+    if (ev.shiftKey) paintSelection();
+  };
+  switch (ev.key) {
+    case "ArrowDown": case "j": case "J": ev.preventDefault(); move(1); break;
+    case "ArrowUp": case "k": case "K": ev.preventDefault(); move(-1); break;
+    case " ": if (row) { ev.preventDefault(); selectRow(row); S.anchor = rowId(row); paintSelection(); } break;
+    case "Escape": if (S.selected.size) { ev.preventDefault(); clearSelection(); } break;
+    case "Enter": if (row) { ev.preventDefault(); toggle(row.key); } break;
+    case "ArrowRight": if (row) { ev.preventDefault(); toggle(row.key, true); } break;
+    case "ArrowLeft":
+      if (row) {
+        ev.preventDefault();
+        if (row.type === "file") S.focus = S.nav.findIndex((r) => r.type === "group" && r.key === row.key);
+        toggle(row.key, false);
+      }
+      break;
+    case "a": if (row) act("accept", row); break;
+    case "p": if (row && S.before) act("accept-b", row); break;  // A's (previous) answer
+    case "u": if (row) act("unmatched", row); break;
+    case "x": if (row) act("extra", row); break;
+    case "e": if (row) { ev.preventDefault(); act("anime", row); } break;
+    case "n": if (row?.type === "file") act("episode", row); break;
+    case "/": ev.preventDefault(); $("search").focus(); break;
+  }
+});
+window.addEventListener("beforeunload", (ev) => { if (saveTimer) { flushSave(); ev.preventDefault(); } });
+
+// ----------------------------------------------------------------------------------------------------------
+// Start
+
+(async function start() {
+  try {
+    [S.truth] = await Promise.all([api("/api/truth"), loadReports()]);
+    S.truth.files ||= {};
+    $("save-status").textContent = `${Object.keys(S.truth.files).length} files checked`;
+    const hash = new URLSearchParams(location.hash.slice(1));
+    const known = (id) => S.reports.some((r) => r.id === id);
+    // B (after) defaults to the newest report, A (before) to the one made before it
+    const b = known(hash.get("b")) ? hash.get("b") : S.reports[0]?.id;
+    let a = hash.has("a") ? hash.get("a") : null;
+    if (!known(a)) {
+      const i = S.reports.findIndex((r) => r.id === b);
+      a = S.reports[i + 1]?.id || "";
+    }
+    await choose(a, b);
+  } catch (e) {
+    $("review").innerHTML = `<div class="empty">Could not load the lab: ${esc(e.message)}</div>`;
+  }
+})();
+</script>
+</body>
+</html>

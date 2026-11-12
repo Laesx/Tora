@@ -835,6 +835,8 @@ pub struct AnimeMatcherIndex {
     pub raw_titles: HashMap<i64, Vec<String>>,
     /// Year each entry started airing, when known.
     pub start_years: HashMap<i64, u32>,
+    /// Entries that are themselves an OVA, a special or an ONA (AniList format).
+    pub special_formats: HashSet<i64>,
 }
 
 impl AnimeMatcherIndex {
@@ -1034,10 +1036,15 @@ impl AnimeMatcherIndex {
     /// than an episode: a special marker ("Overlord II - Especial 04", "Youjo Senki Mini Anime"), or,
     /// for a guess from a longer name, more than a short tag ("Kemono Friends - Friend Card 05").
     /// Such a file belongs to the anime but gets no episode number, so it never counts as watched.
-    fn names_a_special(&self, parsed: &AnitomyElements, aid: i64, guessed_from_longer_name: bool) -> bool {
+    fn names_a_special(&self, parsed: &AnitomyElements, aid: i64, kind: MatchKind, guessed_from_longer_name: bool) -> bool {
         let no_titles = Vec::new();
         let titles = self.norms_by_id.get(&aid).unwrap_or(&no_titles);
-        let known: HashSet<&str> = titles.iter().flat_map(|t| t.split(' ')).collect();
+        let mut known: HashSet<&str> = titles.iter().flat_map(|t| t.split(' ')).collect();
+        if kind == MatchKind::Fuzzy && self.special_formats.contains(&aid) {
+            // "Kiss X Sis OVA - 01" guessed as an entry that is itself the OVA: the marker names this entry.
+            // Not for a folder's entry ("Especial 02" in a folder linked to a one-episode special).
+            known.extend(["ova", "ona", "sp", "especial", "especiales"]);
+        }
         let extra: Vec<&str> = parsed
             .normalized_title
             .split(' ')
@@ -1338,7 +1345,22 @@ impl AnimeMatcherIndex {
     ///    matches nothing or is only a shorter form of the folder entry's title; else the exact title.
     /// 3. An unambiguous fuzzy match, then the parent folder's own name.
     /// 4. Episode validation and `anime-relations` redirection by ID (see [`Self::finish`]).
+    /// 5. A name between two episodes ("05.5") is matched as episode 5 would be, then is an extra: it is
+    ///    a recap or an OVA, never episode 5 (which "play episode 5" would otherwise open).
     pub fn resolve(
+        &self,
+        cands: &TitleCandidates,
+        parsed: &AnitomyElements,
+        file_path: Option<&str>,
+    ) -> Option<EpisodeMatch> {
+        let found = self.resolve_numbered(cands, parsed, file_path)?;
+        if parsed.between_episodes && found.episode.is_some() {
+            return Some(EpisodeMatch { episode: None, episode_alt: None, ..found });
+        }
+        Some(found)
+    }
+
+    fn resolve_numbered(
         &self,
         cands: &TitleCandidates,
         parsed: &AnitomyElements,
@@ -1364,16 +1386,22 @@ impl AnimeMatcherIndex {
                 titled = merged;
                 episode = None;
                 episode_alt = None;
-            } else if let Some(own) = parsed.own_title.as_deref().filter(|_| titled.is_empty()) {
-                // The season came from a "Season 2" folder, but the name already is the sequel's title
-                // ("Season 2\\Non Non Biyori Repeat - 01")
-                titled = self.exact_ids(own);
-            } else if let Some(year) = parsed.anime_year {
-                // "Kanon (2006)": the year picks the remake, and an entry that started in another year is
-                // another anime with the same title (Taiga looks up "Title (Year)" the same way)
-                match self.exact_norm.get(&format!("{} {}", norm, year)) {
-                    Some(ids) => titled = ids.clone(),
-                    None => titled.retain(|aid| !self.start_years.contains_key(aid)),
+            } else {
+                let mut title = norm;
+                if let Some(own) = parsed.own_title.as_deref().filter(|_| titled.is_empty()) {
+                    // The season came from a "Season 2" folder, but the name already is the sequel's title
+                    // ("Season 2\\Non Non Biyori Repeat - 01")
+                    titled = self.exact_ids(own);
+                    title = own;
+                }
+                if let Some(year) = parsed.anime_year {
+                    // "Kanon (2006)": the year picks the remake, and an entry that started in another year
+                    // is another anime with the same title (Taiga looks up "Title (Year)" the same way).
+                    // Also for the title without a folder's season ("Season 3\\Rozen Maiden (2013) - 01").
+                    match self.exact_norm.get(&format!("{} {}", title, year)) {
+                        Some(ids) => titled = ids.clone(),
+                        None => titled.retain(|aid| !self.start_years.contains_key(aid)),
+                    }
                 }
             }
         }
@@ -1420,8 +1448,12 @@ impl AnimeMatcherIndex {
             return self.match_by_relations_only(parsed, episode, episode_alt);
         };
         let aid = self.pick(set, parsed, episode, kind)?;
-        if matches!(kind, MatchKind::Fuzzy | MatchKind::Folder | MatchKind::Directory)
-            && self.names_a_special(parsed, aid, kind == MatchKind::Fuzzy && fuzzy_says_more)
+        // "Sword Art Online - S00E10": season 0 holds the specials, never an episode of the series
+        let specials_season =
+            parsed.anime_season == Some(0) && kind != MatchKind::Alias && !self.special_formats.contains(&aid);
+        if specials_season
+            || (matches!(kind, MatchKind::Fuzzy | MatchKind::Folder | MatchKind::Directory)
+                && self.names_a_special(parsed, aid, kind, kind == MatchKind::Fuzzy && fuzzy_says_more))
         {
             return self.entry_match(aid, None, None, kind);
         }
@@ -1742,6 +1774,7 @@ fn build_matcher_index_from(conn: &Connection) -> Result<AnimeMatcherIndex, Stri
     let mut norms_by_id: HashMap<i64, Vec<String>> = HashMap::new();
     let mut raw_titles: HashMap<i64, Vec<String>> = HashMap::new();
     let mut start_years: HashMap<i64, u32> = HashMap::new();
+    let mut special_formats: HashSet<i64> = HashSet::new();
     let mut norm_list: Vec<NormTitle> = Vec::new();
 
     {
@@ -1749,7 +1782,7 @@ fn build_matcher_index_from(conn: &Connection) -> Result<AnimeMatcherIndex, Stri
             .prepare(
                 "SELECT id, anilist_id, mal_id, title_romaji, title_english, title_native,
                         synonyms_json, cover_image, user_progress, episodes, custom_folder,
-                        normalized_titles_json, start_date
+                        normalized_titles_json, start_date, format
                  FROM anime_entries ORDER BY id",
             )
             .map_err(|e| e.to_string())?;
@@ -1769,6 +1802,7 @@ fn build_matcher_index_from(conn: &Connection) -> Result<AnimeMatcherIndex, Stri
                     r.get::<_, Option<String>>(10)?,
                     r.get::<_, String>(11)?,
                     r.get::<_, Option<String>>(12)?,
+                    r.get::<_, Option<String>>(13)?,
                 ))
             })
             .map_err(|e| e.to_string())?;
@@ -1788,7 +1822,11 @@ fn build_matcher_index_from(conn: &Connection) -> Result<AnimeMatcherIndex, Stri
                 cfolder,
                 norms_json,
                 start_date,
+                format,
             ) = row;
+            if matches!(format.as_deref(), Some("OVA" | "SPECIAL" | "ONA")) {
+                special_formats.insert(id);
+            }
             let syns: Vec<String> = serde_json::from_str(&syns_json).unwrap_or_default();
             let mut norms: Vec<String> = serde_json::from_str(&norms_json).unwrap_or_default();
             if norms.is_empty() {
@@ -1899,6 +1937,7 @@ fn build_matcher_index_from(conn: &Connection) -> Result<AnimeMatcherIndex, Stri
         norms_by_id,
         raw_titles,
         start_years,
+        special_formats,
     })
 }
 

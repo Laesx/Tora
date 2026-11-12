@@ -87,3 +87,6 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini
 $RECYCLE.BIN/
+
+# Match lab data (snapshots of the library, truth, reports): private paths
+.match-lab/

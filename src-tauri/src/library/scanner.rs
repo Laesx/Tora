@@ -137,7 +137,7 @@ fn is_hidden_or_system(entry: &DirEntry) -> bool {
 
 /// Bump when a parser or matcher change should be applied to files that are already indexed: the next
 /// startup scan then matches the whole library again ([`Database::repair_library_matches`]).
-const LIBRARY_MATCH_VERSION: i64 = 2;
+const LIBRARY_MATCH_VERSION: i64 = 3;
 /// `app_settings` key of the version the stored matches were made with (kept out of `AppSettings`).
 const LIBRARY_MATCH_VERSION_KEY: &str = "library_match_version";
 /// Separator of [`crate::db::normalize_dir_key`] keys.
@@ -193,7 +193,7 @@ fn folder_evidence(matched: Option<&EpisodeMatch>, root_path: &Path, file_path: 
 
 /// Parse a library file from its path below the library root, so parent folders can give the season or
 /// the title ("Sousou no Frieren\01.mkv") but folders above the library never do.
-fn parse_library_file(root_path: &Path, file_path: &Path) -> AnitomyElements {
+pub fn parse_library_file(root_path: &Path, file_path: &Path) -> AnitomyElements {
     let rel = file_path.strip_prefix(root_path).unwrap_or(file_path).to_string_lossy();
     if rel.is_empty() {
         parse_filename(&file_path.to_string_lossy())
@@ -287,6 +287,8 @@ struct RematchUpdate {
 /// Result of a rematch pass.
 #[derive(Debug, Clone, Default)]
 struct RematchSummary {
+    /// Files looked at in the last pass.
+    files: usize,
     /// Files that resolve to an entry (in targeted mode: to one of the targets).
     matched: usize,
     /// Rows whose match or parsed columns changed.
@@ -678,20 +680,10 @@ impl Database {
             self.library_match_version(),
             LIBRARY_MATCH_VERSION
         );
-        let renormalized = self.rebuild_normalized_titles()?;
-        if renormalized > 0 {
-            log::info!(target: "library", "normalized the titles of {} entries again", renormalized);
-        }
+        self.renormalize_titles()?;
+        // A full scan ends with a rematch of every indexed file
         let mut summary = self.scan_library_internal(false)?;
-        let cleared = self.clear_contradicted_folder_links()?;
-        if !cleared.is_empty() {
-            let rematch = self.rematch_episodes_internal(None)?;
-            summary.matched_files = rematch.matched;
-            let mut changed: HashSet<i64> = summary.changed_anime_ids.iter().copied().collect();
-            changed.extend(cleared);
-            changed.extend(rematch.changed_anime_ids);
-            summary.changed_anime_ids = changed.into_iter().collect();
-        }
+        self.clear_links_and_rematch(&mut summary)?;
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
             "INSERT OR REPLACE INTO app_settings (key, value_json) VALUES (?1, ?2)",
@@ -699,6 +691,48 @@ impl Database {
         )
         .map_err(|e| e.to_string())?;
         Ok(summary)
+    }
+
+    /// The repair without the disk: the indexed files (as stored) are parsed again from their paths and
+    /// matched, folder links are made and cleared as in [`Self::repair_library_matches`]. Deterministic for
+    /// a given database and code, so the match lab (`examples/match_lab`) runs it on a library snapshot.
+    pub fn rematch_from_index(&self) -> Result<ScanSummary, String> {
+        let start = std::time::Instant::now();
+        self.renormalize_titles()?;
+        let rematch = self.rematch_episodes_internal(None)?;
+        let mut summary = ScanSummary {
+            total_files_indexed: rematch.files,
+            matched_files: rematch.matched,
+            changed_anime_ids: rematch.changed_anime_ids,
+            ..Default::default()
+        };
+        self.clear_links_and_rematch(&mut summary)?;
+        summary.elapsed_ms = start.elapsed().as_millis();
+        Ok(summary)
+    }
+
+    fn renormalize_titles(&self) -> Result<(), String> {
+        let renormalized = self.rebuild_normalized_titles()?;
+        if renormalized > 0 {
+            log::info!(target: "library", "normalized the titles of {} entries again", renormalized);
+        }
+        Ok(())
+    }
+
+    /// Last step of a repair, after every file was matched: clear the folder links the files contradict,
+    /// then match again without them.
+    fn clear_links_and_rematch(&self, summary: &mut ScanSummary) -> Result<(), String> {
+        let cleared = self.clear_contradicted_folder_links()?;
+        if cleared.is_empty() {
+            return Ok(());
+        }
+        let rematch = self.rematch_episodes_internal(None)?;
+        summary.matched_files = rematch.matched;
+        let mut changed: HashSet<i64> = summary.changed_anime_ids.iter().copied().collect();
+        changed.extend(cleared);
+        changed.extend(rematch.changed_anime_ids);
+        summary.changed_anime_ids = changed.into_iter().collect();
+        Ok(())
     }
 
     /// Clears folder links that the indexed files show to be wrong. Looking at the files whose nearest
@@ -1379,6 +1413,7 @@ impl Database {
             start.elapsed().as_millis()
         );
 
+        summary.files = files;
         summary.changed_anime_ids = changed_ids.into_iter().collect();
         Ok(summary)
     }
@@ -2424,6 +2459,13 @@ mod tests {
         maidragon.synonyms = vec!["Kobayashi-san Chi no Maid Dragon".into()];
         let mut bisque = entry(9000205, 9000205, "Sono Bisque Doll wa Koi wo Suru Season 2", 12, 0);
         bisque.synonyms = vec!["Kisekoi 2".into()];
+        let mut rozen = entry(9000213, 9000213, "Rozen Maiden", 12, 0);
+        rozen.start_date = Some("2004-10-08".into());
+        let mut rozen_2013 = entry(9000214, 9000214, "Rozen Maiden (2013)", 13, 0);
+        rozen_2013.start_date = Some("2013-07-05".into());
+        let mut kiss_x_sis = entry(9000215, 9000215, "kiss×sis", 12, 0);
+        kiss_x_sis.format = "OVA".into();
+        kiss_x_sis.synonyms = vec!["Kiss x Sis".into()];
         db.upsert_anime_entries_batch(&[
             entry(9000201, 9000201, "Overlord II", 13, 0),
             maidragon,
@@ -2437,6 +2479,9 @@ mod tests {
             entry(9000210, 9000210, "Sword Art Online: Alicization - War of Underworld", 12, 0),
             entry(9000211, 9000211, "The World God Only Knows", 12, 0),
             entry(9000212, 9000212, "The World God Only Knows: Goddesses", 12, 0),
+            rozen,
+            rozen_2013,
+            kiss_x_sis,
         ])
         .unwrap();
         link_folder(&db, 9000211, "C:\\lib\\The World God Only Knows");
@@ -2453,7 +2498,14 @@ mod tests {
         let season_folder = "C:\\lib\\Non Non Biyori\\Season 2\\[AO] Non Non Biyori Repeat 01 [BD 1080p][9E769B37].mkv";
         let no_accent = "C:\\lib\\[Ayu]_Rozen_Maiden_-_Traumend_02_[24A3AD38].avi";
         let in_between = "C:\\lib\\[Group] Sword Art Online - Alicization - 05 [BD 720p] [0574F62D].mkv";
-        for path in [special, episode, respelled, one_letter, season_folder, no_accent, in_between] {
+        let remake = "C:\\lib\\Rozen Maiden\\Season 3\\[Zaphod] Rozen Maiden (2013) - 01 [BDRip 1920x1080 x264 Hi10P FLAC].[7D15878E].mkv";
+        let season_zero = "C:\\lib\\Sword Art Online\\Specials\\Sword Art Online - S00E10 - Sword Art Online Extra Edition.mkv";
+        let between = "C:\\lib\\Overlord II\\[Commie] Overlord II - 5.5 [56CF43E1].mkv";
+        let ova_entry = "C:\\lib\\Kiss x Sis\\[Tsundere] Kiss X Sis OVA - 01 [BDRip h264 1280x720 10bit FLAC][E712B9F5].mkv";
+        for path in [
+            special, episode, respelled, one_letter, season_folder, no_accent, in_between, remake, season_zero,
+            ova_entry, between,
+        ] {
             seed_episode(&db, path, None, 0);
         }
         db.rematch_all_local_episodes().unwrap();
@@ -2473,252 +2525,14 @@ mod tests {
         // The folder says season 3: never the first season's entry, the arc's own entry instead
         assert_eq!(owner(&db, arc_episode), (Some(9000212), Some(4)));
         assert_eq!(owner(&db, arc_extra), (Some(9000212), None));
-
-        drop(db);
-        let _ = std::fs::remove_dir_all(&tmp_dir);
-    }
-
-    /// Runs the one-time repair on a copy of a real library (`TORA_AUDIT_DB`, never the file itself) and
-    /// prints what changes: who owned each file before and after, what became unmatched, which folder
-    /// links were cleared. The library folders are read from disk as in a normal scan.
-    /// `cargo test --release matcher_audit -- --ignored --nocapture`
-    #[test]
-    #[ignore]
-    fn matcher_audit() {
-        let Ok(source) = std::env::var("TORA_AUDIT_DB") else {
-            eprintln!("TORA_AUDIT_DB not set");
-            return;
-        };
-        let tmp_dir = std::env::temp_dir().join("tora_matcher_audit");
-        let _ = std::fs::remove_dir_all(&tmp_dir);
-        std::fs::create_dir_all(&tmp_dir).unwrap();
-        let copy = tmp_dir.join("audit.db");
-        std::fs::copy(&source, &copy).expect("copy the audit database");
-        let db = Database::open(&copy).expect("open the copy");
-
-        type Snapshot = HashMap<String, (Option<i64>, Option<u32>, Option<String>)>;
-        let snapshot = |db: &Database| -> Snapshot {
-            let conn = db.conn.lock().unwrap();
-            let mut stmt = conn
-                .prepare("SELECT file_path, matched_anime_id, episode_number, match_kind FROM local_episodes")
-                .unwrap();
-            let rows = stmt
-                .query_map([], |r| Ok((r.get::<_, String>(0)?, (r.get(1)?, r.get(2)?, r.get(3)?))))
-                .unwrap();
-            rows.flatten().collect()
-        };
-        let folders = |db: &Database| -> HashMap<i64, String> {
-            let conn = db.conn.lock().unwrap();
-            let mut stmt = conn
-                .prepare("SELECT id, custom_folder FROM anime_entries WHERE custom_folder IS NOT NULL AND custom_folder != ''")
-                .unwrap();
-            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
-            rows.flatten().collect()
-        };
-        let titles: HashMap<i64, String> = {
-            let conn = db.conn.lock().unwrap();
-            let mut stmt = conn.prepare("SELECT id, title_romaji FROM anime_entries").unwrap();
-            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
-            rows.flatten().collect()
-        };
-        let title = |id: Option<i64>| match id {
-            Some(id) => titles.get(&id).cloned().unwrap_or_else(|| format!("#{id}")),
-            None => "(unmatched)".to_string(),
-        };
-
-        let before = snapshot(&db);
-        let folders_before = folders(&db);
-        let start = std::time::Instant::now();
-        let summary = db.repair_library_matches().expect("repair");
-        let elapsed = start.elapsed();
-        let after = snapshot(&db);
-        let folders_after = folders(&db);
-
-        let matched = |s: &Snapshot| s.values().filter(|v| v.0.is_some()).count();
-        let with_episode = |s: &Snapshot| s.values().filter(|v| v.1.is_some()).count();
-        eprintln!(
-            "[audit] {} files -> {} | matched {} -> {} | with an episode {} -> {} | {} ms | {} entries changed",
-            before.len(),
-            after.len(),
-            matched(&before),
-            matched(&after),
-            with_episode(&before),
-            with_episode(&after),
-            elapsed.as_millis(),
-            summary.changed_anime_ids.len()
-        );
-        let mut kinds: HashMap<String, usize> = HashMap::new();
-        for v in after.values() {
-            *kinds.entry(v.2.clone().unwrap_or_else(|| "unmatched".into())).or_default() += 1;
-        }
-        let mut kinds: Vec<_> = kinds.into_iter().collect();
-        kinds.sort_by(|a, b| b.1.cmp(&a.1));
-        eprintln!("[audit] matched by: {:?}", kinds);
-
-        let mut moves: HashMap<(String, String), (usize, String)> = HashMap::new();
-        let mut episode_changes = 0usize;
-        for (path, new) in &after {
-            let Some(old) = before.get(path) else { continue };
-            if old.0 != new.0 {
-                let entry = moves.entry((title(old.0), title(new.0))).or_insert((0, path.clone()));
-                entry.0 += 1;
-            } else if old.1 != new.1 {
-                episode_changes += 1;
-            }
-        }
-        let total_moved: usize = moves.values().map(|m| m.0).sum();
-        eprintln!("[audit] {} files changed owner, {} kept their owner with another episode number", total_moved, episode_changes);
-        let limit: usize = std::env::var("TORA_AUDIT_SAMPLES").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
-        for (label, keep) in [
-            ("newly unmatched", (|m: &(String, String)| m.1 == "(unmatched)") as fn(&(String, String)) -> bool),
-            ("newly matched", |m| m.0 == "(unmatched)"),
-            ("moved to another anime", |m| m.0 != "(unmatched)" && m.1 != "(unmatched)"),
-        ] {
-            let mut group: Vec<_> = moves.iter().filter(|(k, _)| keep(k)).collect();
-            group.sort_by(|a, b| b.1 .0.cmp(&a.1 .0).then(a.0.cmp(b.0)));
-            let files: usize = group.iter().map(|(_, v)| v.0).sum();
-            eprintln!("\n## {label}: {} files in {} groups", files, group.len());
-            for ((old, new), (count, sample)) in group.iter().take(limit) {
-                let name = sample.rsplit('\\').next().unwrap_or(sample);
-                eprintln!("  {count:4}  {old}  ->  {new}\n          e.g. {name}");
-            }
-        }
-
-        let mut cleared: Vec<_> = folders_before
-            .iter()
-            .filter(|(id, _)| !folders_after.contains_key(*id))
-            .collect();
-        cleared.sort();
-        eprintln!("\n## folder links cleared: {}", cleared.len());
-        for (id, dir) in &cleared {
-            eprintln!("  {}  <-  {}", dir, title(Some(**id)));
-        }
-        let mut relinked: Vec<_> = folders_after
-            .iter()
-            .filter(|(id, dir)| folders_before.get(*id) != Some(*dir))
-            .collect();
-        relinked.sort();
-        eprintln!("\n## folder links added or moved: {}", relinked.len());
-        for (id, dir) in relinked.iter().take(limit) {
-            eprintln!("  {}  <-  {}", dir, title(Some(**id)));
-        }
-
-        for needle in ["\\Fate\\Fate Stay Night", "\\Fate\\Fate Zero", "\\Black Lagoon\\"] {
-            let mut rows: Vec<_> = after.iter().filter(|(p, _)| p.contains(needle)).collect();
-            rows.sort_by(|a, b| a.0.cmp(b.0));
-            let mut counts: Vec<(String, usize, Vec<u32>)> = Vec::new();
-            for (_, v) in &rows {
-                let name = title(v.0);
-                match counts.iter_mut().find(|c| c.0 == name) {
-                    Some(c) => {
-                        c.1 += 1;
-                        c.2.extend(v.1);
-                    }
-                    None => counts.push((name, 1, v.1.into_iter().collect())),
-                }
-            }
-            eprintln!("\n## {needle}");
-            for (name, count, mut episodes) in counts {
-                episodes.sort_unstable();
-                eprintln!("  {count:3}  {name}  episodes {:?}", episodes);
-            }
-        }
-
-        // Fuzzy matches by how the name relates to the title (the weakest kind is listed)
-        {
-            let matcher = db.matcher_index().unwrap();
-            let conn = db.conn.lock().unwrap();
-            let mut stmt = conn
-                .prepare(
-                    "SELECT normalized_title, matched_anime_id, COUNT(*) FROM local_episodes
-                     WHERE match_kind = 'fuzzy' GROUP BY 1, 2 ORDER BY 3 DESC",
-                )
-                .unwrap();
-            let groups: Vec<(String, i64, usize)> = stmt
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-                .unwrap()
-                .flatten()
-                .collect();
-            let mut tiers: HashMap<String, (usize, usize)> = HashMap::new();
-            let mut extended: Vec<(usize, String, String)> = Vec::new();
-            for (norm, aid, count) in groups {
-                let tier = matcher
-                    .fuzzy_scores(&norm)
-                    .into_iter()
-                    .find(|c| c.1 == aid)
-                    .map(|c| c.2.rsplit('(').next().unwrap_or("").trim_end_matches(')').to_string())
-                    // Guessed from the name without its folder's season (`own_title_fuzzy`)
-                    .unwrap_or_else(|| "without the folder's season".into());
-                let entry = tiers.entry(tier.clone()).or_default();
-                entry.0 += 1;
-                entry.1 += count;
-                if tier == "Extended" {
-                    extended.push((count, norm, title(Some(aid))));
-                }
-            }
-            eprintln!("\n## fuzzy matches (titles, files) by tier: {:?}", tiers);
-            for (count, norm, name) in extended.iter().take(limit) {
-                eprintln!("  {count:4}  {norm:?}  ->  {name}");
-            }
-        }
-
-        // TORA_AUDIT_EXPLAIN="part of a path|another": how those files are parsed and matched
-        if let Ok(needles) = std::env::var("TORA_AUDIT_EXPLAIN") {
-            let matcher = db.matcher_index().unwrap();
-            let roots: Vec<String> = db.list_library_folders().unwrap().into_iter().map(|f| f.path).collect();
-            let mut paths: Vec<&String> = after.keys().collect();
-            paths.sort();
-            for needle in needles.split('|').filter(|n| !n.is_empty()) {
-                eprintln!("\n## explain {needle}");
-                for path in paths.iter().filter(|p| p.contains(needle)).take(4) {
-                    let root = roots.iter().find(|r| path.starts_with(r.as_str())).cloned().unwrap_or_default();
-                    let parsed = parse_library_file(Path::new(&root), Path::new(path.as_str()));
-                    let cands = matcher.title_candidates(&parsed.normalized_title);
-                    let names = |ids: &[i64]| ids.iter().map(|id| title(Some(*id))).collect::<Vec<_>>();
-                    eprintln!("  {path}");
-                    eprintln!(
-                        "    title {:?} season {:?} episode {:?} year {:?} leading {:?} parent {:?}",
-                        parsed.normalized_title,
-                        parsed.anime_season,
-                        parsed.episode_number,
-                        parsed.anime_year,
-                        parsed.leading_number,
-                        parsed.parent_title
-                    );
-                    eprintln!(
-                        "    alias {:?} exact {:?} fuzzy {:?} folder {:?}",
-                        cands.alias.map(|id| title(Some(id))),
-                        names(&cands.exact),
-                        cands.fuzzy.map(|id| title(Some(id))),
-                        names(matcher.folder_candidates(path))
-                    );
-                    for (score, id, text) in matcher.fuzzy_scores(&parsed.normalized_title).iter().take(5) {
-                        eprintln!("      {:.3}  {}  [{}]", score, text, title(Some(*id)));
-                    }
-                    if let Some(own) = parsed.own_title.as_deref() {
-                        let own_cands = matcher.title_candidates(own);
-                        eprintln!(
-                            "    without the folder's season {:?}: exact {:?} fuzzy {:?}",
-                            own,
-                            names(&own_cands.exact),
-                            own_cands.fuzzy.map(|id| title(Some(id)))
-                        );
-                        for (score, id, text) in matcher.fuzzy_scores(own).iter().take(5) {
-                            eprintln!("      {:.3}  {}  [{}]", score, text, title(Some(*id)));
-                        }
-                    }
-                    let m = matcher.resolve(&cands, &parsed, Some(path.as_str()));
-                    eprintln!(
-                        "    -> {}",
-                        m.map_or("(unmatched)".to_string(), |m| format!("{} episode {:?} by {}", m.title, m.episode, m.kind.as_str()))
-                    );
-                }
-            }
-        }
-
-        // A second repair changes nothing
-        let again = db.rematch_episodes_internal(None).expect("second rematch");
-        eprintln!("\n[audit] second pass updates: {}", again.updated);
+        // The year picks the remake also when the season came from a folder
+        assert_eq!(owner(&db, remake), (Some(9000214), Some(1)));
+        // Season 0 holds specials: the anime, no episode of the series
+        assert_eq!(owner(&db, season_zero), (Some(9000209), None));
+        // "5.5" is found as episode 5 would be, then is an extra
+        assert_eq!(owner(&db, between), (Some(9000201), None));
+        // An entry that is itself the OVA keeps the episode numbers of "OVA - 01"
+        assert_eq!(owner(&db, ova_entry), (Some(9000215), Some(1)));
 
         drop(db);
         let _ = std::fs::remove_dir_all(&tmp_dir);

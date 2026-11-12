@@ -162,6 +162,16 @@ private:
       return false;
     };
 
+    // A word of 8 hexadecimal digits is a checksum, even when it starts with a keyword that takes a
+    // number (e.g. `[ED204890]` is not the ending `ED` followed by `204890`)
+    static constexpr auto is_checksum_word = [](const std::u32string_view view) {
+      const auto word = view | std::views::take_while(is_text);
+      return std::ranges::distance(word) == 8 &&
+             std::ranges::all_of(word, [](const char32_t ch) { return ch < 0x80 && is_xdigit(static_cast<char>(ch)); });
+    };
+
+    if (is_checksum_word(view_)) return {};
+
     const std::string key = find_key(view_);
 
     if (key.empty()) return {};

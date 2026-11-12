@@ -69,6 +69,11 @@ public:
       add_element(parse_part(tokens_));
     }
 
+    // Release group that starts the name, before the episode can take a number in it
+    if (options.parse_release_group) {
+      add_element(parse_leading_release_group(tokens_));
+    }
+
     // Episode
     if (options.parse_episode) {
       add_elements(parse_volume(tokens_));

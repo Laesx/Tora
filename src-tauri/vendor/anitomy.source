@@ -1,0 +1,6 @@
+# Anitomy is vendored from a fork: change it there, then run scripts/sync-anitomy.ps1 (AGENTS.md section 2).
+repository: https://github.com/Laesx/anitomy.git
+ref: tora
+commit: f39bc49b0b01b403a446a53b8eb28d5f749cecb9
+tree: 4ca5731e76aafe427b213620e3f8e07c850aa13c
+upstream: https://github.com/erengy/anitomy develop 8498b538f5ddeedaef1b3fa5ad4bf6d67dd67d35
