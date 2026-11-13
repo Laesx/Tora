@@ -78,7 +78,7 @@ export const InfoPanel: React.FC<{
   ].filter((r) => r.value !== null && r.value !== undefined && r.value !== "");
 
   return (
-    <PageSection title="Information">
+    <PageSection id="info" title="Information">
       <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-xs">
         {rows.map((r) => (
           <React.Fragment key={r.label}>

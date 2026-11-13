@@ -17,6 +17,7 @@ export const StaffSection: React.FC<{ anime: AnimeEntry; details: MediaDetails }
 
   return (
     <PageSection
+      id="staff"
       title={
         <>
           <Clapperboard className="w-4 h-4 text-accent" />

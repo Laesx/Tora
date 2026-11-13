@@ -11,6 +11,7 @@ import { useScoreFormat } from "@/contexts/scoreFormat";
 import { useToast } from "@/contexts/toast";
 import { useNow } from "@/hooks/useNow";
 import { PageSection } from "./PageSection";
+import { useSectionCollapsed } from "./sectionPrefs";
 
 /**
  * The people the account follows who have this anime: status, progress, score (in this account's
@@ -25,6 +26,7 @@ export const FollowingSection: React.FC<{ anime: AnimeEntry }> = ({ anime }) => 
   const [loading, setLoading] = useState(false);
   const [openNotes, setOpenNotes] = useState<Set<number>>(new Set());
   const mediaId = anime.anilist_id ?? anime.id;
+  const collapsed = useSectionCollapsed("following");
 
   const load = (refresh: boolean) => {
     setLoading(true);
@@ -38,10 +40,27 @@ export const FollowingSection: React.FC<{ anime: AnimeEntry }> = ({ anime }) => 
   useEffect(() => {
     setPage(null);
     setOpenNotes(new Set());
-    load(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mediaId]);
 
+  // Fetched once the section is open (collapsed: no request)
+  useEffect(() => {
+    if (!collapsed) load(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mediaId, collapsed]);
+
+  const title = (
+    <>
+      <UserCheck className="w-4 h-4 text-accent" />
+      Following
+      {page && (
+        <span className="text-[11px] font-medium text-text-muted">
+          {page.entries.length}
+          {page.has_more ? "+" : ""}
+        </span>
+      )}
+    </>
+  );
+  if (collapsed) return <PageSection id="following" title={title}>{null}</PageSection>;
   if (!page || page.entries.length === 0) return null;
 
   const toggleNote = (userId: number) =>
@@ -54,13 +73,8 @@ export const FollowingSection: React.FC<{ anime: AnimeEntry }> = ({ anime }) => 
 
   return (
     <PageSection
-      title={
-        <>
-          <UserCheck className="w-4 h-4 text-accent" />
-          Following
-          <span className="text-[11px] font-medium text-text-muted">{page.entries.length}{page.has_more ? "+" : ""}</span>
-        </>
-      }
+      id="following"
+      title={title}
       aside={
         <button
           onClick={() => load(true)}

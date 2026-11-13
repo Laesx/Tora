@@ -19,6 +19,7 @@ export const RecommendationsSection: React.FC<{ details: MediaDetails; listById:
   if (items.length === 0) return null;
   return (
     <PageSection
+      id="recommendations"
       title={
         <>
           <ThumbsUp className="w-4 h-4 text-accent" />

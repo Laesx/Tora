@@ -172,11 +172,13 @@ Tora/
 │   │   │   ├── CommandPalette.tsx        # Ctrl+S keyboard palette: Anime / Commands tabs, recents, AniList row, Right-arrow anime actions
 │   │   │   └── animeActions.ts           # Keyboard action list for one anime (palette → Right arrow)
 │   │   ├── anime/                        # The anime page (full page and Now Playing)
-│   │   │   ├── AnimePage.tsx             # Hero, your controls, episodes & files, synopsis, related, characters, staff, recommendations | info, history, following, settings
-│   │   │   ├── AnimePageView.tsx         # The full page in place of the tab content (Back button)
+│   │   │   ├── AnimePage.tsx             # Hero + sections in 3 / 2 / 1 columns by the page's own width (your entry + info | episodes, synopsis, characters, staff | related, following, history, recommendations)
+│   │   │   ├── AnimePageView.tsx         # The full page as a sheet over the main area (the tab stays mounted underneath): breadcrumb, close
 │   │   │   ├── AnimeHero.tsx             # Banner / cover / titles, badges, progress, actions, genres + tags; slots for Now Playing
 │   │   │   ├── InfoPanel.tsx             # Facts, studios, rankings
-│   │   │   ├── PageSection.tsx           # Card with title + controls
+│   │   │   ├── PageSection.tsx           # Card with title + controls; with an `id` the title collapses it
+│   │   │   ├── sectionPrefs.ts           # Collapsed sections, one shared per-device list (`tora.anime.sections`, Staff collapsed by default)
+│   │   │   ├── SynopsisSection.tsx       # A few lines fading out; a click anywhere expands / collapses
 │   │   │   ├── useMediaDetails.ts        # Stored details (characters, staff, recommendations), refresh, load more characters
 │   │   │   ├── CharactersSection.tsx     # Characters + voice actors (language picker in `tora.anime.prefs`), 9 shown, Show all = windowed list loading pages on scroll
 │   │   │   ├── StaffSection.tsx          # Staff (9 shown, Show all for the stored 25)
@@ -398,6 +400,7 @@ Rules that keep it that way:
 ### 5c. Back / Forward Navigation (`src/app/navigation.ts`, `useNavHistory.ts`)
 - An in-app history like a browser's (no router, no `history.pushState`): the sidebar ← / → buttons, Alt+← / →, mouse back / forward and the palette's Go Back / Go Forward. They wait while a modal, the palette or Settings is open; the drawer is part of the page.
 - A location is the active tab's `NavView` (small, serializable, typed per tab) + the open drawer + the open full anime page (`page`, shown in place of the tab content; `openAnimePage`, any tab change closes it) + `<main>`'s scroll, plus an optional `NavCache` (History rows, Search results) that only the newest 3 entries keep. Tabs still unmount; nothing else is kept.
+- **Opening an anime** (`AnimeActions`): `openAnime` follows `AppSettings.open_anime_with` (`page` default | `quick_edit`, Settings → Appearance) and is what browsing views call (watchlist, Seasons, Search, Schedule, dashboard, palette, cards); `openAnimeAlternate` is the other one (Space on a selection, Ctrl+click). Views where the anime is a reference inside another task (Torrents, History, Stats, Library) call `openQuickEdit`. Right-click menus offer both. The anime page is a sheet over `<main>` (`AnimePageView`, `animePage` in App): the tab underneath stays mounted and `inert`, Esc closes it after the drawer, closing drops the entry its opening added (like the drawer), any tab change closes it.
 - **Every jump pushes first**: App's handlers call `remember()` before changing the tab or opening a different anime (sidebar, Ctrl+1–8, palette, drawer → Seasons / Torrents, Stats → History / Watchlist, new playback session → Now Playing…). A view changing its own page calls `useNavigation().remember()` (History → anime timeline). Closing the drawer drops the entry its opening added.
 - Views report their state with `useNavCapture(tab, …)` (the Watchlist's lives in App) and take it back through their existing request prop (`SeasonRequest.filter`, `HistoryRequest.search / anime / cache`, `SearchRequest.cache`, `TorrentsRequest`, `ScheduleRequest`). A new tab with state to restore needs a `NavView` variant, a capture and a case in App's `applyLocation`.
 - Scroll is restored on animation frames until the view is tall enough (≤ 90 frames); user scroll input stops it. An account switch clears the history.

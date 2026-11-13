@@ -5,6 +5,7 @@ import { openExternal } from "@/lib/anime";
 import { usePrefs } from "@/hooks/usePrefs";
 import { useToast } from "@/contexts/toast";
 import { PageSection } from "./PageSection";
+import { useSectionCollapsed } from "./sectionPrefs";
 
 /** Characters shown before "Show all". */
 const PREVIEW_COUNT = 9;
@@ -105,6 +106,7 @@ export const CharactersSection: React.FC<{
   const [width, setWidth] = useState(900);
   const [scrollTop, setScrollTop] = useState(0);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const collapsed = useSectionCollapsed("characters");
 
   const characters = details.characters;
   const languages = useMemo(() => languagesOf(characters), [characters]);
@@ -117,7 +119,7 @@ export const CharactersSection: React.FC<{
     const ro = new ResizeObserver(() => setWidth(el.clientWidth));
     ro.observe(el);
     return () => ro.disconnect();
-  }, []);
+  }, [collapsed]);
 
   const cols = columnsFor(width);
   const rowCount = Math.ceil(characters.length / cols);
@@ -128,14 +130,15 @@ export const CharactersSection: React.FC<{
 
   // Expanded: keep loading while the end of what is loaded is (nearly) in view
   useEffect(() => {
-    if (expanded && nearEnd && details.characters_has_more && !loadingMore) onLoadMore();
-  }, [expanded, nearEnd, details.characters_has_more, loadingMore, onLoadMore]);
+    if (!collapsed && expanded && nearEnd && details.characters_has_more && !loadingMore) onLoadMore();
+  }, [collapsed, expanded, nearEnd, details.characters_has_more, loadingMore, onLoadMore]);
 
   if (characters.length === 0) return null;
   const canExpand = characters.length > PREVIEW_COUNT || details.characters_has_more;
 
   return (
     <PageSection
+      id="characters"
       title={
         <>
           <Users className="w-4 h-4 text-accent" />

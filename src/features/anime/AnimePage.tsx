@@ -17,6 +17,7 @@ import { EntrySettings } from "@/features/detail/EntrySettings";
 import { AnimeHero, AnimeHeroSlots } from "./AnimeHero";
 import { InfoPanel } from "./InfoPanel";
 import { PageSection } from "./PageSection";
+import { SynopsisSection } from "./SynopsisSection";
 import { useMediaDetails } from "./useMediaDetails";
 import { CharactersSection } from "./CharactersSection";
 import { StaffSection } from "./StaffSection";
@@ -78,7 +79,6 @@ export const AnimePage: React.FC<AnimePageProps> = ({
   const pinned = usePinnedRelease(anime.id);
   // Stored metadata (tags, studios, rankings, relations): fetched from AniList once if missing
   const [media, setMedia] = useState<SeasonalAnime | null>(null);
-  const [synopsisOpen, setSynopsisOpen] = useState(false);
 
   const mediaId = anime.anilist_id ?? anime.id;
   useEffect(() => {
@@ -156,20 +156,7 @@ export const AnimePage: React.FC<AnimePageProps> = ({
         />
       </PageSection>
     ),
-    synopsis: anime.synopsis && (
-      <PageSection title="Synopsis">
-        <p
-          className={`text-xs leading-relaxed text-text-secondary whitespace-pre-line ${synopsisOpen ? "" : "line-clamp-6"}`}
-        >
-          {anime.synopsis}
-        </p>
-        {anime.synopsis.length > 400 && (
-          <button onClick={() => setSynopsisOpen((v) => !v)} className="text-[11px] font-semibold text-accent hover:underline">
-            {synopsisOpen ? "Show less" : "Show more"}
-          </button>
-        )}
-      </PageSection>
-    ),
+    synopsis: anime.synopsis && <SynopsisSection synopsis={anime.synopsis} />,
     relations: hasVisibleRelations(relations) && (
       <PageSection>
         <RelationsPanel relations={relations} listById={listById} />

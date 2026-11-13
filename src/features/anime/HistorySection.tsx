@@ -34,6 +34,7 @@ export const HistorySection: React.FC<{ anime: AnimeEntry }> = ({ anime }) => {
 
   return (
     <PageSection
+      id="history"
       title={
         <>
           <History className="w-4 h-4 text-accent" />
