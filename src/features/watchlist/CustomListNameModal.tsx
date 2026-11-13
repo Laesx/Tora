@@ -1,30 +1,39 @@
 import React, { useState } from "react";
 import { createPortal } from "react-dom";
-import { ListPlus } from "lucide-react";
+import { ListPlus, Pencil } from "lucide-react";
 
-interface NewCustomListModalProps {
+interface CustomListNameModalProps {
   existingNames: string[];
-  /** Creates the list on AniList; a rejection is shown in the modal */
-  onCreate: (name: string) => Promise<void>;
+  /** The list being renamed; a new list when unset */
+  renaming?: string;
+  /** Creates / renames the list on AniList; a rejection is shown in the modal */
+  onSubmit: (name: string) => Promise<void>;
   onClose: () => void;
 }
 
-/** Name prompt for a new AniList custom list (Lists chip → "New list…"). */
-export const NewCustomListModal: React.FC<NewCustomListModalProps> = ({ existingNames, onCreate, onClose }) => {
-  const [name, setName] = useState("");
+/** Name prompt for an AniList custom list: a new one (Lists chip → "New list…") or a rename. */
+export const CustomListNameModal: React.FC<CustomListNameModalProps> = ({
+  existingNames,
+  renaming,
+  onSubmit,
+  onClose,
+}) => {
+  const [name, setName] = useState(renaming ?? "");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   const trimmed = name.trim();
-  const duplicate = existingNames.some((n) => n.trim().toLowerCase() === trimmed.toLowerCase());
+  // Renaming may change only the case of the list's own name
+  const duplicate = existingNames.some((n) => n !== renaming && n.trim().toLowerCase() === trimmed.toLowerCase());
+  const unchanged = trimmed === renaming;
   const validation = !trimmed ? null : duplicate ? `A list named "${trimmed}" already exists` : null;
 
   const submit = async () => {
-    if (!trimmed || duplicate || busy) return;
+    if (!trimmed || duplicate || unchanged || busy) return;
     setBusy(true);
     setError(null);
     try {
-      await onCreate(trimmed);
+      await onSubmit(trimmed);
       onClose();
     } catch (err) {
       setError(String(err));
@@ -53,17 +62,22 @@ export const NewCustomListModal: React.FC<NewCustomListModalProps> = ({ existing
       >
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-xl bg-accent/15 border border-accent/30 flex items-center justify-center text-accent shrink-0">
-            <ListPlus className="w-5 h-5" />
+            {renaming !== undefined ? <Pencil className="w-5 h-5" /> : <ListPlus className="w-5 h-5" />}
           </div>
-          <div>
-            <h3 className="text-sm font-bold text-text-primary">New custom list</h3>
-            <p className="text-[11px] text-text-muted">Created on your AniList account</p>
+          <div className="min-w-0">
+            <h3 className="text-sm font-bold text-text-primary truncate">
+              {renaming !== undefined ? `Rename "${renaming}"` : "New custom list"}
+            </h3>
+            <p className="text-[11px] text-text-muted">
+              {renaming !== undefined ? "Renamed on your AniList account; its anime stay in it" : "Created on your AniList account"}
+            </p>
           </div>
         </div>
 
         <div className="space-y-1.5">
           <input
             autoFocus
+            onFocus={(e) => e.target.select()}
             value={name}
             onChange={(e) => {
               setName(e.target.value);
@@ -87,10 +101,10 @@ export const NewCustomListModal: React.FC<NewCustomListModalProps> = ({ existing
           </button>
           <button
             type="submit"
-            disabled={!trimmed || duplicate || busy}
+            disabled={!trimmed || duplicate || unchanged || busy}
             className="px-4 py-2 rounded-xl bg-accent hover:bg-accent-hover text-white text-xs font-semibold transition shadow-sm cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {busy ? "Creating…" : "Create"}
+            {renaming !== undefined ? (busy ? "Renaming…" : "Rename") : busy ? "Creating…" : "Create"}
           </button>
         </div>
       </form>

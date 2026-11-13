@@ -33,6 +33,7 @@ import { FloatingQuickMenu } from "@/components/FloatingQuickMenu";
 import { useToast } from "@/contexts/toast";
 import { useAnimeActions } from "@/contexts/animeActions";
 import { useScoreFormat } from "@/contexts/scoreFormat";
+import { useCustomLists } from "@/contexts/customLists";
 import { formatScore, SCORE_SCALES } from "@/lib/scores";
 import { useScrollViewport, visibleRange } from "@/hooks/virtual";
 import { useNow } from "@/hooks/useNow";
@@ -42,10 +43,10 @@ import type { SortDir, WatchlistSortKey } from "./sort";
 import { TABLE_COLUMNS, TableColumn, TableColumnId, clampColumnWidth, useTableColumns } from "./tableColumns";
 import { formatDate } from "@/lib/dates";
 import { ScoreDropdown } from "./ScoreDropdown";
-import { useStatusDrag } from "./useStatusDrag";
+import { DropTarget, useStatusDrag } from "./useStatusDrag";
 import { StatusDropBoard } from "./StatusDropBoard";
 
-/** A titled section of the list (search results grouped by status) */
+/** A titled section of the list (search results, or All Anime / a custom list grouped by status) */
 export interface WatchlistGroup {
   status: string;
   label: string;
@@ -112,6 +113,8 @@ interface VirtualWatchlistProps {
   onSort?: (key: WatchlistSortKey) => void;
   /** `AppSettings.skip_op_ed` (table "Time left" column) */
   skipOpEd?: boolean;
+  /** The custom list shown (not while searching): the drop board offers to remove from it */
+  customList?: string | null;
 }
 
 export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
@@ -133,9 +136,11 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
   sortDir,
   onSort,
   skipOpEd = false,
+  customList = null,
 }) => {
   const showToast = useToast();
   const { openAnime, openSeason, batchUpdate } = useAnimeActions();
+  const customLists = useCustomLists();
   const titleOf = useAnimeTitle();
   const scoreFormat = useScoreFormat();
   // Stars and smileys carry their own symbol; numbers get a star icon in the table
@@ -202,13 +207,28 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
     [entriesOf, selectedAnimeIds]
   );
 
-  // Drag cards onto the status drop board
+  /** Adds the anime to a custom list or removes them from it (only those it changes) */
+  const dropOnList = (ids: number[], name: string, enabled: boolean) => {
+    const targets = entriesOf(ids).filter(
+      (a) => (customLists.membership(a.id)?.lists.includes(name) ?? false) !== enabled
+    );
+    if (targets.length === 0) return;
+    const what = targets.length === 1 ? `"${titleOf(targets[0])}"` : `${targets.length} anime`;
+    customLists
+      .apply({ anime_ids: targets.map((a) => a.id), toggles: [{ name, enabled }] })
+      .then(() => showToast(enabled ? `Added ${what} to ${name}` : `Removed ${what} from ${name}`, "success"))
+      .catch((e) => showToast(String(e), "error"));
+  };
+
+  // Drag cards onto the drop board: a status, or a custom list
   const statusDrag = useStatusDrag({
     selectedAnimeIds,
     onSetSelectedAnimeIds,
     lastClickedIdRef,
     scrollContainerRef,
-    onDrop: (ids, status) => {
+    onDrop: (ids, target: DropTarget) => {
+      if (target.kind !== "status") return dropOnList(ids, target.name, target.kind === "list");
+      const { status } = target;
       const targets = entriesOf(ids).filter((a) => a.user_status !== status);
       if (targets.length === 0) return;
       const label = STATUS_INFO[status]?.label ?? status;
@@ -230,8 +250,9 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
       drag={statusDrag.drag}
       dragged={entriesOf(statusDrag.drag.ids)}
       allAnime={allAnime}
-      hoverStatus={statusDrag.hoverStatus}
+      hoverTarget={statusDrag.hoverTarget}
       ghostRef={statusDrag.ghostRef}
+      viewingList={customList}
     />
   );
 
@@ -1407,7 +1428,7 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
   );
 };
 
-/** Status label, icon and count above a group of search results. */
+/** Status label, icon and count above a group of the list. */
 function GroupHeading({ group }: { group: WatchlistGroup }) {
   const option = LIST_STATUSES.find((o) => o.id === group.status);
   const Icon = option?.icon;

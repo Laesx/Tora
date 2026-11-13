@@ -33,7 +33,18 @@ interface NowPlayingPrefs {
   customList: string | null;
 }
 
+const PREFS_KEY = "tora.nowplaying.prefs";
 const DEFAULT_PREFS: NowPlayingPrefs = { customList: null };
+
+/** A custom list renamed on AniList: Continue Watching keeps its filter (the tab is unmounted meanwhile) */
+export function followRenamedNowPlayingList(old: string, name: string) {
+  try {
+    const stored: Partial<NowPlayingPrefs> = JSON.parse(localStorage.getItem(PREFS_KEY) ?? "{}");
+    if (stored.customList === old) localStorage.setItem(PREFS_KEY, JSON.stringify({ ...stored, customList: name }));
+  } catch {
+    // per-device convenience only
+  }
+}
 
 const CONTINUE_LIMIT = 12;
 const RECENT_DAYS = 14;
@@ -63,7 +74,7 @@ export const NowPlayingDashboard: React.FC<NowPlayingDashboardProps> = ({
   const { openAnime } = useAnimeActions();
   const titleOf = useAnimeTitle();
   const customLists = useCustomLists();
-  const [prefs, updatePrefs] = usePrefs("tora.nowplaying.prefs", DEFAULT_PREFS);
+  const [prefs, updatePrefs] = usePrefs(PREFS_KEY, DEFAULT_PREFS);
   // A list deleted (or renamed) since it was picked falls back to all anime
   const listFilter =
     prefs.customList !== null && customLists.names.includes(prefs.customList) ? prefs.customList : null;

@@ -561,6 +561,24 @@ fn without_custom_list(existing: &[String], name: &str) -> Option<Vec<String>> {
     (lists.len() != existing.len()).then_some(lists)
 }
 
+/// The full `customLists` array with `old` (exact match) renamed to `new` in its place; AniList keeps the
+/// list's entries. `None` when there is no such list, nothing changes, or another list already has the
+/// name (ignoring case; changing only the case of `old` is fine).
+fn renamed_custom_list(existing: &[String], old: &str, new: &str) -> Option<Vec<String>> {
+    let new = new.trim();
+    let at = existing.iter().position(|n| n == old)?;
+    let taken = existing
+        .iter()
+        .enumerate()
+        .any(|(i, n)| i != at && n.trim().eq_ignore_ascii_case(new));
+    if new.is_empty() || new == old || taken {
+        return None;
+    }
+    let mut lists = existing.to_vec();
+    lists[at] = new.to_string();
+    Some(lists)
+}
+
 const VIEWER_CUSTOM_LISTS_QUERY: &str =
     "query { Viewer { mediaListOptions { animeList { customLists } } } }";
 
@@ -1978,6 +1996,15 @@ impl TrackerPlugin for AniListPlugin {
     ) -> BoxFuture<'a, Result<Vec<String>, TrackerError>> {
         Box::pin(self.edit_custom_lists(token, |existing| without_custom_list(existing, name)))
     }
+
+    fn rename_custom_list<'a>(
+        &'a self,
+        token: &'a str,
+        old: &'a str,
+        new: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<String>, TrackerError>> {
+        Box::pin(self.edit_custom_lists(token, |existing| renamed_custom_list(existing, old, new)))
+    }
 }
 
 /// "12" → (12, 12), "1 - 12" → (1, 12); anything else (status-only activities) → None.
@@ -2201,6 +2228,25 @@ mod tests {
         assert_eq!(without_custom_list(&existing, "Favs"), Some(vec!["Rewatch".into()]));
         assert_eq!(without_custom_list(&existing, "Nope"), None);
         assert_eq!(without_custom_list(&["Only".to_string()], "Only"), Some(vec![]));
+    }
+
+    #[test]
+    fn renamed_custom_list_keeps_its_place() {
+        let existing = vec!["Favs".to_string(), "Rewatch".to_string(), "Later".to_string()];
+        assert_eq!(
+            renamed_custom_list(&existing, "Rewatch", " Again "),
+            Some(vec!["Favs".into(), "Again".into(), "Later".into()])
+        );
+        // Only the case changes: allowed
+        assert_eq!(
+            renamed_custom_list(&existing, "Favs", "FAVS"),
+            Some(vec!["FAVS".into(), "Rewatch".into(), "Later".into()])
+        );
+        // Taken by another list (ignoring case), missing, unchanged or empty: nothing to send
+        assert_eq!(renamed_custom_list(&existing, "Favs", "later"), None);
+        assert_eq!(renamed_custom_list(&existing, "Nope", "New"), None);
+        assert_eq!(renamed_custom_list(&existing, "Favs", "Favs"), None);
+        assert_eq!(renamed_custom_list(&existing, "Favs", "  "), None);
     }
 
     #[test]

@@ -1,8 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ListChecks, Plus, Search, Trash2 } from "lucide-react";
+import { ChevronDown, ListChecks, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import { useToast } from "@/contexts/toast";
 import { DeleteCustomListModal } from "./DeleteCustomListModal";
-import { NewCustomListModal } from "./NewCustomListModal";
+import { CustomListNameModal } from "./CustomListNameModal";
 
 interface CustomListsChipProps {
   // List names in the user's AniList order
@@ -15,6 +15,8 @@ interface CustomListsChipProps {
   onCreate?: (name: string) => Promise<void>;
   /** Deletes a list on AniList; undefined when signed out (no delete buttons) */
   onDelete?: (name: string) => Promise<void>;
+  /** Renames a list on AniList; undefined when signed out (no rename buttons) */
+  onRename?: (name: string, newName: string) => Promise<void>;
 }
 
 // Above this many lists the popover gets a filter box
@@ -28,12 +30,15 @@ export const CustomListsChip: React.FC<CustomListsChipProps> = ({
   onSelect,
   onCreate,
   onDelete,
+  onRename,
 }) => {
   const showToast = useToast();
   const [open, setOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   // List awaiting delete confirmation
   const [deleting, setDeleting] = useState<string | null>(null);
+  // List whose new name is being typed
+  const [renaming, setRenaming] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const [highlight, setHighlight] = useState(0);
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -84,6 +89,11 @@ export const CustomListsChip: React.FC<CustomListsChipProps> = ({
     setDeleting(name);
   };
 
+  const startRename = (name: string) => {
+    setOpen(false);
+    setRenaming(name);
+  };
+
   const onKeyDown = (e: React.KeyboardEvent) => {
     // Keep Escape / arrows away from the global watchlist handler
     e.stopPropagation();
@@ -105,6 +115,9 @@ export const CustomListsChip: React.FC<CustomListsChipProps> = ({
       // Only from the list itself, so Delete still edits the filter text
       e.preventDefault();
       startDelete(visible[highlight]);
+    } else if (e.key === "F2" && onRename && visible[highlight]) {
+      e.preventDefault();
+      startRename(visible[highlight]);
     }
   };
 
@@ -114,16 +127,16 @@ export const CustomListsChip: React.FC<CustomListsChipProps> = ({
     <div ref={rootRef} className="relative">
       <button
         onClick={() => setOpen((o) => !o)}
-        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 max-w-52 ${isActive
+        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 w-40 ${isActive
           ? "bg-accent text-white shadow-sm"
           : "text-text-secondary hover:text-text-primary"
           }`}
-        title="AniList custom lists"
+        title={active !== null ? `${active} (AniList custom list)` : "AniList custom lists"}
       >
         <ListChecks className="w-3.5 h-3.5 shrink-0" />
-        <span className="truncate">{active ?? "Lists"}</span>
+        <span className="flex-1 min-w-0 truncate text-left">{active ?? "Custom lists"}</span>
         <span
-          className={`text-[10px] font-mono px-1.5 py-0.2 rounded-full ${isActive ? "bg-black/25 text-white" : "bg-bg-tertiary text-text-muted"
+          className={`shrink-0 text-[10px] font-mono px-1.5 py-0.2 rounded-full ${isActive ? "bg-black/25 text-white" : "bg-bg-tertiary text-text-muted"
             }`}
         >
           {active !== null ? counts.get(active) ?? 0 : names.length}
@@ -169,6 +182,20 @@ export const CustomListsChip: React.FC<CustomListsChipProps> = ({
                 <span className="truncate">{name}</span>
                 <span className="flex items-center gap-1.5 shrink-0">
                   <span className="text-[10px] font-mono text-text-muted">{counts.get(name) ?? 0}</span>
+                  {onRename && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        startRename(name);
+                      }}
+                      className={`p-0.5 rounded text-text-muted hover:text-accent hover:bg-accent/10 transition ${i === highlight ? "opacity-100" : "opacity-0"
+                        }`}
+                      title="Rename list (F2)"
+                      aria-label={`Rename list ${name}`}
+                    >
+                      <Pencil className="w-3 h-3" />
+                    </button>
+                  )}
                   {onDelete && (
                     <button
                       onClick={(e) => {
@@ -215,13 +242,25 @@ export const CustomListsChip: React.FC<CustomListsChipProps> = ({
       )}
 
       {creating && onCreate && (
-        <NewCustomListModal
+        <CustomListNameModal
           existingNames={names}
-          onCreate={async (name) => {
+          onSubmit={async (name) => {
             await onCreate(name);
             showToast(`Created list "${name}" on AniList`, "success");
           }}
           onClose={() => setCreating(false)}
+        />
+      )}
+
+      {renaming !== null && onRename && (
+        <CustomListNameModal
+          existingNames={names}
+          renaming={renaming}
+          onSubmit={async (name) => {
+            await onRename(renaming, name);
+            showToast(`Renamed list "${renaming}" to "${name}" on AniList`, "success");
+          }}
+          onClose={() => setRenaming(null)}
         />
       )}
     </div>

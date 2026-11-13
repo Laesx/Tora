@@ -3891,6 +3891,16 @@ impl Database {
     /// entry left in no list is no longer hidden from status lists). Nothing is queued: the tracker
     /// already applied the change.
     pub fn set_custom_list_names(&self, names: &[String]) -> Result<(), String> {
+        self.store_custom_list_names(names, None)
+    }
+
+    /// [`set_custom_list_names`](Self::set_custom_list_names) after the tracker renamed list `old` to `new`:
+    /// memberships of `old`, unsent edits included, follow the new name (never queues a push).
+    pub fn rename_custom_list(&self, old: &str, new: &str, names: &[String]) -> Result<(), String> {
+        self.store_custom_list_names(names, Some((old, new)))
+    }
+
+    fn store_custom_list_names(&self, names: &[String], renamed: Option<(&str, &str)>) -> Result<(), String> {
         let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         if read_custom_list_names(&tx)? != names {
@@ -3906,7 +3916,14 @@ impl Database {
             };
             for (id, lists_json) in rows {
                 let lists = parse_list_names_json(&lists_json);
-                let kept: Vec<String> = lists.iter().filter(|n| names.contains(n)).cloned().collect();
+                let kept: Vec<String> = lists
+                    .iter()
+                    .map(|n| match renamed {
+                        Some((old, new)) if n == old => new.to_string(),
+                        _ => n.clone(),
+                    })
+                    .filter(|n| names.contains(n))
+                    .collect();
                 if kept != lists {
                     let kept_json = serde_json::to_string(&kept).map_err(|e| e.to_string())?;
                     tx.execute(

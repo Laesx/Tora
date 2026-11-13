@@ -1,12 +1,10 @@
 import React, { useLayoutEffect, useRef, useState } from "react";
 import { ChevronUp, HardDrive, Plus } from "lucide-react";
 import { AnimeEntry, MediaRelation } from "@/lib/types";
-import { toraApi } from "@/lib/api";
 import { getOptimizedCoverUrl } from "@/lib/covers";
 import { formatEnum } from "@/lib/anime";
 import { STATUS_INFO } from "@/lib/status";
 import { useAnimeTitle } from "@/contexts/titles";
-import { useToast } from "@/contexts/toast";
 import { useAnimeActions } from "@/contexts/animeActions";
 
 export interface MediaCardItem {
@@ -33,9 +31,8 @@ export const MediaCardGrid: React.FC<{
   /** Show only this many rows (the last slot a "+N more" tile) until expanded; all when unset */
   maxRows?: number;
 }> = ({ items, listById, maxRows }) => {
-  const showToast = useToast();
   const titleOf = useAnimeTitle();
-  const { openAnime, openAnimeAlternate, addAnime } = useAnimeActions();
+  const { openAnime, openAnimeAlternate, addAnime, resolveAnime } = useAnimeActions();
   const [busyId, setBusyId] = useState<number | null>(null);
   const [expanded, setExpanded] = useState(false);
   const gridRef = useRef<HTMLDivElement | null>(null);
@@ -55,30 +52,25 @@ export const MediaCardGrid: React.FC<{
   const overflows = maxRows !== undefined && items.length > perRow * maxRows;
   const shown = overflows && !expanded ? items.slice(0, perRow * maxRows - 1) : items;
 
-  /** The full media of an anime not on the list (stored, or fetched once from AniList). */
-  const remoteMedia = async (id: number): Promise<AnimeEntry | null> => {
+  /** The list entry or full media, with the card disabled while it is fetched */
+  const resolve = async (id: number): Promise<AnimeEntry | null> => {
     setBusyId(id);
     try {
-      const media = await toraApi.getMediaMetadata(id);
-      if (!media) showToast("AniList has no data for this anime", "error");
-      return media;
-    } catch (e) {
-      showToast(String(e), "error");
-      return null;
+      return await resolveAnime(id);
     } finally {
       setBusyId(null);
     }
   };
 
   const open = async (m: MediaRelation, alternate: boolean) => {
-    const target = listById.get(m.id) ?? (await remoteMedia(m.id));
+    const target = await resolve(m.id);
     if (!target) return;
     if (alternate) openAnimeAlternate(target);
     else openAnime(target);
   };
 
   const addToPlanning = async (m: MediaRelation) => {
-    const media = await remoteMedia(m.id);
+    const media = await resolve(m.id);
     if (media) await addAnime(media, "PLANNING");
   };
 

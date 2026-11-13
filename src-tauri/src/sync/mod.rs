@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -566,7 +566,12 @@ impl Drop for InProgressGuard<'_> {
 enum ListEdit {
     Create(String),
     Delete(String),
+    Rename { old: String, new: String },
 }
+
+/// Membership edits wait this long for more before they are pushed, so a burst (a move between lists,
+/// a few toggles) becomes one save per entry.
+const CUSTOM_LIST_PUSH_DELAY: Duration = Duration::from_millis(1500);
 
 pub struct TrackerSyncService {
     db: Arc<Database>,
@@ -589,6 +594,10 @@ pub struct TrackerSyncService {
     following_cache: Mutex<HashMap<i64, (Instant, String, crate::plugins::FollowingPage)>>,
     /// Serializes anime page reads, so a repeated call is served by the first one's stored results.
     page_lock: tokio::sync::Mutex<()>,
+    custom_list_push_delay: Duration,
+    /// Latest membership edit per entry: a delayed push that isn't the latest leaves it to that one.
+    custom_list_edits: Mutex<HashMap<i64, u64>>,
+    custom_list_edit_seq: AtomicU64,
 }
 
 impl TrackerSyncService {
@@ -613,7 +622,16 @@ impl TrackerSyncService {
             history_retry_scale: 1,
             following_cache: Mutex::new(HashMap::new()),
             page_lock: tokio::sync::Mutex::new(()),
+            custom_list_push_delay: CUSTOM_LIST_PUSH_DELAY,
+            custom_list_edits: Mutex::new(HashMap::new()),
+            custom_list_edit_seq: AtomicU64::new(0),
         }
+    }
+
+    /// Override how long membership edits wait before they are pushed (tests).
+    pub fn with_custom_list_push_delay(mut self, delay: Duration) -> Self {
+        self.custom_list_push_delay = delay;
+        self
     }
 
     /// Override the AniList history import's page spacing and retry waits (tests).
@@ -797,8 +815,9 @@ impl TrackerSyncService {
     }
 
     /// Add entries to / remove them from custom lists, or toggle "hidden from status lists". Changed entries
-    /// are queued like any edit (`sync_pending` + a dirty membership row) and pushed in the background when
-    /// signed in. Returns the full custom-list state.
+    /// are queued like any edit (`sync_pending` + a dirty membership row, written now) and pushed in the
+    /// background when signed in, once no further edit of the entry came for `CUSTOM_LIST_PUSH_DELAY`.
+    /// Returns the full custom-list state.
     pub async fn set_custom_lists(
         self: &Arc<Self>,
         change: CustomListChange,
@@ -813,9 +832,30 @@ impl TrackerSyncService {
             .await?;
 
         if signed_in && !ids.is_empty() {
+            let seq = self.custom_list_edit_seq.fetch_add(1, Ordering::Relaxed) + 1;
+            {
+                let mut latest = self.custom_list_edits.lock().unwrap();
+                for &id in &ids {
+                    latest.insert(id, seq);
+                }
+            }
             let this = Arc::clone(self);
             tokio::spawn(async move {
-                for id in ids {
+                tokio::time::sleep(this.custom_list_push_delay).await;
+                // Entries edited again since are pushed by that edit's task
+                let mine: Vec<i64> = {
+                    let mut latest = this.custom_list_edits.lock().unwrap();
+                    ids.into_iter()
+                        .filter(|id| {
+                            let is_latest = latest.get(id) == Some(&seq);
+                            if is_latest {
+                                latest.remove(id);
+                            }
+                            is_latest
+                        })
+                        .collect()
+                };
+                for id in mine {
                     this.push_entry(id).await;
                 }
             });
@@ -824,8 +864,7 @@ impl TrackerSyncService {
     }
 
     /// Create a custom list on AniList right away (signed in only; never queued) and store the
-    /// tracker's resulting list names. Renaming lists stays on AniList. Returns the full
-    /// custom-list state.
+    /// tracker's resulting list names. Returns the full custom-list state.
     pub async fn create_custom_list(&self, name: String) -> Result<CustomListsState, String> {
         let name = name.trim().to_string();
         if name.is_empty() {
@@ -840,7 +879,17 @@ impl TrackerSyncService {
         self.edit_custom_lists(ListEdit::Delete(name)).await
     }
 
-    /// Shared create / delete flow: validate against the local names, require a signed-in token whose
+    /// Rename a custom list on AniList right away (signed in only; never queued). AniList keeps its
+    /// entries, and so do the local memberships (unsent edits included). Returns the full custom-list state.
+    pub async fn rename_custom_list(&self, old: String, new: String) -> Result<CustomListsState, String> {
+        let new = new.trim().to_string();
+        if new.is_empty() {
+            return Err("List name can't be empty".into());
+        }
+        self.edit_custom_lists(ListEdit::Rename { old, new }).await
+    }
+
+    /// Shared create / delete / rename flow: validate against the local names, require a signed-in token whose
     /// account owns the local list (same guard as pulls), call the tracker through the rate limiter and
     /// store its resulting names.
     async fn edit_custom_lists(&self, edit: ListEdit) -> Result<CustomListsState, String> {
@@ -852,8 +901,14 @@ impl TrackerSyncService {
             ListEdit::Create(name) if local.iter().any(|n| n.trim().eq_ignore_ascii_case(name)) => {
                 return Err(format!("A list named \"{}\" already exists", name));
             }
-            ListEdit::Delete(name) if !local.contains(name) => {
+            ListEdit::Delete(name) | ListEdit::Rename { old: name, .. } if !local.contains(name) => {
                 return Err(format!("There is no list named \"{}\"", name));
+            }
+            ListEdit::Rename { old, new } if new == old => return self.blocking(|db| db.get_custom_lists()).await,
+            ListEdit::Rename { old, new }
+                if local.iter().any(|n| n != old && n.trim().eq_ignore_ascii_case(new)) =>
+            {
+                return Err(format!("A list named \"{}\" already exists", new));
             }
             _ => {}
         }
@@ -871,6 +926,7 @@ impl TrackerSyncService {
             .run(|| match &edit {
                 ListEdit::Create(name) => plugin.create_custom_list(&token, name),
                 ListEdit::Delete(name) => plugin.delete_custom_list(&token, name),
+                ListEdit::Rename { old, new } => plugin.rename_custom_list(&token, old, new),
             })
             .await
         {
@@ -883,7 +939,10 @@ impl TrackerSyncService {
             }
         };
         self.blocking(move |db| {
-            db.set_custom_list_names(&names)?;
+            match &edit {
+                ListEdit::Rename { old, new } => db.rename_custom_list(old, new, &names)?,
+                _ => db.set_custom_list_names(&names)?,
+            }
             db.get_custom_lists()
         })
         .await
@@ -2569,6 +2628,20 @@ mod tests {
                 Ok(lists.clone())
             })
         }
+        fn rename_custom_list<'a>(
+            &'a self,
+            _token: &'a str,
+            old: &'a str,
+            new: &'a str,
+        ) -> BoxFuture<'a, Result<Vec<String>, TrackerError>> {
+            Box::pin(async move {
+                let mut lists = self.custom_lists.lock().unwrap();
+                for n in lists.iter_mut().filter(|n| *n == old) {
+                    *n = new.to_string();
+                }
+                Ok(lists.clone())
+            })
+        }
         fn fetch_list_activities<'a>(
             &'a self,
             _token: &'a str,
@@ -2616,7 +2689,8 @@ mod tests {
         });
         let svc = TrackerSyncService::new(db, Arc::new(plugins), emit, Arc::new(Mutex::new(None)))
             .with_min_request_interval(Duration::from_millis(0))
-            .with_history_pacing(Duration::ZERO, 0);
+            .with_history_pacing(Duration::ZERO, 0)
+            .with_custom_list_push_delay(Duration::ZERO);
         (Arc::new(svc), events)
     }
 
@@ -2919,6 +2993,90 @@ mod tests {
         assert!(state.names.is_empty() && state.members.is_empty());
         assert!(mock.custom_lists.lock().unwrap().is_empty());
         assert!(!db.get_anime_entry_by_id(1).unwrap().sync_pending);
+    }
+
+    #[tokio::test]
+    async fn rename_custom_list_keeps_memberships_and_unsent_edits() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let mock = Arc::new(MockTracker {
+            viewer_id: 42,
+            ..Default::default()
+        });
+        let (svc, _events) = service(db.clone(), mock.clone());
+        sign_in(&db, 42);
+        svc.create_custom_list("Favs".into()).await.unwrap();
+        svc.create_custom_list("Later".into()).await.unwrap();
+        db.upsert_anime_entry(&test_entry(1, "Alpha")).unwrap();
+        db.upsert_anime_entry(&test_entry(2, "Beta")).unwrap();
+        svc.set_custom_lists(CustomListChange {
+            anime_ids: vec![1],
+            toggles: vec![CustomListToggle { name: "Favs".into(), enabled: true }],
+            hidden_from_status_lists: None,
+        })
+        .await
+        .unwrap();
+        wait_until(|| !db.get_anime_entry_by_id(1).unwrap().sync_pending).await;
+        // An edit made signed out stays unsent (dirty) and must follow the rename too
+        db.apply_custom_list_change(
+            &CustomListChange {
+                anime_ids: vec![2],
+                toggles: vec![CustomListToggle { name: "Favs".into(), enabled: true }],
+                hidden_from_status_lists: None,
+            },
+            0,
+        )
+        .unwrap();
+        let saves_before = mock.saves.lock().unwrap().len();
+
+        // Taken (ignoring case) or missing: rejected before anything is sent
+        assert!(svc.rename_custom_list("Favs".into(), "later".into()).await.is_err());
+        assert!(svc.rename_custom_list("Nope".into(), "New".into()).await.is_err());
+        assert!(svc.rename_custom_list("Favs".into(), "  ".into()).await.is_err());
+
+        let state = svc.rename_custom_list("Favs".into(), " Best ".into()).await.unwrap();
+        assert_eq!(state.names, vec!["Best", "Later"]);
+        assert_eq!(*mock.custom_lists.lock().unwrap(), vec!["Best", "Later"]);
+        let lists_of = |id: i64| state.members.iter().find(|m| m.anime_id == id).unwrap().lists.clone();
+        assert_eq!(lists_of(1), vec!["Best"]);
+        assert_eq!(lists_of(2), vec!["Best"]);
+        assert_eq!(db.dirty_custom_lists(2).unwrap().unwrap().lists, vec!["Best"]);
+        // Nothing is pushed: AniList moved the entries itself
+        assert_eq!(mock.saves.lock().unwrap().len(), saves_before);
+    }
+
+    #[tokio::test]
+    async fn custom_list_edits_in_a_burst_are_one_push() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let mock = Arc::new(MockTracker {
+            viewer_id: 42,
+            ..Default::default()
+        });
+        let (svc, _events) = service(db.clone(), mock.clone());
+        let svc = Arc::new(
+            Arc::try_unwrap(svc)
+                .ok()
+                .unwrap()
+                .with_custom_list_push_delay(Duration::from_millis(100)),
+        );
+        sign_in(&db, 42);
+        svc.create_custom_list("Favs".into()).await.unwrap();
+        svc.create_custom_list("Later".into()).await.unwrap();
+        db.upsert_anime_entry(&test_entry(1, "Alpha")).unwrap();
+        let toggle = |name: &str, enabled: bool| CustomListChange {
+            anime_ids: vec![1],
+            toggles: vec![CustomListToggle { name: name.into(), enabled }],
+            hidden_from_status_lists: None,
+        };
+        svc.set_custom_lists(toggle("Favs", true)).await.unwrap();
+        svc.set_custom_lists(toggle("Favs", false)).await.unwrap();
+        svc.set_custom_lists(toggle("Later", true)).await.unwrap();
+        // Written locally right away
+        assert_eq!(db.dirty_custom_lists(1).unwrap().unwrap().lists, vec!["Later"]);
+        wait_until(|| !db.get_anime_entry_by_id(1).unwrap().sync_pending).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let saves = mock.saves.lock().unwrap();
+        assert_eq!(saves.len(), 1);
+        assert_eq!(saves[0].custom_lists, Some(vec!["Later".to_string()]));
     }
 
     #[tokio::test]

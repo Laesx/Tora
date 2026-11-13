@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import { Clock, CornerLeftUp, Eye, EyeOff, Play, Plus, Star } from "lucide-react";
 import { AnimeEntry, SeasonalAnime } from "@/lib/types";
 import { anilistStudioUrl, formatEnum, formatFuzzyDate, openExternal } from "@/lib/anime";
@@ -59,7 +59,7 @@ export const SeasonExtendedCard: React.FC<SeasonExtendedCardProps> = ({
   onSetNotInterested,
 }) => {
   const showToast = useToast();
-  const { openAnime } = useAnimeActions();
+  const { openAnime, resolveAnime } = useAnimeActions();
   const titleOf = useAnimeTitle();
   const titleLanguage = useTitleLanguage();
   const meta = anime.metadata;
@@ -77,9 +77,17 @@ export const SeasonExtendedCard: React.FC<SeasonExtendedCardProps> = ({
   const prequelEntry = prequel ? listById.get(prequel.id) : undefined;
   const prequelStatus = prequelEntry ? STATUS_INFO[prequelEntry.user_status] : null;
 
-  const openPrequel = () => {
-    if (prequelEntry) openAnime(prequelEntry);
-    else if (prequel) void openExternal(`https://anilist.co/anime/${prequel.id}`, showToast);
+  // Not on the list: its full media first (usually stored by an earlier season fetch)
+  const [prequelBusy, setPrequelBusy] = useState(false);
+  const openPrequel = async () => {
+    if (!prequel) return;
+    setPrequelBusy(true);
+    try {
+      const target = await resolveAnime(prequel.id);
+      if (target) openAnime(target);
+    } finally {
+      setPrequelBusy(false);
+    }
   };
 
   const genres = new Set(anime.genres);
@@ -180,11 +188,12 @@ export const SeasonExtendedCard: React.FC<SeasonExtendedCardProps> = ({
           <button
             onClick={(e) => {
               e.stopPropagation();
-              openPrequel();
+              void openPrequel();
             }}
             onDoubleClick={(e) => e.stopPropagation()}
-            title={prequelEntry ? "Open the prequel" : "Open the prequel on AniList"}
-            className="shrink-0 h-[18px] flex items-center gap-1.5 min-w-0 text-left text-[11px] text-text-secondary hover:text-text-primary transition cursor-pointer"
+            disabled={prequelBusy}
+            title="Open the prequel"
+            className="shrink-0 h-[18px] flex items-center gap-1.5 min-w-0 text-left text-[11px] text-text-secondary hover:text-text-primary transition cursor-pointer disabled:cursor-wait"
           >
             <CornerLeftUp className="w-3 h-3 shrink-0 text-text-muted" />
             <span className="truncate">Sequel to {titleOf(prequel)}</span>

@@ -5,6 +5,24 @@ const DRAG_THRESHOLD_PX = 6;
 /** The ghost sits this far below / right of the cursor */
 export const GHOST_OFFSET_PX = 14;
 
+/** What a drop board tile stands for: a list status, a custom list to add to, or the custom list to leave */
+export type DropTarget =
+  | { kind: "status"; status: string }
+  | { kind: "list"; name: string }
+  | { kind: "unlist"; name: string };
+
+/** The tile's `data-drop` value (also what `hoverTarget` holds while the pointer is over it) */
+export const dropKey = (t: DropTarget) => `${t.kind}:${t.kind === "status" ? t.status : t.name}`;
+
+function parseDropKey(key: string): DropTarget | null {
+  const at = key.indexOf(":");
+  const kind = key.slice(0, at);
+  const value = key.slice(at + 1);
+  if (kind === "status") return { kind, status: value };
+  if (kind === "list" || kind === "unlist") return { kind, name: value };
+  return null;
+}
+
 /** A drag in progress: the anime being moved and the area the drop board covers */
 export interface StatusDragState {
   ids: number[];
@@ -17,12 +35,12 @@ interface Options {
   onSetSelectedAnimeIds: (ids: number[]) => void;
   lastClickedIdRef: React.MutableRefObject<number | null>;
   scrollContainerRef: React.RefObject<HTMLElement | null>;
-  /** Dropped on a status tile */
-  onDrop: (ids: number[], status: string) => void;
+  /** Dropped on a tile */
+  onDrop: (ids: number[], target: DropTarget) => void;
 }
 
 /**
- * Drag cards / rows onto the status drop board. Pointer events, not HTML5 drag and drop (WebView2
+ * Drag cards / rows onto the drop board (statuses, custom lists). Pointer events, not HTML5 drag and drop (WebView2
  * doesn't deliver HTML5 drag events while Tauri's native file drop is on). After the press every
  * listener is on `window`: a virtualized card can unmount while the pointer is away from it.
  */
@@ -31,7 +49,7 @@ export function useStatusDrag(options: Options) {
   opts.current = options;
 
   const [drag, setDrag] = useState<StatusDragState | null>(null);
-  const [hoverStatus, setHoverStatus] = useState<string | null>(null);
+  const [hoverTarget, setHoverTarget] = useState<string | null>(null);
   const hoverRef = useRef<string | null>(null);
   const ghostEl = useRef<HTMLElement | null>(null);
   const pos = useRef({ x: 0, y: 0 });
@@ -68,12 +86,11 @@ export function useStatusDrag(options: Options) {
       frame = 0;
       const target = document
         .elementFromPoint(pos.current.x, pos.current.y)
-        ?.closest<HTMLElement>("[data-drop-status]");
-      const status =
-        target && target.dataset.dropDisabled !== "true" ? target.dataset.dropStatus ?? null : null;
-      if (status !== hoverRef.current) {
-        hoverRef.current = status;
-        setHoverStatus(status);
+        ?.closest<HTMLElement>("[data-drop]");
+      const key = target && target.dataset.dropDisabled !== "true" ? target.dataset.drop ?? null : null;
+      if (key !== hoverRef.current) {
+        hoverRef.current = key;
+        setHoverTarget(key);
       }
     };
 
@@ -109,7 +126,7 @@ export function useStatusDrag(options: Options) {
     };
 
     const finish = (drop: boolean) => {
-      const status = hoverRef.current;
+      const key = hoverRef.current;
       const wasStarted = started;
       cleanup();
       if (!wasStarted) return;
@@ -120,7 +137,8 @@ export function useStatusDrag(options: Options) {
       };
       window.addEventListener("click", swallow, { capture: true, once: true });
       setTimeout(() => window.removeEventListener("click", swallow, { capture: true }), 0);
-      if (drop && status) opts.current.onDrop(draggedIds, status);
+      const target = drop && key ? parseDropKey(key) : null;
+      if (target) opts.current.onDrop(draggedIds, target);
     };
 
     const onUp = () => finish(true);
@@ -145,7 +163,7 @@ export function useStatusDrag(options: Options) {
         document.body.style.userSelect = "";
       }
       hoverRef.current = null;
-      setHoverStatus(null);
+      setHoverTarget(null);
       setDrag(null);
       cleanupRef.current = null;
     };
@@ -158,5 +176,5 @@ export function useStatusDrag(options: Options) {
     cleanupRef.current = cleanup;
   }, []);
 
-  return { drag, hoverStatus, ghostRef, startPress };
+  return { drag, hoverTarget, ghostRef, startPress };
 }

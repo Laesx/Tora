@@ -5,6 +5,7 @@ import {
   ArrowUpNarrowWide,
   LayoutGrid,
   List,
+  ListTree,
   RefreshCw,
   Rows,
   Search,
@@ -39,6 +40,7 @@ interface WatchlistViewProps {
   customListCounts: Map<string, number>;
   onCreateCustomList: (name: string) => Promise<void>;
   onDeleteCustomList: (name: string) => Promise<void>;
+  onRenameCustomList: (name: string, newName: string) => Promise<void>;
   viewMode: ViewMode;
   /** Undefined until settings are loaded (the switcher is hidden) */
   onViewModeChange?: (mode: ViewMode) => void;
@@ -66,6 +68,7 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
   customListCounts,
   onCreateCustomList,
   onDeleteCustomList,
+  onRenameCustomList,
   viewMode,
   onViewModeChange,
   isSignedIn,
@@ -153,6 +156,7 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
               onSelect={w.showCustomList}
               onCreate={isSignedIn ? onCreateCustomList : undefined}
               onDelete={isSignedIn ? onDeleteCustomList : undefined}
+              onRename={isSignedIn ? onRenameCustomList : undefined}
             />
           )}
         </div>
@@ -213,6 +217,25 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
                 <ArrowDownWideNarrow className="w-3.5 h-3.5" />
               )}
             </button>
+            {/* Always in place (disabled on single-status tabs), so the toolbar never shifts */}
+            <button
+              onClick={() => w.setGroupByStatus(!w.groupByStatus)}
+              disabled={!w.canGroup}
+              aria-pressed={w.canGroup && w.groupByStatus}
+              className={`p-2 rounded-xl border transition disabled:opacity-40 disabled:cursor-default ${w.canGroup && w.groupByStatus
+                ? "bg-accent text-white border-accent"
+                : "bg-bg-secondary enabled:hover:bg-bg-tertiary border-border-subtle text-text-secondary enabled:hover:text-text-primary"
+                }`}
+              title={
+                !w.canGroup
+                  ? "Group by status: for All Anime and custom lists (a search is always grouped)"
+                  : w.groupByStatus
+                    ? "Grouped by status (click for one list)"
+                    : "Group by status"
+              }
+            >
+              <ListTree className="w-3.5 h-3.5" />
+            </button>
           </div>
 
           <button
@@ -259,7 +282,8 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
 
       <VirtualWatchlist
         items={w.filteredAnime}
-        groups={w.searchGroups}
+        groups={w.groups}
+        customList={w.isSearching ? null : w.customListFilter}
         searchQuery={w.deferredSearchQuery}
         // Applied once the deferred search has caught up, so it scrolls within the new results
         focusRequest={w.deferredSearchQuery === w.searchQuery ? w.focusRequest : null}

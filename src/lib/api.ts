@@ -127,6 +127,10 @@ export const toraApi = {
   // Delete a custom list on AniList right away; its anime stay on the list (signed in only, not queued)
   deleteCustomList: (name: string) => invoke<CustomListsState>("delete_custom_list", { name }),
 
+  // Rename a custom list on AniList right away; its anime stay in it (signed in only, not queued)
+  renameCustomList: (old: string, name: string) =>
+    invoke<CustomListsState>("rename_custom_list", { old, new: name }),
+
   batchDeleteAnimeEntries: (animeIds: number[]) =>
     invoke<void>("batch_delete_anime_entries", { animeIds }),
 

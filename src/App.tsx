@@ -48,6 +48,7 @@ import { CommandPalette } from "@/features/palette/CommandPalette";
 import { CLOSE_MENUS_EVENT } from "@/components/FloatingQuickMenu";
 import { TorrentsRequest, TorrentsView } from "@/features/torrents/TorrentsView";
 import { NowPlayingView } from "@/features/nowplaying/NowPlayingView";
+import { followRenamedNowPlayingList } from "@/features/nowplaying/NowPlayingDashboard";
 import { HistoryView } from "@/features/history/HistoryView";
 import { StatsView } from "@/features/stats/StatsView";
 import { SeasonRequest, SeasonsView } from "@/features/seasons/SeasonsView";
@@ -547,6 +548,19 @@ export const App: React.FC = () => {
     setActiveTab("history");
   };
 
+  const resolveAnime = async (id: number): Promise<AnimeEntry | null> => {
+    const entry = listById.get(id);
+    if (entry) return entry;
+    try {
+      const media = await toraApi.getMediaMetadata(id);
+      if (!media) showToast("AniList has no data for this anime", "error");
+      return media;
+    } catch (e) {
+      showToast(String(e), "error");
+      return null;
+    }
+  };
+
   const openQuickEdit = (anime: AnimeEntry) => {
     if (selectedAnime?.id !== anime.id) remember();
     setSelectedAnime(animeList.find((a) => a.id === anime.id) ?? anime);
@@ -595,6 +609,13 @@ export const App: React.FC = () => {
     }
   };
 
+  // The watchlist and Now Playing keep a renamed list selected
+  const renameCustomList = async (old: string, name: string) => {
+    await customLists.rename(old, name);
+    watchlist.followRenamedList(old, name);
+    followRenamedNowPlayingList(old, name);
+  };
+
   // Progress resets first, so the scrobbler counts episode 1 as new
   const startRewatch = async (anime: AnimeEntry) => {
     await list.batchUpdate({ anime_ids: [anime.id], user_status: "REPEATING" }, `Started rewatching "${titleOf(anime)}"`);
@@ -609,6 +630,7 @@ export const App: React.FC = () => {
     openQuickEdit,
     openAnimePage,
     openAnimeHistory,
+    resolveAnime,
     stepEpisode: stepper.stepEpisode,
     batchUpdate: list.batchUpdate,
     changeStatus: (anime, status, label) =>
@@ -636,6 +658,7 @@ export const App: React.FC = () => {
       openQuickEdit: (a) => latest().openQuickEdit(a),
       openAnimePage: (a) => latest().openAnimePage(a),
       openAnimeHistory: (a) => latest().openAnimeHistory(a),
+      resolveAnime: (id) => latest().resolveAnime(id),
       stepEpisode: (a, delta) => latest().stepEpisode(a, delta),
       batchUpdate: (patch, msg) => latest().batchUpdate(patch, msg),
       changeStatus: (a, status, label) => latest().changeStatus(a, status, label),
@@ -794,6 +817,7 @@ export const App: React.FC = () => {
                                 customListCounts={customLists.counts}
                                 onCreateCustomList={customLists.create}
                                 onDeleteCustomList={customLists.remove}
+                                onRenameCustomList={renameCustomList}
                                 viewMode={settings?.view_mode || "grid"}
                                 onViewModeChange={settings ? setViewMode : undefined}
                                 isSignedIn={isSignedIn}

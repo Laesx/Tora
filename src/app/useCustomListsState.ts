@@ -58,11 +58,14 @@ export function useCustomListsState(animeList: AnimeEntry[]) {
   const remove = useCallback(async (name: string) => {
     setState(await toraApi.deleteCustomList(name));
   }, []);
+  const rename = useCallback(async (old: string, name: string) => {
+    setState(await toraApi.renameCustomList(old, name));
+  }, []);
 
   const api = useMemo<CustomListsApi>(
     () => ({ names: state.names, membership: (id) => members.get(id), apply }),
     [state, members, apply]
   );
 
-  return { names: state.names, members, hiddenFromStatusIds, counts, api, refresh, clear, create, remove };
+  return { names: state.names, members, hiddenFromStatusIds, counts, api, refresh, clear, create, remove, rename };
 }

@@ -214,6 +214,15 @@ async fn delete_custom_list(
 }
 
 #[tauri::command]
+async fn rename_custom_list(
+    state: State<'_, AppState>,
+    old: String,
+    new: String,
+) -> Result<CustomListsState, String> {
+    state.sync.rename_custom_list(old, new).await
+}
+
+#[tauri::command]
 async fn batch_delete_anime_entries(
     state: State<'_, AppState>,
     anime_ids: Vec<i64>,
@@ -2161,6 +2170,7 @@ pub fn run() {
             set_anime_custom_lists,
             create_custom_list,
             delete_custom_list,
+            rename_custom_list,
             batch_delete_anime_entries,
             add_or_upsert_anime,
             delete_anime_entry,

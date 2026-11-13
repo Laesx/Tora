@@ -553,6 +553,20 @@ pub trait TrackerPlugin: Send + Sync {
         })
     }
 
+    /// Rename the viewer's custom anime list `old` to `new` in place (its entries stay in it). Returns
+    /// every custom list name in the viewer's order afterwards.
+    fn rename_custom_list<'a>(
+        &'a self,
+        _token: &'a str,
+        _old: &'a str,
+        _new: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<String>, TrackerError>> {
+        let name = self.descriptor().name;
+        Box::pin(async move {
+            Err(TrackerError::Api(format!("{} doesn't support renaming custom lists.", name)))
+        })
+    }
+
     /// One page of the user's anime list activity within `query`'s bounds (`query.per_page` items,
     /// at most [`ACTIVITY_PAGE_SIZE`]).
     fn fetch_list_activities<'a>(

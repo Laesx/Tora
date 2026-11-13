@@ -10,10 +10,12 @@ import { defaultSortDir, isSortKey, SortDir, watchlistComparator, WatchlistSortK
 interface WatchlistPrefs {
   sortKey: WatchlistSortKey;
   sortDir: SortDir;
+  /** All Anime and custom lists show their anime grouped by status */
+  groupByStatus: boolean;
 }
 
 const PREFS_KEY = "tora.watchlist.prefs";
-const DEFAULT_PREFS: WatchlistPrefs = { sortKey: "updated", sortDir: "desc" };
+const DEFAULT_PREFS: WatchlistPrefs = { sortKey: "updated", sortDir: "desc", groupByStatus: false };
 
 interface WatchlistInputs {
   animeList: AnimeEntry[];
@@ -29,6 +31,24 @@ interface WatchlistInputs {
 
 /** Rewatching shows under the Watching tab */
 const tabOf = (status: string) => (status === "REPEATING" ? "CURRENT" : status);
+
+/** Entries (already in display order) bucketed by status, in `SEARCH_GROUP_ORDER` then any other status */
+function groupByStatus(entries: AnimeEntry[], statusOf: (a: AnimeEntry) => string): WatchlistGroup[] {
+  const byStatus = new Map<string, AnimeEntry[]>();
+  for (const entry of entries) {
+    const status = statusOf(entry);
+    let bucket = byStatus.get(status);
+    if (!bucket) byStatus.set(status, (bucket = []));
+    bucket.push(entry);
+  }
+  const order = [
+    ...SEARCH_GROUP_ORDER,
+    ...Array.from(byStatus.keys()).filter((st) => !SEARCH_GROUP_ORDER.includes(st)),
+  ];
+  return order
+    .filter((status) => byStatus.has(status))
+    .map((status) => ({ status, label: statusLabel(status), items: byStatus.get(status)! }));
+}
 
 /** Watchlist filter state (status tab / custom list / search / sort) and the list it selects. */
 export function useWatchlist({
@@ -87,6 +107,12 @@ export function useWatchlist({
     [prefs.sortKey, prefs.sortDir, stepSnapshots, titleOf, skipOpEd]
   );
 
+  // A card with a pending +1 / -1 stays in the group it started in
+  const statusOf = useMemo(
+    () => (a: AnimeEntry) => stepSnapshots[a.id]?.initialStatus ?? a.user_status,
+    [stepSnapshots]
+  );
+
   /** Pick a sort; a new key starts in its natural direction, the same key flips direction */
   const setSort = (key: WatchlistSortKey, dir?: SortDir) =>
     updatePrefs({
@@ -94,35 +120,9 @@ export function useWatchlist({
       sortDir: dir ?? (key === prefs.sortKey ? (prefs.sortDir === "asc" ? "desc" : "asc") : defaultSortDir(key)),
     });
 
-  // With a search: matches from every list, grouped by status (stepping keeps a card in its
-  // original group), best match first and the sort dropdown as the tie-break
-  const searchGroups = useMemo((): WatchlistGroup[] | null => {
-    if (!isSearching) return null;
-    const byStatus = new Map<string, { entry: AnimeEntry; score: number }[]>();
-    for (const { item, score } of searchAnime(searchIndex, deferredSearchQuery)) {
-      const status = stepSnapshots[item.id]?.initialStatus ?? item.user_status;
-      let bucket = byStatus.get(status);
-      if (!bucket) byStatus.set(status, (bucket = []));
-      bucket.push({ entry: item, score });
-    }
-    const order = [
-      ...SEARCH_GROUP_ORDER,
-      ...Array.from(byStatus.keys()).filter((st) => !SEARCH_GROUP_ORDER.includes(st)),
-    ];
-    return order
-      .filter((status) => byStatus.has(status))
-      .map((status) => ({
-        status,
-        label: statusLabel(status),
-        items: byStatus
-          .get(status)!
-          .sort((a, b) => b.score - a.score || compareBySort(a.entry, b.entry))
-          .map((h) => h.entry),
-      }));
-  }, [isSearching, searchIndex, deferredSearchQuery, stepSnapshots, compareBySort]);
-
-  const filteredAnime = useMemo(() => {
-    if (searchGroups) return searchGroups.flatMap((g) => g.items);
+  // Without a search: the status tab or custom list, in sort order
+  const listAnime = useMemo(() => {
+    if (isSearching) return [];
     if (customListFilter !== null) {
       return animeList
         .filter((a) => customListMembers.get(a.id)?.lists.includes(customListFilter))
@@ -132,19 +132,27 @@ export function useWatchlist({
       .filter((a) => {
         if (statusFilter === "ALL") return true;
         if (hiddenFromStatusIds.has(a.id)) return false;
-        return tabOf(stepSnapshots[a.id]?.initialStatus ?? a.user_status) === statusFilter;
+        return tabOf(statusOf(a)) === statusFilter;
       })
       .sort(compareBySort);
-  }, [
-    animeList,
-    statusFilter,
-    customListFilter,
-    customListMembers,
-    hiddenFromStatusIds,
-    searchGroups,
-    stepSnapshots,
-    compareBySort,
-  ]);
+  }, [isSearching, animeList, statusFilter, customListFilter, customListMembers, hiddenFromStatusIds, statusOf, compareBySort]);
+
+  // Views that mix statuses (All Anime, a custom list) can be grouped by status
+  const canGroup = !isSearching && (customListFilter !== null || statusFilter === "ALL");
+  const grouped = canGroup && prefs.groupByStatus;
+
+  // A search is always grouped: matches from every list, best match first and the sort dropdown as the tie-break
+  const groups = useMemo((): WatchlistGroup[] | null => {
+    if (isSearching) {
+      const hits = searchAnime(searchIndex, deferredSearchQuery).sort(
+        (a, b) => b.score - a.score || compareBySort(a.item, b.item)
+      );
+      return groupByStatus(hits.map((h) => h.item), statusOf);
+    }
+    return grouped ? groupByStatus(listAnime, statusOf) : null;
+  }, [isSearching, searchIndex, deferredSearchQuery, compareBySort, grouped, listAnime, statusOf]);
+
+  const filteredAnime = useMemo(() => (groups ? groups.flatMap((g) => g.items) : listAnime), [groups, listAnime]);
 
   /** One status tab, search cleared */
   const showStatus = (status: string) => {
@@ -176,6 +184,10 @@ export function useWatchlist({
     setFocusRequest((prev) => ({ id: entry.id, nonce: (prev?.nonce ?? 0) + 1 }));
   };
 
+  /** A renamed custom list stays selected under its new name */
+  const followRenamedList = (old: string, name: string) =>
+    setCustomListFilter((current) => (current === old ? name : current));
+
   /** Back: the status tab / custom list and search text the watchlist had */
   const restoreView = (status: string, customList: string | null, search: string) => {
     setStatusFilter(status);
@@ -198,11 +210,15 @@ export function useWatchlist({
     clearFocusRequest: () => setFocusRequest(null),
     statusCounts,
     searchIndex,
-    searchGroups,
+    groups,
+    canGroup,
+    groupByStatus: prefs.groupByStatus,
+    setGroupByStatus: (on: boolean) => updatePrefs({ groupByStatus: on }),
     filteredAnime,
     showStatus,
     showCustomList,
     focusAnime,
+    followRenamedList,
     restoreView,
   };
 }

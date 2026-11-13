@@ -18,6 +18,11 @@ export interface AnimeActions {
   openAnimePage: (anime: AnimeEntry) => void;
   /** Opens this anime's episode timeline in the History tab */
   openAnimeHistory: (anime: AnimeEntry) => void;
+  /**
+   * An AniList id as something the open / add actions take: the list entry, else its full media
+   * (stored, or fetched once from AniList). Null (with an error toast) when there is none.
+   */
+  resolveAnime: (id: number) => Promise<AnimeEntry | null>;
   /** Optimistic, debounced +1 / -1 */
   stepEpisode: (anime: AnimeEntry, delta: number) => void;
   batchUpdate: (patch: BatchAnimeUpdatePatch, summaryToast: string) => Promise<void>;
@@ -48,6 +53,7 @@ export const AnimeActionsContext = createContext<AnimeActions>({
   openQuickEdit: missing,
   openAnimePage: missing,
   openAnimeHistory: missing,
+  resolveAnime: missing,
   stepEpisode: missing,
   batchUpdate: missing,
   changeStatus: missing,
