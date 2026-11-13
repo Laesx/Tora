@@ -175,3 +175,23 @@
 .release-notes strong {
   color: rgb(var(--text-primary));
 }
+
+/* The anime page sheet slides in over the main area */
+@keyframes tora-sheet-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.animate-sheet-in {
+  animation: tora-sheet-in 160ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .animate-sheet-in {
+    animation: none;
+  }
+}

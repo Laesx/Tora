@@ -139,6 +139,9 @@ export const App: React.FC = () => {
   const remember = useCallback(() => nav.push(currentLocationRef.current()), [nav.push]);
   const navigation = useMemo<Navigation>(() => ({ remember }), [remember]);
   const listById = useMemo(() => new Map(animeList.map((a) => [a.id, a])), [animeList]);
+  useEffect(() => {
+    if (mainScrollRef.current) mainScrollRef.current.inert = animePage !== null;
+  }, [animePage]);
 
   // Back / forward: each view takes its state back through its own request
   const applyLocation = (loc: NavLocation) => {
@@ -430,7 +433,7 @@ export const App: React.FC = () => {
   const navigateTo = (tab: NavTab) => {
     closeTransientLayers();
     setSettingsOpen(false);
-    if (tab !== activeTab) remember();
+    if (tab !== activeTab || animePage) remember();
     setActiveTab(tab);
   };
 
@@ -530,7 +533,6 @@ export const App: React.FC = () => {
     remember();
     setSelectedAnime(null);
     setAnimePage(anime);
-    setScrollRestore({ top: 0, nonce: Date.now() });
   };
 
   const openAnimeHistory = (anime: AnimeEntry) => {
@@ -762,140 +764,143 @@ export const App: React.FC = () => {
                         />
                       )}
 
-                      <main
-                        ref={mainScrollRef}
-                        // Reserve the scrollbar's space so content doesn't shift sideways when it appears/disappears
-                        className="flex-1 overflow-y-auto [scrollbar-gutter:stable]"
-                        onClick={() => {
-                          if (list.selectedAnimeIds.length > 0) list.setSelectedAnimeIds([]);
-                        }}
-                      >
-                        {/* One crashing tab shows its error; the sidebar and other tabs keep working */}
-                        {/* Keyed on the date settings too: a change redraws every date label behind the Settings modal */}
-                        {animePage ? (
-                          <ErrorBoundary key={`page|${animePage.id}`} scope="anime-page">
+                      {/* The anime page is a sheet over the main area; the tab underneath stays mounted */}
+                      <div className="relative flex-1 min-h-0">
+                        <main
+                          ref={mainScrollRef}
+                          // Reserve the scrollbar's space so content doesn't shift sideways when it appears/disappears
+                          className="h-full overflow-y-auto [scrollbar-gutter:stable]"
+                          onClick={() => {
+                            if (list.selectedAnimeIds.length > 0) list.setSelectedAnimeIds([]);
+                          }}
+                        >
+                          {/* One crashing tab shows its error; the sidebar and other tabs keep working */}
+                          {/* Keyed on the date settings too: a change redraws every date label behind the Settings modal */}
+                          <ErrorBoundary
+                            key={`${activeTab}|${settings?.date_locale ?? ""}|${settings?.time_format ?? "auto"}`}
+                            scope={`tab:${activeTab}`}
+                          >
+                            {activeTab === "watchlist" && (
+                              <WatchlistView
+                                watchlist={watchlist}
+                                animeList={animeList}
+                                customListNames={customLists.names}
+                                customListCounts={customLists.counts}
+                                onCreateCustomList={customLists.create}
+                                onDeleteCustomList={customLists.remove}
+                                viewMode={settings?.view_mode || "grid"}
+                                onViewModeChange={settings ? setViewMode : undefined}
+                                isSignedIn={isSignedIn}
+                                isSyncing={sync.isSyncing}
+                                lastSyncedAt={sync.lastSyncedAt}
+                                onSync={handleSyncFromAnilist}
+                                scrollContainerRef={mainScrollRef}
+                                selectedAnimeIds={list.selectedAnimeIds}
+                                onSetSelectedAnimeIds={list.setSelectedAnimeIds}
+                                quickMenuAnimeId={list.quickMenuAnimeId}
+                                onSetQuickMenuAnimeId={list.setQuickMenuAnimeId}
+                                searchInputRef={watchlistSearchRef}
+                                navRef={watchlistNavRef}
+                                showKeyHints={showAltKeyHints}
+                              />
+                            )}
+
+                            {activeTab === "torrents" && (
+                              <TorrentsView
+                                animeList={animeList}
+                                searchRequest={torrentSearch}
+                                onRefreshAnimeList={list.refresh}
+                                onOpenSettings={() => openSettings("torrents")}
+                              />
+                            )}
+
+                            {activeTab === "seasons" && (
+                              <SeasonsView
+                                animeList={animeList}
+                                scrollContainerRef={mainScrollRef}
+                                keyboardEnabled={
+                                  !selectedAnime &&
+                                  !animePage &&
+                                  !cmdOpen &&
+                                  !signOutModalOpen &&
+                                  !shortcutsOpen &&
+                                  !settingsOpen &&
+                                  !updater.promptOpen &&
+                                  !updater.changelogOpen
+                                }
+                                onGlobalSearch={openGlobalSearch}
+                                seasonRequest={seasonRequest}
+                                onSeasonRequestHandled={() => setSeasonRequest(null)}
+                                showKeyHints={showAltKeyHints}
+                              />
+                            )}
+
+                            {activeTab === "schedule" && (
+                              <ScheduleView
+                                animeList={animeList}
+                                request={scheduleRequest}
+                                onRequestHandled={() => setScheduleRequest(null)}
+                              />
+                            )}
+
+                            {activeTab === "search" && <SearchView animeList={animeList} request={globalSearch} />}
+
+                            {activeTab === "nowplaying" && settings && (
+                              <NowPlayingView
+                                activeSession={activeSession}
+                                animeList={animeList}
+                                listById={listById}
+                                callbacks={entryCallbacks}
+                                settings={settings}
+                                onUpdateSettings={handleUpdateSettings}
+                                onLinkDetectedEpisode={async (animeId, aliasTitle) => {
+                                  const updated = await toraApi.linkDetectedEpisodeToAnime(animeId, aliasTitle);
+                                  if (updated) setActiveSession(updated);
+                                  await list.refresh();
+                                }}
+                                onConfirmUpdate={() => void confirmPlaybackUpdate()}
+                                onDismissSession={dismissSession}
+                                onOpenSeason={openSeason}
+                              />
+                            )}
+
+                            {activeTab === "history" && (
+                              <HistoryView
+                                animeList={animeList}
+                                refreshKey={statsKey}
+                                request={historyRequest}
+                                onRequestHandled={() => setHistoryRequest(null)}
+                              />
+                            )}
+
+                            {activeTab === "stats" && (
+                              <StatsView
+                                animeList={animeList}
+                                refreshKey={`${statsKey}|${settings?.skip_op_ed}`}
+                                onOpenStatus={(status) => showInWatchlist(() => watchlist.showStatus(status))}
+                                onOpenHistory={(period, source) => {
+                                  remember();
+                                  setHistoryRequest({ period, source, nonce: Date.now() });
+                                  setActiveTab("history");
+                                }}
+                              />
+                            )}
+                          </ErrorBoundary>
+                        </main>
+                        {animePage && (
+                          <ErrorBoundary key="anime-page" scope="anime-page">
                             <AnimePageView
                               anime={listById.get(animePage.id) ?? animePage}
                               inList={listById.has(animePage.id)}
                               listById={listById}
                               callbacks={entryCallbacks}
+                              fromLabel={NAV_ITEMS.find((n) => n.id === activeTab)?.label ?? "Back"}
                               onOpenSeason={openSeason}
-                              onBack={() => stepNav("back")}
+                              onClose={closeAnimePage}
                             />
                           </ErrorBoundary>
-                        ) : (
-                        <ErrorBoundary
-                          key={`${activeTab}|${settings?.date_locale ?? ""}|${settings?.time_format ?? "auto"}`}
-                          scope={`tab:${activeTab}`}
-                        >
-                          {activeTab === "watchlist" && (
-                            <WatchlistView
-                              watchlist={watchlist}
-                              animeList={animeList}
-                              customListNames={customLists.names}
-                              customListCounts={customLists.counts}
-                              onCreateCustomList={customLists.create}
-                              onDeleteCustomList={customLists.remove}
-                              viewMode={settings?.view_mode || "grid"}
-                              onViewModeChange={settings ? setViewMode : undefined}
-                              isSignedIn={isSignedIn}
-                              isSyncing={sync.isSyncing}
-                              lastSyncedAt={sync.lastSyncedAt}
-                              onSync={handleSyncFromAnilist}
-                              scrollContainerRef={mainScrollRef}
-                              selectedAnimeIds={list.selectedAnimeIds}
-                              onSetSelectedAnimeIds={list.setSelectedAnimeIds}
-                              quickMenuAnimeId={list.quickMenuAnimeId}
-                              onSetQuickMenuAnimeId={list.setQuickMenuAnimeId}
-                              searchInputRef={watchlistSearchRef}
-                              navRef={watchlistNavRef}
-                              showKeyHints={showAltKeyHints}
-                            />
-                          )}
-
-                          {activeTab === "torrents" && (
-                            <TorrentsView
-                              animeList={animeList}
-                              searchRequest={torrentSearch}
-                              onRefreshAnimeList={list.refresh}
-                              onOpenSettings={() => openSettings("torrents")}
-                            />
-                          )}
-
-                          {activeTab === "seasons" && (
-                            <SeasonsView
-                              animeList={animeList}
-                              scrollContainerRef={mainScrollRef}
-                              keyboardEnabled={
-                                !selectedAnime &&
-                                !animePage &&
-                                !cmdOpen &&
-                                !signOutModalOpen &&
-                                !shortcutsOpen &&
-                                !settingsOpen &&
-                                !updater.promptOpen &&
-                                !updater.changelogOpen
-                              }
-                              onGlobalSearch={openGlobalSearch}
-                              seasonRequest={seasonRequest}
-                              onSeasonRequestHandled={() => setSeasonRequest(null)}
-                              showKeyHints={showAltKeyHints}
-                            />
-                          )}
-
-                          {activeTab === "schedule" && (
-                            <ScheduleView
-                              animeList={animeList}
-                              request={scheduleRequest}
-                              onRequestHandled={() => setScheduleRequest(null)}
-                            />
-                          )}
-
-                          {activeTab === "search" && <SearchView animeList={animeList} request={globalSearch} />}
-
-                          {activeTab === "nowplaying" && settings && (
-                            <NowPlayingView
-                              activeSession={activeSession}
-                              animeList={animeList}
-                              listById={listById}
-                              callbacks={entryCallbacks}
-                              settings={settings}
-                              onUpdateSettings={handleUpdateSettings}
-                              onLinkDetectedEpisode={async (animeId, aliasTitle) => {
-                                const updated = await toraApi.linkDetectedEpisodeToAnime(animeId, aliasTitle);
-                                if (updated) setActiveSession(updated);
-                                await list.refresh();
-                              }}
-                              onConfirmUpdate={() => void confirmPlaybackUpdate()}
-                              onDismissSession={dismissSession}
-                              onOpenSeason={openSeason}
-                            />
-                          )}
-
-                          {activeTab === "history" && (
-                            <HistoryView
-                              animeList={animeList}
-                              refreshKey={statsKey}
-                              request={historyRequest}
-                              onRequestHandled={() => setHistoryRequest(null)}
-                            />
-                          )}
-
-                          {activeTab === "stats" && (
-                            <StatsView
-                              animeList={animeList}
-                              refreshKey={`${statsKey}|${settings?.skip_op_ed}`}
-                              onOpenStatus={(status) => showInWatchlist(() => watchlist.showStatus(status))}
-                              onOpenHistory={(period, source) => {
-                                remember();
-                                setHistoryRequest({ period, source, nonce: Date.now() });
-                                setActiveTab("history");
-                              }}
-                            />
-                          )}
-                        </ErrorBoundary>
                         )}
-                      </main>
+                      </div>
                     </div>
 
                     {selectedAnime && (
