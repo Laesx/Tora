@@ -14,10 +14,11 @@ const LABEL = "block text-[11px] font-medium text-text-muted uppercase mb-1";
 const FIELD =
   "w-full px-3 py-2 rounded-lg bg-bg-primary border border-border-subtle text-xs font-mono text-text-primary focus:outline-none focus:border-accent";
 
-/** Status, progress, score, rewatches and dates of a list entry. */
-export const UserStatePanel: React.FC<{ anime: AnimeEntry; editor: EntryEditor }> = ({
+/** Status, progress, score, rewatches and dates of a list entry; `compact` stacks them for a side column. */
+export const UserStatePanel: React.FC<{ anime: AnimeEntry; editor: EntryEditor; compact?: boolean }> = ({
   anime,
   editor,
+  compact = false,
 }) => {
   const showToast = useToast();
   const scoreFormat = useScoreFormat();
@@ -41,8 +42,12 @@ export const UserStatePanel: React.FC<{ anime: AnimeEntry; editor: EntryEditor }
   } = editor;
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-4 gap-3 bg-bg-tertiary/40 p-4 rounded-xl border border-border-subtle">
-      <div>
+    <div
+      className={`grid gap-3 bg-bg-tertiary/40 p-4 rounded-xl border border-border-subtle ${
+        compact ? "grid-cols-2" : "grid-cols-1 md:grid-cols-4"
+      }`}
+    >
+      <div className={compact ? "col-span-2" : ""}>
         <label className={LABEL}>Watch Status</label>
         <select
           value={status}
@@ -68,7 +73,7 @@ export const UserStatePanel: React.FC<{ anime: AnimeEntry; editor: EntryEditor }
         </select>
       </div>
 
-      <div>
+      <div className={compact ? "col-span-2" : ""}>
         <label className={LABEL}>Episode Progress</label>
         <div className="flex items-center gap-1">
           <button
@@ -114,7 +119,7 @@ export const UserStatePanel: React.FC<{ anime: AnimeEntry; editor: EntryEditor }
         />
       </div>
 
-      <div className="md:col-span-2">
+      <div className={compact ? "col-span-2" : "md:col-span-2"}>
         <div className="flex items-center justify-between mb-1">
           <label className="block text-[11px] font-medium text-text-muted uppercase">Date Started</label>
           <button
@@ -140,7 +145,7 @@ export const UserStatePanel: React.FC<{ anime: AnimeEntry; editor: EntryEditor }
         />
       </div>
 
-      <div className="md:col-span-2">
+      <div className={compact ? "col-span-2" : "md:col-span-2"}>
         <div className="flex items-center justify-between mb-1">
           <label className="block text-[11px] font-medium text-text-muted uppercase">Date Completed</label>
           <button

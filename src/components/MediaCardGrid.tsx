@@ -61,7 +61,7 @@ export const MediaCardGrid: React.FC<{
   };
 
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
+    <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))" }}>
       {items.map(({ key, media: m, label }) => {
         const entry = listById.get(m.id);
         const status = entry ? STATUS_INFO[entry.user_status] : undefined;

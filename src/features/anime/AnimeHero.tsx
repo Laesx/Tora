@@ -34,8 +34,9 @@ export interface AnimeHeroSlots {
 }
 
 /**
- * The anime page's header: banner, cover and titles (→ AniList), badges, progress, actions, genres and
- * tags (spoilers hidden until asked). Now Playing fills the slots with its playback state.
+ * The anime page's header: a full-width band fading into the page (banner, else the cover blurred), the
+ * cover overlapping it, titles (→ AniList), badges, progress, actions, genres and tags (spoilers hidden
+ * until asked). Now Playing fills the slots with its playback state.
  */
 export const AnimeHero: React.FC<
   {
@@ -81,19 +82,30 @@ export const AnimeHero: React.FC<
   };
 
   return (
-    <div className="relative rounded-2xl overflow-hidden border border-border-subtle bg-bg-secondary">
-      {anime.banner_image ? (
-        <img src={anime.banner_image} alt="" decoding="async" className="absolute inset-0 w-full h-full object-cover opacity-25" />
-      ) : anime.cover_color ? (
-        <div className="absolute inset-0 opacity-20" style={{ background: anime.cover_color }} />
-      ) : null}
-      <div className="absolute inset-0 bg-gradient-to-r from-bg-secondary via-bg-secondary/90 to-bg-secondary/60" />
+    <div className="relative">
+      {/* Full-width band that fades into the page: the banner, else the cover blurred, else its color */}
+      <div className="absolute inset-x-0 top-0 h-72 overflow-hidden pointer-events-none" aria-hidden>
+        {anime.banner_image ? (
+          <img src={anime.banner_image} alt="" decoding="async" className="w-full h-full object-cover opacity-60" />
+        ) : anime.cover_image ? (
+          <img
+            src={getOptimizedCoverUrl(anime.cover_image, "medium")}
+            alt=""
+            decoding="async"
+            className="w-full h-full object-cover scale-125 blur-2xl opacity-40"
+          />
+        ) : anime.cover_color ? (
+          <div className="w-full h-full opacity-30" style={{ background: anime.cover_color }} />
+        ) : null}
+        <div className="absolute inset-0 bg-gradient-to-b from-bg-primary/10 via-bg-primary/60 to-bg-primary" />
+        <div className="absolute inset-0 bg-gradient-to-r from-bg-primary/70 via-transparent to-transparent" />
+      </div>
 
-      <div className="relative flex flex-col sm:flex-row gap-6 p-6">
+      <div className="relative flex flex-col sm:flex-row gap-6 px-6 pt-28">
         <button
           onClick={openOnAnilist}
           title="Open on AniList"
-          className="group relative w-40 shrink-0 self-start rounded-xl overflow-hidden border border-border-subtle shadow-lg"
+          className="group relative w-40 shrink-0 self-start rounded-xl overflow-hidden border border-border-subtle shadow-2xl"
         >
           <img
             src={getOptimizedCoverUrl(anime.cover_image, "large")}

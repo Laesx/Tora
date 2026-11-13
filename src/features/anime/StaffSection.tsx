@@ -24,7 +24,7 @@ export const StaffSection: React.FC<{ anime: AnimeEntry; details: MediaDetails }
         </>
       }
     >
-      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2">
+      <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))" }}>
         {shown.map((s, i) => (
           <button
             key={`${s.id}-${i}`}

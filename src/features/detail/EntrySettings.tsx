@@ -59,7 +59,7 @@ export const EntrySettings: React.FC<{
         Settings
       </h3>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+      <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))" }}>
         <div>
           <label className="block text-[11px] text-text-muted mb-1">Custom Aliases (file & player recognition)</label>
           <input

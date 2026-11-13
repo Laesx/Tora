@@ -163,7 +163,7 @@ export const NowPlayingHero: React.FC<NowPlayingHeroProps> = ({
   // Unmatched (or matched to an entry the list does not hold yet): only what the player says
   const title = session.matched_anime_title || session.parsed.anime_title || session.cleaned_media_title;
   return (
-    <div className="space-y-5">
+    <div className="space-y-5 px-6 pt-5 max-w-7xl mx-auto">
       <div className="relative rounded-2xl overflow-hidden border border-border-subtle bg-bg-secondary">
         <div className="relative flex flex-col sm:flex-row gap-6 p-6">
           {session.matched_cover_image ? (

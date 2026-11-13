@@ -34,8 +34,8 @@ export const NowPlayingView: React.FC<NowPlayingViewProps> = ({
   const entry = activeSession?.matched_anime_id ? listById.get(activeSession.matched_anime_id) : undefined;
 
   return (
-    <div className="p-6 space-y-5 max-w-7xl mx-auto">
-      <div className="flex flex-wrap items-center justify-between gap-4">
+    <div className="pb-6">
+      <div className="flex flex-wrap items-center justify-between gap-4 px-6 pt-6">
         <h1 className="text-xl font-bold text-text-primary flex items-center gap-2.5">
           <Activity className="w-6 h-6 text-accent" />
           Now Playing
@@ -81,10 +81,9 @@ export const NowPlayingView: React.FC<NowPlayingViewProps> = ({
           onOpenSeason={onOpenSeason}
         />
       ) : (
-        <NowPlayingDashboard
-          animeList={animeList}
-          skipOpEd={settings.skip_op_ed}
-        />
+        <div className="px-6 pt-5 max-w-7xl mx-auto">
+          <NowPlayingDashboard animeList={animeList} skipOpEd={settings.skip_op_ed} />
+        </div>
       )}
     </div>
   );

@@ -339,7 +339,10 @@ export const EpisodesPanel: React.FC<{
       )}
 
       {/* Episode grid (follows the release filter; a small number = episodes held by several releases) */}
-      <div className="grid grid-cols-8 sm:grid-cols-12 gap-1.5 p-3 rounded-xl bg-bg-primary/60 border border-border-subtle max-h-64 overflow-y-auto">
+      <div
+        className="grid gap-1.5 p-3 rounded-xl bg-bg-primary/60 border border-border-subtle max-h-64 overflow-y-auto"
+        style={{ gridTemplateColumns: "repeat(auto-fill, minmax(2.75rem, 1fr))" }}
+      >
         {Array.from({ length: gridCount }, (_, idx) => idx + 1).map((epNum) => {
           const hasLocal = onDisk.has(epNum);
           const isWatched = epNum <= progress;

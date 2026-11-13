@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ListChecks } from "lucide-react";
 import { AnimeEntry, SeasonalAnime } from "@/lib/types";
 import { toraApi } from "@/lib/api";
@@ -23,6 +23,10 @@ import { StaffSection } from "./StaffSection";
 import { RecommendationsSection } from "./RecommendationsSection";
 import { HistorySection } from "./HistorySection";
 import { FollowingSection } from "./FollowingSection";
+
+/** Page widths (px) for three and two columns. */
+const WIDE_LAYOUT = 1300;
+const MEDIUM_LAYOUT = 900;
 
 /** How the page's edits reach App's list (the drawer gets the same from App as props). */
 export interface EntryCallbacks {
@@ -104,99 +108,147 @@ export const AnimePage: React.FC<AnimePageProps> = ({
   const relations = media?.metadata.relations ?? [];
   const details = useMediaDetails(mediaId);
 
+  // Columns follow the page's own width (the sidebar takes part of the window)
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const leftRef = useRef<HTMLDivElement | null>(null);
+  const [width, setWidth] = useState(1200);
+  const [leftFits, setLeftFits] = useState(false);
+  const columns = width >= WIDE_LAYOUT ? 3 : width >= MEDIUM_LAYOUT ? 2 : 1;
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    const measure = () => {
+      setWidth(root.clientWidth);
+      // The left column stays in view while scrolling only when all of it fits in the window
+      const left = leftRef.current;
+      setLeftFits(left !== null && left.offsetHeight <= window.innerHeight - 140);
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(root);
+    if (leftRef.current) ro.observe(leftRef.current);
+    window.addEventListener("resize", measure);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, [columns]);
+
+  const sections: Record<string, React.ReactNode> = {
+    userState: inList && <UserStatePanel anime={anime} editor={editor} compact={columns > 1} />,
+    customLists: inList && customListNames.length > 0 && (
+      <div className="space-y-2">
+        <h3 className="text-xs font-semibold uppercase tracking-wider text-text-secondary flex items-center gap-2">
+          <ListChecks className="w-4 h-4 text-accent" />
+          Custom Lists
+        </h3>
+        <CustomListsPanel animeIds={[anime.id]} variant="chips" />
+      </div>
+    ),
+    episodes: inList && (
+      <PageSection>
+        <EpisodesPanel
+          anime={anime}
+          files={editor.localFiles}
+          progress={editor.progress}
+          playingEpisode={playingEpisode}
+          onMissingEpisode={() => searchTorrents(torrentSearchFor(anime))}
+        />
+      </PageSection>
+    ),
+    synopsis: anime.synopsis && (
+      <PageSection title="Synopsis">
+        <p
+          className={`text-xs leading-relaxed text-text-secondary whitespace-pre-line ${synopsisOpen ? "" : "line-clamp-6"}`}
+        >
+          {anime.synopsis}
+        </p>
+        {anime.synopsis.length > 400 && (
+          <button onClick={() => setSynopsisOpen((v) => !v)} className="text-[11px] font-semibold text-accent hover:underline">
+            {synopsisOpen ? "Show less" : "Show more"}
+          </button>
+        )}
+      </PageSection>
+    ),
+    relations: hasVisibleRelations(relations) && (
+      <PageSection>
+        <RelationsPanel relations={relations} listById={listById} />
+      </PageSection>
+    ),
+    characters: details.details && details.details.characters.length > 0 && (
+      <CharactersSection
+        details={details.details}
+        loading={details.loading}
+        loadingMore={details.loadingMore}
+        onLoadMore={details.loadMoreCharacters}
+        onRefresh={details.refresh}
+      />
+    ),
+    staff: details.details && <StaffSection anime={anime} details={details.details} />,
+    recommendations: details.details && <RecommendationsSection details={details.details} listById={listById} />,
+    detailsStatus: !details.details && (details.loading || details.error) && (
+      <PageSection>
+        {details.loading ? (
+          <p className="text-xs text-text-muted">Loading characters, staff and recommendations…</p>
+        ) : (
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-xs text-text-muted">Characters, staff and recommendations could not be loaded.</p>
+            <button onClick={details.refresh} className="text-[11px] font-semibold text-accent hover:underline">
+              Try again
+            </button>
+          </div>
+        )}
+      </PageSection>
+    ),
+    info: <InfoPanel anime={anime} media={media} onOpenSeason={onOpenSeason} />,
+    history: inList && <HistorySection anime={anime} />,
+    following: <FollowingSection anime={anime} />,
+    settings: inList && <EntrySettings anime={anime} editor={editor} onDeleted={callbacks.onDeleted} />,
+  };
+  const column = (names: string[], className = "", ref?: React.Ref<HTMLDivElement>) => (
+    <div ref={ref} className={`space-y-5 min-w-0 ${className}`}>
+      {names.map((n) => sections[n] && <React.Fragment key={n}>{sections[n]}</React.Fragment>)}
+    </div>
+  );
+
   return (
-    <div className="space-y-5">
+    <div ref={rootRef} className="pb-6">
       <AnimeHero anime={anime} inList={inList} metadata={media?.metadata ?? null} onPlayNext={playNext} {...heroSlots} />
 
-      {belowHero}
+      <div className="px-6 pt-6 space-y-5">
+        {belowHero}
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 items-start">
-        <div className="lg:col-span-2 space-y-5 min-w-0">
-          {inList && (
-            <>
-              <UserStatePanel anime={anime} editor={editor} />
-              {customListNames.length > 0 && (
-                <div className="space-y-2">
-                  <h3 className="text-xs font-semibold uppercase tracking-wider text-text-secondary flex items-center gap-2">
-                    <ListChecks className="w-4 h-4 text-accent" />
-                    Custom Lists
-                  </h3>
-                  <CustomListsPanel animeIds={[anime.id]} variant="chips" />
-                </div>
-              )}
-              <PageSection>
-                <EpisodesPanel
-                  anime={anime}
-                  files={editor.localFiles}
-                  progress={editor.progress}
-                  playingEpisode={playingEpisode}
-                  onMissingEpisode={() => searchTorrents(torrentSearchFor(anime))}
-                />
-              </PageSection>
-            </>
-          )}
+        {columns === 3 ? (
+          <div className="grid gap-5 items-start" style={{ gridTemplateColumns: "280px minmax(0, 1fr) 340px" }}>
+            {column(["userState", "customLists", "info", "settings"], leftFits ? "sticky top-4 self-start" : "", leftRef)}
+            {column(["episodes", "synopsis", "characters", "staff", "detailsStatus"])}
+            {column(["relations", "following", "history", "recommendations"])}
+          </div>
+        ) : columns === 2 ? (
+          <div className="grid gap-5 items-start" style={{ gridTemplateColumns: "minmax(0, 1fr) 320px" }}>
+            {column(["episodes", "synopsis", "characters", "staff", "detailsStatus", "recommendations"])}
+            {column(["userState", "customLists", "info", "relations", "following", "history", "settings"])}
+          </div>
+        ) : (
+          column([
+            "userState",
+            "customLists",
+            "episodes",
+            "synopsis",
+            "relations",
+            "characters",
+            "staff",
+            "detailsStatus",
+            "recommendations",
+            "info",
+            "history",
+            "following",
+            "settings",
+          ])
+        )}
 
-          {anime.synopsis && (
-            <PageSection title="Synopsis">
-              <p
-                className={`text-xs leading-relaxed text-text-secondary whitespace-pre-line ${synopsisOpen ? "" : "line-clamp-6"}`}
-              >
-                {anime.synopsis}
-              </p>
-              {anime.synopsis.length > 400 && (
-                <button
-                  onClick={() => setSynopsisOpen((v) => !v)}
-                  className="text-[11px] font-semibold text-accent hover:underline"
-                >
-                  {synopsisOpen ? "Show less" : "Show more"}
-                </button>
-              )}
-            </PageSection>
-          )}
-
-          {hasVisibleRelations(relations) && (
-            <PageSection>
-              <RelationsPanel relations={relations} listById={listById} />
-            </PageSection>
-          )}
-
-          {details.details && details.details.characters.length > 0 && (
-            <CharactersSection
-              details={details.details}
-              loading={details.loading}
-              loadingMore={details.loadingMore}
-              onLoadMore={details.loadMoreCharacters}
-              onRefresh={details.refresh}
-            />
-          )}
-          {details.details && <StaffSection anime={anime} details={details.details} />}
-          {details.details && <RecommendationsSection details={details.details} listById={listById} />}
-          {!details.details && details.loading && (
-            <PageSection>
-              <p className="text-xs text-text-muted">Loading characters, staff and recommendations…</p>
-            </PageSection>
-          )}
-          {!details.details && !details.loading && details.error && (
-            <PageSection>
-              <div className="flex items-center justify-between gap-2">
-                <p className="text-xs text-text-muted">Characters, staff and recommendations could not be loaded.</p>
-                <button onClick={details.refresh} className="text-[11px] font-semibold text-accent hover:underline">
-                  Try again
-                </button>
-              </div>
-            </PageSection>
-          )}
-        </div>
-
-        <div className="space-y-5 min-w-0">
-          <InfoPanel anime={anime} media={media} onOpenSeason={onOpenSeason} />
-          {inList && <HistorySection anime={anime} />}
-          <FollowingSection anime={anime} />
-          {inList && <EntrySettings anime={anime} editor={editor} onDeleted={callbacks.onDeleted} />}
-        </div>
+        {footer}
       </div>
-
-      {footer}
     </div>
   );
 };
