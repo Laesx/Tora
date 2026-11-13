@@ -50,7 +50,7 @@ interface CommandPaletteProps {
   animeList: AnimeEntry[];
   searchIndex: AnimeSearchIndex;
   commands: PaletteCommand[];
-  /** Enter on an anime: show it in the watchlist (with the query) and open its details */
+  /** Enter on an anime: show it in the watchlist (with the query) and open it the way the user chose (page / quick edit) */
   onOpenAnime: (anime: AnimeEntry) => void;
   onSearchAniList: (query: string) => void;
 }

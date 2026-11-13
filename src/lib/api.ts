@@ -2,6 +2,8 @@ import { invoke as tauriInvoke, InvokeArgs } from "@tauri-apps/api/core";
 import {
   AiringScheduleResult,
   AnimeEntry,
+  AnimePageData,
+  AnimePageRequest,
   AppInfo,
   AppSettings,
   BatchAnimeUpdatePatch,
@@ -49,7 +51,6 @@ import {
   MonthCount,
   TimelineEpisode,
   MediaDetails,
-  FollowingPage,
 } from "./types";
 import { errorText, log } from "./log";
 
@@ -102,11 +103,9 @@ export const toraApi = {
   getScoreFormat: () => invoke<string>("get_score_format"),
 
   // The anime page: characters, staff, recommendations (stored, refreshed by age) and followed users
-  getMediaDetails: (anilistId: number, refresh = false) =>
-    invoke<MediaDetails | null>("get_media_details", { anilistId, refresh }),
+  getAnimePage: (anilistId: number, request: AnimePageRequest) =>
+    invoke<AnimePageData>("get_anime_page", { anilistId, request }),
   loadMoreCharacters: (anilistId: number) => invoke<MediaDetails>("load_more_characters", { anilistId }),
-  getFollowingEntries: (anilistId: number, refresh = false) =>
-    invoke<FollowingPage | null>("get_following_entries", { anilistId, refresh }),
 
   // Preferred release per anime (`src/lib/releases.ts` keys): local only, never sent to AniList
   getReleasePreferences: () => invoke<Record<string, string>>("get_release_preferences"),

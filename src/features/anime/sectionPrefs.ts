@@ -1,26 +1,39 @@
 import { useSyncExternalStore } from "react";
 
 /**
- * Which anime page sections are collapsed: one per-device list shared by every section (and every
- * anime), so toggling one never overwrites another's state. Staff starts collapsed.
+ * Which anime page sections are collapsed: one per-device store shared by every section (and every
+ * anime), so toggling one never overwrites another's state. Only the user's own choices are stored, so
+ * a section given a new default (Recommendations) gets it unless the user already chose.
  */
 const KEY = "tora.anime.sections";
-const DEFAULT_COLLAPSED = ["staff"];
+/** Collapsed until opened: Staff (long, rarely needed), Recommendations (only fetched once opened). */
+const DEFAULT_COLLAPSED = ["staff", "recommendations"];
 
-function read(): string[] {
+type Choices = Record<string, boolean>;
+
+function read(): Choices {
   try {
     const raw = localStorage.getItem(KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed?.collapsed)) return parsed.collapsed.filter((x: unknown) => typeof x === "string");
+      if (parsed?.choices && typeof parsed.choices === "object") {
+        return Object.fromEntries(
+          Object.entries(parsed.choices).filter((e): e is [string, boolean] => typeof e[1] === "boolean")
+        );
+      }
+      // First format: the full list of collapsed sections, where only Staff could have been opened
+      if (Array.isArray(parsed?.collapsed)) {
+        const list: string[] = parsed.collapsed.filter((x: unknown) => typeof x === "string");
+        return { ...Object.fromEntries(list.map((id) => [id, true])), staff: list.includes("staff") };
+      }
     }
   } catch {
     // storage unavailable or corrupt: defaults
   }
-  return DEFAULT_COLLAPSED;
+  return {};
 }
 
-let collapsed: string[] = read();
+let choices: Choices = read();
 const listeners = new Set<() => void>();
 
 const subscribe = (listener: () => void) => {
@@ -30,10 +43,12 @@ const subscribe = (listener: () => void) => {
   };
 };
 
+const isCollapsed = (id: string) => choices[id] ?? DEFAULT_COLLAPSED.includes(id);
+
 export function setSectionCollapsed(id: string, value: boolean) {
-  collapsed = value ? [...collapsed.filter((x) => x !== id), id] : collapsed.filter((x) => x !== id);
+  choices = { ...choices, [id]: value };
   try {
-    localStorage.setItem(KEY, JSON.stringify({ collapsed }));
+    localStorage.setItem(KEY, JSON.stringify({ choices }));
   } catch {
     // per-device convenience only
   }
@@ -42,5 +57,5 @@ export function setSectionCollapsed(id: string, value: boolean) {
 
 /** Whether the section is collapsed, re-rendering when it changes. */
 export function useSectionCollapsed(id: string | undefined): boolean {
-  return useSyncExternalStore(subscribe, () => (id ? collapsed.includes(id) : false));
+  return useSyncExternalStore(subscribe, () => (id ? isCollapsed(id) : false));
 }

@@ -49,38 +49,72 @@ const orderOf = (type: string) => {
 const isShownSource = (r: MediaRelation) =>
   r.media_type !== "ANIME" && (r.relation_type === "SOURCE" || r.relation_type === "ADAPTATION");
 
-/** Whether `RelationsPanel` shows anything for these relations. */
-export const hasVisibleRelations = (relations: MediaRelation[]) =>
-  relations.some((r) => r.media_type === "ANIME" || isShownSource(r));
+/** Whether `RelationsPanel` shows anything for these relations (`bare`: only anime count). */
+export const hasVisibleRelations = (relations: MediaRelation[], bare = false) =>
+  relations.some((r) => r.media_type === "ANIME" || (!bare && isShownSource(r)));
+
+/** The manga / novel the anime was adapted from (the anime page shows them under Information). */
+export const sourceRelations = (relations: MediaRelation[]) => relations.filter(isShownSource);
+
+/** "Manga: Title" links to AniList for an anime's sources. */
+export const SourceLinks: React.FC<{ sources: MediaRelation[] }> = ({ sources }) => {
+  const showToast = useToast();
+  const titleOf = useAnimeTitle();
+  return (
+    <span className="flex flex-col gap-0.5 min-w-0">
+      {sources.map((r) => (
+        <button
+          key={`${r.relation_type}-${r.id}`}
+          type="button"
+          onClick={() => openExternal(`https://anilist.co/manga/${r.id}`, showToast)}
+          title={`${relationLabel(r.relation_type)}: ${titleOf(r)} (open on AniList)`}
+          className="flex items-center gap-1.5 min-w-0 text-left text-accent hover:underline"
+        >
+          <BookOpen className="w-3 h-3 shrink-0" />
+          <span className="truncate">
+            {formatEnum(r.format)}: {titleOf(r)}
+          </span>
+        </button>
+      ))}
+    </span>
+  );
+};
 
 /**
- * The anime's relations: anime as cards (`MediaCardGrid`: list state, quick add, click = drawer,
- * Ctrl+click = full page), the source manga / novel as chips.
+ * The anime's relations: anime as cards (`MediaCardGrid`: list state, quick add, click opens per the
+ * setting, Ctrl+click the other), the source manga / novel as chips. `bare` (the anime page): cards
+ * only, no heading (its sources go under Information).
  */
 export const RelationsPanel: React.FC<{
   relations: MediaRelation[];
   listById: Map<number, AnimeEntry>;
-}> = ({ relations, listById }) => {
+  /** Rows of cards shown until expanded (the anime page: one); all when unset */
+  maxRows?: number;
+  bare?: boolean;
+}> = ({ relations, listById, maxRows, bare = false }) => {
   const showToast = useToast();
   const titleOf = useAnimeTitle();
 
   const anime = relations
     .filter((r) => r.media_type === "ANIME")
     .sort((a, b) => orderOf(a.relation_type) - orderOf(b.relation_type) || (a.year ?? 9999) - (b.year ?? 9999));
-  const sources = relations.filter(isShownSource);
+  const sources = bare ? [] : relations.filter(isShownSource);
   if (anime.length === 0 && sources.length === 0) return null;
 
   return (
     <div className="space-y-2.5">
-      <h3 className="text-xs font-semibold uppercase tracking-wider text-text-secondary flex items-center gap-2">
-        <Network className="w-4 h-4 text-accent" />
-        Related
-      </h3>
+      {!bare && (
+        <h3 className="text-xs font-semibold uppercase tracking-wider text-text-secondary flex items-center gap-2">
+          <Network className="w-4 h-4 text-accent" />
+          Related
+        </h3>
+      )}
 
       {anime.length > 0 && (
         <MediaCardGrid
           items={anime.map((r) => ({ key: `${r.relation_type}-${r.id}`, media: r, label: relationLabel(r.relation_type) }))}
           listById={listById}
+          maxRows={maxRows}
         />
       )}
 

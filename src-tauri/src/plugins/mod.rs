@@ -250,6 +250,7 @@ pub struct MediaRecommendation {
 
 /// The anime page's details, stored in `media_metadata.details_json` (never inside `payload_json`, which
 /// season views read in bulk). Characters load 25 per page; more pages are appended on demand.
+/// Recommendations are only fetched once someone opens their section (`recommendations_fetched`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct MediaDetails {
     pub characters: Vec<CharacterRole>,
@@ -259,6 +260,42 @@ pub struct MediaDetails {
     pub staff: Vec<StaffRole>,
     pub staff_has_more: bool,
     pub recommendations: Vec<MediaRecommendation>,
+    /// Whether `recommendations` were fetched (stored before this field: they were, if any are there)
+    #[serde(default)]
+    pub recommendations_fetched: bool,
+}
+
+/// What one anime page request asks AniList for. Any combination goes out as one GraphQL document.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AnimePageParts {
+    /// The media itself, as a `SeasonalAnime` (entry fields, tags, studios, rankings, relations)
+    pub metadata: bool,
+    /// The first page of characters and the first 25 staff
+    pub details: bool,
+    /// The top 10 recommendations
+    pub recommendations: bool,
+    /// The followed users' entries (needs the token)
+    pub following: bool,
+    /// Users whose entries are wanted even outside the first 50 followed ones (with `following`)
+    pub pinned_users: Vec<i64>,
+}
+
+impl AnimePageParts {
+    pub fn is_empty(&self) -> bool {
+        !(self.metadata || self.details || self.recommendations || self.following)
+    }
+}
+
+/// The answer to an `AnimePageParts` request: each part is `Some` only when it was asked for.
+#[derive(Debug, Clone, Default)]
+pub struct AnimePageFetch {
+    /// `None` also when AniList has no such media
+    pub media: Option<SeasonalAnime>,
+    /// Characters and staff (`recommendations` left empty: they come in their own field)
+    pub details: Option<MediaDetails>,
+    pub recommendations: Option<Vec<MediaRecommendation>>,
+    /// The followed users' entries, the pinned users' ones included
+    pub following: Option<FollowingPage>,
 }
 
 /// One page of a media's characters.
@@ -457,23 +494,21 @@ pub trait TrackerPlugin: Send + Sync {
         id: i64,
     ) -> BoxFuture<'a, Result<Option<SeasonalAnime>, TrackerError>>;
 
-    /// The anime page's details: the first page of characters (25, with every voice actor), the first
-    /// 25 staff and the top 10 recommendations. `Ok(None)` if the media doesn't exist.
-    fn fetch_media_page_details<'a>(&'a self, _id: i64) -> BoxFuture<'a, Result<Option<MediaDetails>, TrackerError>> {
+    /// Whatever the anime page still needs for one media, in one request: its metadata, details
+    /// (first page of characters with every voice actor, first 25 staff), recommendations and the
+    /// followed / pinned users' entries (`token` required for those). A media that doesn't exist
+    /// answers with every media part `None`.
+    fn fetch_anime_page<'a>(
+        &'a self,
+        _id: i64,
+        _parts: &'a AnimePageParts,
+        _token: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<AnimePageFetch, TrackerError>> {
         Box::pin(async { Err(TrackerError::Api("not supported by this tracker".into())) })
     }
 
     /// One page (1-based, 25 per page) of a media's characters.
     fn fetch_characters_page<'a>(&'a self, _id: i64, _page: u32) -> BoxFuture<'a, Result<CharactersPage, TrackerError>> {
-        Box::pin(async { Err(TrackerError::Api("not supported by this tracker".into())) })
-    }
-
-    /// The list entries of the users the viewer follows for one media (first 50, newest update first).
-    fn fetch_following_entries<'a>(
-        &'a self,
-        _token: &'a str,
-        _media_id: i64,
-    ) -> BoxFuture<'a, Result<FollowingPage, TrackerError>> {
         Box::pin(async { Err(TrackerError::Api("not supported by this tracker".into())) })
     }
 

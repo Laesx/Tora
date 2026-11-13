@@ -154,6 +154,29 @@ export interface MediaDetails {
   staff: StaffRole[];
   staff_has_more: boolean;
   recommendations: MediaRecommendation[];
+  /** Recommendations are only fetched once their section is open */
+  recommendations_fetched?: boolean;
+}
+
+/** What the anime page shows (open sections) and wants fetched again (`get_anime_page`). */
+export interface AnimePageRequest {
+  refresh_details?: boolean;
+  recommendations?: boolean;
+  following?: boolean;
+  refresh_following?: boolean;
+  /** Users pinned on this device: their entries come even outside the first 50 followed ones */
+  pinned_users?: number[];
+}
+
+/** The anime page's data: stored while fresh, else one AniList request for whatever was missing. */
+export interface AnimePageData {
+  media: SeasonalAnime | null;
+  details: MediaDetails | null;
+  /** Null while signed out or when the Following section isn't open */
+  following: FollowingPage | null;
+  signed_in: boolean;
+  /** AniList couldn't be reached: the stored copy (if any) is shown */
+  error: string | null;
 }
 
 /** A followed user's list entry (account-specific, kept in memory only). */

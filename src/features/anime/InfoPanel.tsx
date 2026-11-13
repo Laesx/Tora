@@ -1,17 +1,23 @@
 import React, { useMemo } from "react";
 import { Star } from "lucide-react";
-import { AnimeEntry, SeasonalAnime } from "@/lib/types";
+import { AnimeEntry, MediaRelation, SeasonalAnime } from "@/lib/types";
 import { seasonName } from "@/lib/seasons";
 import { anilistStudioUrl, formatEnum, formatFuzzyDate, formatRanking, openExternal } from "@/lib/anime";
 import { useToast } from "@/contexts/toast";
+import { SourceLinks } from "@/features/detail/RelationsPanel";
 import { PageSection } from "./PageSection";
 
-/** Facts about the anime (season → Seasons tab, studios → AniList) and its best rankings. */
+/**
+ * Facts about the anime (season → Seasons tab, studios and the source manga / novel → AniList) and its
+ * best rankings.
+ */
 export const InfoPanel: React.FC<{
   anime: AnimeEntry;
   media: SeasonalAnime | null;
+  /** The manga / novel it was adapted from (relations) */
+  sources?: MediaRelation[];
   onOpenSeason: (season: string, year: number) => void;
-}> = ({ anime, media, onOpenSeason }) => {
+}> = ({ anime, media, sources = [], onOpenSeason }) => {
   const showToast = useToast();
   const meta = media?.metadata;
   const studios = meta?.studios.filter((s) => s.is_animation_studio) ?? [];
@@ -57,7 +63,15 @@ export const InfoPanel: React.FC<{
       label: "Aired",
       value: anime.start_date ? `${formatFuzzyDate(anime.start_date)} – ${formatFuzzyDate(anime.end_date) ?? "?"}` : null,
     },
-    { label: "Source", value: anime.source_material ? formatEnum(anime.source_material) : null },
+    {
+      label: "Source",
+      value:
+        sources.length > 0 ? (
+          <SourceLinks sources={sources} />
+        ) : anime.source_material ? (
+          formatEnum(anime.source_material)
+        ) : null,
+    },
     {
       label: "Studios",
       value:

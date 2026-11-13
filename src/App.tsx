@@ -586,7 +586,13 @@ export const App: React.FC = () => {
     remember();
     setActiveTab("watchlist");
     watchlist.focusAnime(entry, cmdQuery.trim());
-    setSelectedAnime(entry);
+    // Like a double-click: the page over the watchlist, or quick edit (after `setActiveTab`, which closes the page)
+    if (pageByDefault) {
+      setSelectedAnime(null);
+      setAnimePage(entry);
+    } else {
+      setSelectedAnime(entry);
+    }
   };
 
   // Progress resets first, so the scrobbler counts episode 1 as new

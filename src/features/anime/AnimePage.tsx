@@ -1,8 +1,6 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ListChecks } from "lucide-react";
-import { AnimeEntry, SeasonalAnime } from "@/lib/types";
+import React, { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { AnimeEntry } from "@/lib/types";
 import { toraApi } from "@/lib/api";
-import { log } from "@/lib/log";
 import { torrentSearchFor } from "@/lib/torrents";
 import { pickEpisodeFile, usePinnedRelease } from "@/lib/releases";
 import { useToast } from "@/contexts/toast";
@@ -12,13 +10,14 @@ import { CustomListsPanel } from "@/components/CustomListsPanel";
 import { useEntryEditor } from "@/features/detail/useEntryEditor";
 import { UserStatePanel } from "@/features/detail/UserStatePanel";
 import { EpisodesPanel } from "@/features/detail/EpisodesPanel";
-import { RelationsPanel, hasVisibleRelations } from "@/features/detail/RelationsPanel";
+import { RelationsPanel, hasVisibleRelations, sourceRelations } from "@/features/detail/RelationsPanel";
 import { EntrySettings } from "@/features/detail/EntrySettings";
 import { AnimeHero, AnimeHeroSlots } from "./AnimeHero";
 import { InfoPanel } from "./InfoPanel";
 import { PageSection } from "./PageSection";
 import { SynopsisSection } from "./SynopsisSection";
-import { useMediaDetails } from "./useMediaDetails";
+import { useAnimePageData } from "./useAnimePageData";
+import { useSectionCollapsed } from "./sectionPrefs";
 import { CharactersSection } from "./CharactersSection";
 import { StaffSection } from "./StaffSection";
 import { RecommendationsSection } from "./RecommendationsSection";
@@ -77,20 +76,14 @@ export const AnimePage: React.FC<AnimePageProps> = ({
     onSavedInBackground: callbacks.onSavedInBackground,
   });
   const pinned = usePinnedRelease(anime.id);
-  // Stored metadata (tags, studios, rankings, relations): fetched from AniList once if missing
-  const [media, setMedia] = useState<SeasonalAnime | null>(null);
-
+  // Metadata (tags, studios, rankings, relations), details and followed users: one backend call, at
+  // most one AniList request. Closed Recommendations / Following sections fetch nothing.
   const mediaId = anime.anilist_id ?? anime.id;
-  useEffect(() => {
-    let cancelled = false;
-    toraApi
-      .getMediaMetadata(mediaId)
-      .then((m) => !cancelled && setMedia(m))
-      .catch((e) => log.error("anime", "Failed to load media metadata", e));
-    return () => {
-      cancelled = true;
-    };
-  }, [mediaId]);
+  const recommendationsOpen = !useSectionCollapsed("recommendations");
+  const followingOpen = !useSectionCollapsed("following");
+  const page = useAnimePageData(mediaId, { recommendations: recommendationsOpen, following: followingOpen });
+  const media = page.data?.media ?? null;
+  const details = page.data?.details ?? null;
 
   const nextEpisode = anime.user_progress + 1;
   const nextFile = useMemo(
@@ -106,7 +99,6 @@ export const AnimePage: React.FC<AnimePageProps> = ({
     : undefined;
 
   const relations = media?.metadata.relations ?? [];
-  const details = useMediaDetails(mediaId);
 
   // Columns follow the page's own width (the sidebar takes part of the window)
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -135,15 +127,18 @@ export const AnimePage: React.FC<AnimePageProps> = ({
   }, [columns]);
 
   const sections: Record<string, React.ReactNode> = {
-    userState: inList && <UserStatePanel anime={anime} editor={editor} compact={columns > 1} />,
-    customLists: inList && customListNames.length > 0 && (
-      <div className="space-y-2">
-        <h3 className="text-xs font-semibold uppercase tracking-wider text-text-secondary flex items-center gap-2">
-          <ListChecks className="w-4 h-4 text-accent" />
-          Custom Lists
-        </h3>
-        <CustomListsPanel animeIds={[anime.id]} variant="chips" />
-      </div>
+    // Custom lists belong to your entry: the last row of its box
+    userState: inList && (
+      <UserStatePanel
+        anime={anime}
+        editor={editor}
+        compact={columns > 1}
+        extra={
+          customListNames.length > 0
+            ? { label: "Custom Lists", content: <CustomListsPanel animeIds={[anime.id]} variant="chips" /> }
+            : undefined
+        }
+      />
     ),
     episodes: inList && (
       <PageSection>
@@ -157,39 +152,44 @@ export const AnimePage: React.FC<AnimePageProps> = ({
       </PageSection>
     ),
     synopsis: anime.synopsis && <SynopsisSection synopsis={anime.synopsis} />,
-    relations: hasVisibleRelations(relations) && (
-      <PageSection>
-        <RelationsPanel relations={relations} listById={listById} />
-      </PageSection>
-    ),
-    characters: details.details && details.details.characters.length > 0 && (
+    characters: details && details.characters.length > 0 && (
       <CharactersSection
-        details={details.details}
-        loading={details.loading}
-        loadingMore={details.loadingMore}
-        onLoadMore={details.loadMoreCharacters}
-        onRefresh={details.refresh}
+        details={details}
+        loading={page.refreshing === "details"}
+        loadingMore={page.loadingMore}
+        onLoadMore={page.loadMoreCharacters}
+        onRefresh={page.refreshDetails}
       />
     ),
-    staff: details.details && <StaffSection anime={anime} details={details.details} />,
-    recommendations: details.details && <RecommendationsSection details={details.details} listById={listById} />,
-    detailsStatus: !details.details && (details.loading || details.error) && (
+    staff: details && <StaffSection anime={anime} details={details} />,
+    recommendations: (details || !recommendationsOpen) && (
+      <RecommendationsSection details={details} loading={page.loading} listById={listById} />
+    ),
+    detailsStatus: !details && (page.loading || page.data?.error) && (
       <PageSection>
-        {details.loading ? (
-          <p className="text-xs text-text-muted">Loading characters, staff and recommendations…</p>
+        {page.loading ? (
+          <p className="text-xs text-text-muted">Loading characters and staff…</p>
         ) : (
           <div className="flex items-center justify-between gap-2">
-            <p className="text-xs text-text-muted">Characters, staff and recommendations could not be loaded.</p>
-            <button onClick={details.refresh} className="text-[11px] font-semibold text-accent hover:underline">
+            <p className="text-xs text-text-muted">Characters and staff could not be loaded.</p>
+            <button onClick={page.refreshDetails} className="text-[11px] font-semibold text-accent hover:underline">
               Try again
             </button>
           </div>
         )}
       </PageSection>
     ),
-    info: <InfoPanel anime={anime} media={media} onOpenSeason={onOpenSeason} />,
+    info: <InfoPanel anime={anime} media={media} sources={sourceRelations(relations)} onOpenSeason={onOpenSeason} />,
     history: inList && <HistorySection anime={anime} />,
-    following: <FollowingSection anime={anime} />,
+    following: (page.data?.signed_in ?? true) && (
+      <FollowingSection
+        anime={anime}
+        page={page.data?.following ?? null}
+        loading={page.loading}
+        refreshing={page.refreshing === "following"}
+        onRefresh={page.refreshFollowing}
+      />
+    ),
     settings: inList && <EntrySettings anime={anime} editor={editor} onDeleted={callbacks.onDeleted} />,
   };
   const column = (names: string[], className = "", ref?: React.Ref<HTMLDivElement>) => (
@@ -205,24 +205,29 @@ export const AnimePage: React.FC<AnimePageProps> = ({
       <div className="px-6 pt-6 space-y-5">
         {belowHero}
 
+        {/* Related: one thin row of cards across the page (the rest on demand); sources are under Information */}
+        {hasVisibleRelations(relations, true) && (
+          <div className="bg-bg-secondary border border-border-subtle rounded-2xl p-2">
+            <RelationsPanel relations={relations} listById={listById} maxRows={1} bare />
+          </div>
+        )}
+
         {columns === 3 ? (
           <div className="grid gap-5 items-start" style={{ gridTemplateColumns: "280px minmax(0, 1fr) 340px" }}>
-            {column(["userState", "customLists", "info", "settings"], leftFits ? "sticky top-4 self-start" : "", leftRef)}
+            {column(["userState", "info", "settings"], leftFits ? "sticky top-4 self-start" : "", leftRef)}
             {column(["episodes", "synopsis", "characters", "staff", "detailsStatus"])}
-            {column(["relations", "following", "history", "recommendations"])}
+            {column(["following", "history", "recommendations"])}
           </div>
         ) : columns === 2 ? (
           <div className="grid gap-5 items-start" style={{ gridTemplateColumns: "minmax(0, 1fr) 320px" }}>
             {column(["episodes", "synopsis", "characters", "staff", "detailsStatus", "recommendations"])}
-            {column(["userState", "customLists", "info", "relations", "following", "history", "settings"])}
+            {column(["userState", "info", "following", "history", "settings"])}
           </div>
         ) : (
           column([
             "userState",
-            "customLists",
             "episodes",
             "synopsis",
-            "relations",
             "characters",
             "staff",
             "detailsStatus",

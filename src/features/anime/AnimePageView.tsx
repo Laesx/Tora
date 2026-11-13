@@ -1,12 +1,13 @@
 import React from "react";
-import { ChevronRight, X } from "lucide-react";
+import { ChevronLeft, X } from "lucide-react";
 import { AnimeEntry } from "@/lib/types";
 import { useAnimeTitle } from "@/contexts/titles";
 import { AnimePage, EntryCallbacks } from "./AnimePage";
 
 /**
  * The full anime page as a sheet over the main area: the tab underneath stays mounted (its scroll,
- * filters and selection wait there), the sidebar stays usable. Esc or the X closes it.
+ * filters and selection wait there), the sidebar stays usable. Esc, the back pill or the X on the banner
+ * closes it.
  */
 export const AnimePageView: React.FC<{
   anime: AnimeEntry;
@@ -25,26 +26,26 @@ export const AnimePageView: React.FC<{
       aria-label={titleOf(anime)}
       className="absolute inset-0 z-30 flex flex-col bg-bg-primary shadow-[0_-8px_32px_rgba(0,0,0,0.35)] animate-sheet-in"
     >
-      <div className="flex items-center gap-2 px-4 h-11 shrink-0 border-b border-border-subtle bg-bg-secondary/80 backdrop-blur-sm min-w-0">
-        <button
-          onClick={onClose}
-          title={`Back to ${fromLabel} (Esc)`}
-          className="text-xs font-medium text-text-secondary hover:text-accent transition shrink-0"
-        >
-          {fromLabel}
-        </button>
-        <ChevronRight className="w-3.5 h-3.5 text-text-muted shrink-0" />
-        <span className="text-xs font-semibold text-text-primary truncate flex-1">{titleOf(anime)}</span>
-        <button
-          onClick={onClose}
-          title="Close (Esc)"
-          className="p-1.5 rounded-lg text-text-secondary hover:text-text-primary hover:bg-bg-tertiary transition shrink-0"
-        >
-          <X className="w-4 h-4" />
-        </button>
-      </div>
       {/* Keyed: another anime opened here starts at the top */}
-      <div key={anime.id} className="flex-1 overflow-y-auto [scrollbar-gutter:stable]">
+      <div key={anime.id} className="relative flex-1 overflow-y-auto [scrollbar-gutter:stable]">
+        {/* On the banner, scrolling away with it (Esc closes from anywhere) */}
+        <div className="absolute top-3 inset-x-4 z-10 flex items-center justify-between gap-2 pointer-events-none">
+          <button
+            onClick={onClose}
+            title={`Back to ${fromLabel} (Esc)`}
+            className="pointer-events-auto flex items-center gap-1 pl-1.5 pr-3 py-1 rounded-full bg-black/45 text-white/90 text-xs font-medium shadow hover:bg-black/65 hover:text-white transition"
+          >
+            <ChevronLeft className="w-4 h-4" />
+            {fromLabel}
+          </button>
+          <button
+            onClick={onClose}
+            title="Close (Esc)"
+            className="pointer-events-auto p-1.5 rounded-full bg-black/45 text-white/90 shadow hover:bg-black/65 hover:text-white transition"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
         <AnimePage
           anime={anime}
           inList={inList}

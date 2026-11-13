@@ -1330,14 +1330,14 @@ async fn get_media_metadata(
     state.sync.media_metadata(anilist_id).await
 }
 
-/// The anime page's details (characters, staff, recommendations): stored, refreshed by age or on demand.
+/// The anime page's data (metadata, details, followed users): stored while fresh, else one AniList request.
 #[tauri::command]
-async fn get_media_details(
+async fn get_anime_page(
     state: State<'_, AppState>,
     anilist_id: i64,
-    refresh: bool,
-) -> Result<Option<crate::plugins::MediaDetails>, String> {
-    state.sync.media_details(anilist_id, refresh).await
+    request: crate::sync::AnimePageRequest,
+) -> Result<crate::sync::AnimePageData, String> {
+    state.sync.anime_page(anilist_id, request).await
 }
 
 /// Fetches and stores the next page of an anime's characters.
@@ -1347,16 +1347,6 @@ async fn load_more_characters(
     anilist_id: i64,
 ) -> Result<crate::plugins::MediaDetails, String> {
     state.sync.load_more_characters(anilist_id).await
-}
-
-/// The followed users' entries for one anime (`None` while signed out).
-#[tauri::command]
-async fn get_following_entries(
-    state: State<'_, AppState>,
-    anilist_id: i64,
-    refresh: bool,
-) -> Result<Option<crate::plugins::FollowingPage>, String> {
-    state.sync.following_entries(anilist_id, refresh).await
 }
 
 #[tauri::command]
@@ -2162,9 +2152,8 @@ pub fn run() {
             batch_update_anime_entries,
             get_custom_lists,
             get_score_format,
-            get_media_details,
+            get_anime_page,
             load_more_characters,
-            get_following_entries,
             get_release_preferences,
             set_release_preference,
             get_not_interested,

@@ -41,6 +41,7 @@ use std::time::{Duration, Instant};
 pub use crate::db::ResolvedState;
 
 mod details;
+pub use details::{AnimePageData, AnimePageRequest};
 mod history;
 pub use history::{EVENT_HISTORY_PROGRESS, EVENT_HISTORY_UPDATED};
 
@@ -586,6 +587,8 @@ pub struct TrackerSyncService {
     history_retry_scale: u64,
     /// Followed users' entries per media: `(fetched, token, page)` (`details::following_entries`).
     following_cache: Mutex<HashMap<i64, (Instant, String, crate::plugins::FollowingPage)>>,
+    /// Serializes anime page reads, so a repeated call is served by the first one's stored results.
+    page_lock: tokio::sync::Mutex<()>,
 }
 
 impl TrackerSyncService {
@@ -609,6 +612,7 @@ impl TrackerSyncService {
             history_page_interval: history::HISTORY_PAGE_INTERVAL,
             history_retry_scale: 1,
             following_cache: Mutex::new(HashMap::new()),
+            page_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -2298,12 +2302,10 @@ mod tests {
     #[derive(Default)]
     struct MockTracker {
         viewer_id: i64,
-        /// Ids of every `fetch_media_page_details` call.
-        page_details_calls: Mutex<Vec<i64>>,
+        /// `(id, parts)` of every `fetch_anime_page` call.
+        page_calls: Mutex<Vec<(i64, crate::plugins::AnimePageParts)>>,
         /// `(id, page)` of every `fetch_characters_page` call.
         character_page_calls: Mutex<Vec<(i64, u32)>>,
-        /// Media ids of every `fetch_following_entries` call.
-        following_calls: Mutex<Vec<i64>>,
         remote: Mutex<Vec<AnimeEntry>>,
         saves: Mutex<Vec<TrackerEntryUpdate>>,
         deletes: Mutex<Vec<(i64, Option<i64>)>>,
@@ -2333,18 +2335,45 @@ mod tests {
     }
 
     impl TrackerPlugin for MockTracker {
-        fn fetch_media_page_details<'a>(
+        fn fetch_anime_page<'a>(
             &'a self,
             id: i64,
-        ) -> BoxFuture<'a, Result<Option<crate::plugins::MediaDetails>, TrackerError>> {
+            parts: &'a crate::plugins::AnimePageParts,
+            token: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<crate::plugins::AnimePageFetch, TrackerError>> {
             Box::pin(async move {
-                self.page_details_calls.lock().unwrap().push(id);
-                Ok(Some(crate::plugins::MediaDetails {
-                    characters: vec![character(1), character(2)],
-                    characters_page: 1,
-                    characters_has_more: true,
-                    ..Default::default()
-                }))
+                self.page_calls.lock().unwrap().push((id, parts.clone()));
+                if parts.following && token.is_none() {
+                    return Err(TrackerError::Unauthorized("no token".into()));
+                }
+                Ok(crate::plugins::AnimePageFetch {
+                    media: parts.metadata.then(|| SeasonalAnime {
+                        entry: test_entry(id, "Fetched"),
+                        popularity: Some(5),
+                        metadata: crate::plugins::MediaMetadata {
+                            relations: Some(vec![]),
+                            ..Default::default()
+                        },
+                    }),
+                    details: parts.details.then(|| crate::plugins::MediaDetails {
+                        characters: vec![character(1), character(2)],
+                        characters_page: 1,
+                        characters_has_more: true,
+                        ..Default::default()
+                    }),
+                    recommendations: parts.recommendations.then(Vec::new),
+                    following: parts.following.then(|| crate::plugins::FollowingPage {
+                        entries: vec![crate::plugins::FollowingEntry {
+                            user_id: 7,
+                            user_name: "friend".into(),
+                            status: "CURRENT".into(),
+                            progress: 3,
+                            score: 85.0,
+                            ..Default::default()
+                        }],
+                        has_more: false,
+                    }),
+                })
             })
         }
         fn fetch_characters_page<'a>(
@@ -2357,26 +2386,6 @@ mod tests {
                 Ok(crate::plugins::CharactersPage {
                     // One already known (AniList pages can overlap), one new
                     characters: vec![character(2), character(3)],
-                    has_more: false,
-                })
-            })
-        }
-        fn fetch_following_entries<'a>(
-            &'a self,
-            _token: &'a str,
-            media_id: i64,
-        ) -> BoxFuture<'a, Result<crate::plugins::FollowingPage, TrackerError>> {
-            Box::pin(async move {
-                self.following_calls.lock().unwrap().push(media_id);
-                Ok(crate::plugins::FollowingPage {
-                    entries: vec![crate::plugins::FollowingEntry {
-                        user_id: 7,
-                        user_name: "friend".into(),
-                        status: "CURRENT".into(),
-                        progress: 3,
-                        score: 85.0,
-                        ..Default::default()
-                    }],
                     has_more: false,
                 })
             })
@@ -3500,49 +3509,84 @@ mod tests {
         assert_eq!(*mock.metadata_calls.lock().unwrap(), vec![42]);
     }
 
-    #[tokio::test]
-    async fn media_details_are_stored_refreshed_by_age_and_extended() {
-        let db = Arc::new(Database::open_in_memory().unwrap());
-        let mock = Arc::new(MockTracker::default());
-        let (svc, _events) = service(db.clone(), mock.clone());
-
-        // First read fetches the metadata row, then the details; the second is served from the store
-        let first = svc.media_details(9_000_010, false).await.unwrap().unwrap();
-        assert_eq!(first.characters.len(), 2);
-        svc.media_details(9_000_010, false).await.unwrap().unwrap();
-        assert_eq!(*mock.page_details_calls.lock().unwrap(), vec![9_000_010]);
-        assert_eq!(*mock.metadata_calls.lock().unwrap(), vec![9_000_010]);
-
-        // A forced refresh, then an outdated copy, fetch again
-        svc.media_details(9_000_010, true).await.unwrap();
-        db.put_media_details(9_000_010, 0, &first).unwrap();
-        svc.media_details(9_000_010, false).await.unwrap();
-        assert_eq!(mock.page_details_calls.lock().unwrap().len(), 3);
-
-        // The next page is appended once (overlaps dropped) and stored
-        let more = svc.load_more_characters(9_000_010).await.unwrap();
-        assert_eq!(more.characters.iter().map(|c| c.id).collect::<Vec<_>>(), vec![1, 2, 3]);
-        assert_eq!((more.characters_page, more.characters_has_more), (2, false));
-        assert_eq!(db.get_media_details(9_000_010).unwrap().unwrap().1, more);
-        // Nothing more to load: no request
-        svc.load_more_characters(9_000_010).await.unwrap();
-        assert_eq!(*mock.character_page_calls.lock().unwrap(), vec![(9_000_010, 2)]);
+    /// What each `fetch_anime_page` call asked for: (metadata, details, recommendations, following).
+    fn page_parts(mock: &MockTracker) -> Vec<(bool, bool, bool, bool)> {
+        mock.page_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, p)| (p.metadata, p.details, p.recommendations, p.following))
+            .collect()
     }
 
     #[tokio::test]
-    async fn following_entries_need_a_token_and_are_cached_in_memory() {
+    async fn anime_page_asks_only_for_what_is_missing_in_one_request() {
         let db = Arc::new(Database::open_in_memory().unwrap());
         let mock = Arc::new(MockTracker::default());
         let (svc, _events) = service(db.clone(), mock.clone());
+        let id = 9_000_010;
+        let req = |recommendations: bool| AnimePageRequest { recommendations, ..Default::default() };
 
-        assert_eq!(svc.following_entries(9_000_020, false).await.unwrap(), None);
+        // Never seen: metadata and details in one request; then served from the store
+        let first = svc.anime_page(id, req(false)).await.unwrap();
+        assert_eq!(first.media.unwrap().entry.title_romaji, "Fetched");
+        let details = first.details.unwrap();
+        assert_eq!(details.characters.len(), 2);
+        assert!(!details.recommendations_fetched);
+        svc.anime_page(id, req(false)).await.unwrap();
+        assert_eq!(page_parts(&mock), vec![(true, true, false, false)]);
+
+        // Opening Recommendations fetches only them, once, keeping the details' age
+        let fetched_at = db.get_media_details(id).unwrap().unwrap().0;
+        let with = svc.anime_page(id, req(true)).await.unwrap();
+        assert!(with.details.unwrap().recommendations_fetched);
+        svc.anime_page(id, req(true)).await.unwrap();
+        assert_eq!(page_parts(&mock)[1..], [(false, false, true, false)]);
+        assert_eq!(db.get_media_details(id).unwrap().unwrap().0, fetched_at);
+
+        // A refresh with Recommendations closed keeps the stored ones; an old copy is fetched again
+        svc.anime_page(id, AnimePageRequest { refresh_details: true, ..Default::default() }).await.unwrap();
+        assert!(db.get_media_details(id).unwrap().unwrap().1.recommendations_fetched);
+        db.put_media_details(id, 0, &details).unwrap();
+        svc.anime_page(id, req(true)).await.unwrap();
+        assert_eq!(page_parts(&mock)[2..], [(false, true, false, false), (false, true, true, false)]);
+
+        // The next page of characters is appended once (overlaps dropped) and stored
+        let more = svc.load_more_characters(id).await.unwrap();
+        assert_eq!(more.characters.iter().map(|c| c.id).collect::<Vec<_>>(), vec![1, 2, 3]);
+        assert_eq!((more.characters_page, more.characters_has_more), (2, false));
+        assert_eq!(db.get_media_details(id).unwrap().unwrap().1, more);
+        svc.load_more_characters(id).await.unwrap();
+        assert_eq!(*mock.character_page_calls.lock().unwrap(), vec![(id, 2)]);
+    }
+
+    #[tokio::test]
+    async fn anime_page_following_needs_a_token_and_is_cached_in_memory() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let mock = Arc::new(MockTracker::default());
+        let (svc, _events) = service(db.clone(), mock.clone());
+        let id = 9_000_020;
+        let following = |refresh_following: bool| AnimePageRequest {
+            following: true,
+            refresh_following,
+            pinned_users: vec![7],
+            ..Default::default()
+        };
+
+        let signed_out = svc.anime_page(id, following(false)).await.unwrap();
+        assert_eq!((signed_out.signed_in, signed_out.following), (false, None));
         sign_in(&db, 1);
-        let page = svc.following_entries(9_000_020, false).await.unwrap().unwrap();
+        // Metadata, details and the followed users' entries in the same request
+        let page = svc.anime_page(id, following(false)).await.unwrap().following.unwrap();
         assert_eq!(page.entries[0].user_name, "friend");
-        svc.following_entries(9_000_020, false).await.unwrap();
-        assert_eq!(mock.following_calls.lock().unwrap().len(), 1);
-        svc.following_entries(9_000_020, true).await.unwrap();
-        assert_eq!(mock.following_calls.lock().unwrap().len(), 2);
+        assert_eq!(page_parts(&mock)[1..], [(false, false, false, true)]);
+        assert_eq!(mock.page_calls.lock().unwrap()[1].1.pinned_users, vec![7]);
+        svc.anime_page(id, following(false)).await.unwrap();
+        // Closed section: nothing about followed users is sent or returned
+        assert_eq!(svc.anime_page(id, AnimePageRequest::default()).await.unwrap().following, None);
+        assert_eq!(mock.page_calls.lock().unwrap().len(), 2);
+        svc.anime_page(id, following(true)).await.unwrap();
+        assert_eq!(page_parts(&mock)[2..], [(false, false, false, true)]);
     }
 
     #[tokio::test]

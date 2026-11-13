@@ -1,7 +1,7 @@
 use crate::db::AnimeEntry;
 use crate::plugins::{
     ActivityMedia, ActivityPage, ActivityPageQuery, AiringScheduleItem, AiringSchedulePage,
-    BoxFuture, CharacterRole, CharactersPage, FollowingEntry, FollowingPage, MediaDetails, MediaMetadata,
+    AnimePageFetch, AnimePageParts, BoxFuture, CharacterRole, CharactersPage, FollowingEntry, FollowingPage, MediaDetails, MediaMetadata,
     MediaPrequel, MediaRanking, MediaRecommendation, MediaRelation, StaffRole, VoiceActor, MediaTag, RemoteListActivity, ACTIVITY_PAGE_SIZE,
     RemoteEntryState, RemoteListMembership, RemoteListSnapshot, SeasonPage, SeasonalAnime, StudioRef,
     TrackerEntryUpdate, TrackerError, TrackerPlugin, TrackerPluginDescriptor, TrackerUserProfile,
@@ -788,6 +788,124 @@ const CHARACTERS_FIELDS: &str = r#"
     }
 "#;
 
+/// A media's first 25 staff.
+const STAFF_FIELDS: &str = r#"
+    staff(sort: [RELEVANCE, ID], perPage: 25) {
+        pageInfo {
+            hasNextPage
+        }
+        edges {
+            role
+            node {
+                id
+                name {
+                    full
+                    native
+                }
+                image {
+                    medium
+                }
+            }
+        }
+    }
+"#;
+
+/// A media's top 10 user recommendations (light card fields).
+fn recommendations_fields() -> String {
+    format!(
+        r#"
+    recommendations(sort: [RATING_DESC, ID], perPage: 10) {{
+        nodes {{
+            rating
+            mediaRecommendation {{
+                {MEDIA_CARD_FIELDS}
+            }}
+        }}
+    }}
+"#
+    )
+}
+
+/// One user's list entry for a media (followed / pinned users).
+const FOLLOWING_ENTRY_FIELDS: &str = r#"
+    status
+    progress
+    repeat
+    score(format: POINT_100)
+    notes
+    updatedAt
+    user {
+        id
+        name
+        avatar {
+            medium
+        }
+    }
+"#;
+
+/// The `AnimePage` query for these parts (only the variables it uses are declared, as GraphQL requires).
+fn anime_page_query(parts: &AnimePageParts) -> String {
+    let mut vars = vec!["$id: Int"];
+    let mut media = String::new();
+    if parts.metadata {
+        media.push_str(MEDIA_FRAGMENT);
+        media.push_str(SEASON_EXTRA_FIELDS);
+    }
+    if parts.details {
+        vars.push("$page: Int");
+        media.push_str(CHARACTERS_FIELDS);
+        media.push_str(STAFF_FIELDS);
+    }
+    if parts.recommendations {
+        media.push_str(&recommendations_fields());
+    }
+    let mut roots = String::new();
+    if !media.is_empty() {
+        roots.push_str(&format!("Media(id: $id, type: ANIME) {{{media}}}
+"));
+    }
+    if parts.following {
+        roots.push_str(&format!(
+            "following: Page(perPage: 50) {{ pageInfo {{ hasNextPage }}              mediaList(mediaId: $id, isFollowing: true, sort: [UPDATED_TIME_DESC]) {{{FOLLOWING_ENTRY_FIELDS}}} }}
+"
+        ));
+        if !parts.pinned_users.is_empty() {
+            vars.push("$pinned: [Int]");
+            roots.push_str(&format!(
+                "pinned: Page(perPage: 50) {{ mediaList(mediaId: $id, userId_in: $pinned) {{{FOLLOWING_ENTRY_FIELDS}}} }}
+"
+            ));
+        }
+    }
+    format!("query AnimePage({}) {{
+{}}}", vars.join(", "), roots)
+}
+
+/// Parses an `AnimePage` answer: only the parts that were asked for are `Some`.
+fn parse_anime_page(data: &Value, parts: &AnimePageParts) -> AnimePageFetch {
+    let media = data.get("Media").filter(|m| !m.is_null());
+    let following = parts.following.then(|| {
+        let mut page = data.get("following").map(parse_following_page).unwrap_or_default();
+        // Pinned users outside the first 50 followed ones
+        if let Some(pinned) = data.get("pinned") {
+            let known: HashSet<i64> = page.entries.iter().map(|e| e.user_id).collect();
+            let extra: Vec<FollowingEntry> = parse_following_page(pinned)
+                .entries
+                .into_iter()
+                .filter(|e| !known.contains(&e.user_id))
+                .collect();
+            page.entries.extend(extra);
+        }
+        page
+    });
+    AnimePageFetch {
+        media: if parts.metadata { media.and_then(parse_seasonal_media) } else { None },
+        details: if parts.details { media.map(parse_media_page_details) } else { None },
+        recommendations: if parts.recommendations { media.map(parse_recommendations) } else { None },
+        following,
+    }
+}
+
 fn person_name(node: &Value) -> Option<(String, Option<String>)> {
     let name = node.get("name")?;
     let full = name.get("full")?.as_str()?.trim().to_string();
@@ -879,7 +997,19 @@ fn parse_media_page_details(media: &Value) -> MediaDetails {
                 .collect()
         })
         .unwrap_or_default();
-    let recommendations = media
+    MediaDetails {
+        characters_page: 1,
+        characters_has_more: first.has_more,
+        characters: first.characters,
+        staff_has_more: has_next_page(staff_conn),
+        staff,
+        recommendations: vec![],
+        recommendations_fetched: false,
+    }
+}
+
+fn parse_recommendations(media: &Value) -> Vec<MediaRecommendation> {
+    media
         .get("recommendations")
         .and_then(|c| c.get("nodes"))
         .and_then(|v| v.as_array())
@@ -894,15 +1024,7 @@ fn parse_media_page_details(media: &Value) -> MediaDetails {
                 })
                 .collect()
         })
-        .unwrap_or_default();
-    MediaDetails {
-        characters_page: 1,
-        characters_has_more: first.has_more,
-        characters: first.characters,
-        staff_has_more: has_next_page(staff_conn),
-        staff,
-        recommendations,
-    }
+        .unwrap_or_default()
 }
 
 fn parse_following_page(page: &Value) -> FollowingPage {
@@ -1575,46 +1697,32 @@ impl TrackerPlugin for AniListPlugin {
         })
     }
 
-    fn fetch_media_page_details<'a>(&'a self, id: i64) -> BoxFuture<'a, Result<Option<MediaDetails>, TrackerError>> {
+    fn fetch_anime_page<'a>(
+        &'a self,
+        id: i64,
+        parts: &'a AnimePageParts,
+        token: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<AnimePageFetch, TrackerError>> {
         Box::pin(async move {
-            let gql = format!(
-                r#"
-                query ($id: Int, $page: Int) {{
-                    Media(id: $id, type: ANIME) {{
-                        {CHARACTERS_FIELDS}
-                        staff(sort: [RELEVANCE, ID], perPage: 25) {{
-                            pageInfo {{
-                                hasNextPage
-                            }}
-                            edges {{
-                                role
-                                node {{
-                                    id
-                                    name {{
-                                        full
-                                        native
-                                    }}
-                                    image {{
-                                        medium
-                                    }}
-                                }}
-                            }}
-                        }}
-                        recommendations(sort: [RATING_DESC, ID], perPage: 10) {{
-                            nodes {{
-                                rating
-                                mediaRecommendation {{
-                                    {MEDIA_CARD_FIELDS}
-                                }}
-                            }}
-                        }}
-                    }}
-                }}
-                "#
-            );
-            match self.graphql_request(&gql, json!({ "id": id, "page": 1 }), None).await {
-                Ok(data) => Ok(data.get("Media").map(parse_media_page_details)),
-                Err(TrackerError::NotFound(_)) => Ok(None),
+            if parts.is_empty() {
+                return Ok(AnimePageFetch::default());
+            }
+            let token = token.map(str::trim).filter(|t| !t.is_empty());
+            if parts.following && token.is_none() {
+                return Err(TrackerError::Unauthorized("AniList OAuth token is required.".into()));
+            }
+            let mut vars = json!({ "id": id });
+            if parts.details {
+                vars["page"] = json!(1);
+            }
+            if parts.following && !parts.pinned_users.is_empty() {
+                vars["pinned"] = json!(parts.pinned_users);
+            }
+            // The token only goes along when an account-specific part is asked for
+            let auth = if parts.following { token } else { None };
+            match self.graphql_request(&anime_page_query(parts), vars, auth).await {
+                Ok(data) => Ok(parse_anime_page(&data, parts)),
+                Err(TrackerError::NotFound(_)) => Ok(AnimePageFetch::default()),
                 Err(e) => Err(e),
             }
         })
@@ -1633,45 +1741,6 @@ impl TrackerPlugin for AniListPlugin {
             );
             let data = self.graphql_request(&gql, json!({ "id": id, "page": page }), None).await?;
             Ok(data.get("Media").map(parse_characters_page).unwrap_or_default())
-        })
-    }
-
-    fn fetch_following_entries<'a>(
-        &'a self,
-        token: &'a str,
-        media_id: i64,
-    ) -> BoxFuture<'a, Result<FollowingPage, TrackerError>> {
-        Box::pin(async move {
-            let token = token.trim();
-            if token.is_empty() {
-                return Err(TrackerError::Unauthorized("AniList OAuth token is required.".into()));
-            }
-            let gql = r#"
-                query ($mediaId: Int) {
-                    Page(perPage: 50) {
-                        pageInfo {
-                            hasNextPage
-                        }
-                        mediaList(mediaId: $mediaId, isFollowing: true, sort: [UPDATED_TIME_DESC]) {
-                            status
-                            progress
-                            repeat
-                            score(format: POINT_100)
-                            notes
-                            updatedAt
-                            user {
-                                id
-                                name
-                                avatar {
-                                    medium
-                                }
-                            }
-                        }
-                    }
-                }
-            "#;
-            let data = self.graphql_request(gql, json!({ "mediaId": media_id }), Some(token)).await?;
-            Ok(data.get("Page").map(parse_following_page).unwrap_or_default())
         })
     }
 
@@ -2025,14 +2094,20 @@ mod tests {
                 { "rating": 3, "mediaRecommendation": null }
             ] }
         });
-        let d = parse_media_page_details(&media);
+        let parts = AnimePageParts { details: true, recommendations: true, ..Default::default() };
+        let fetched = parse_anime_page(&json!({ "Media": media }), &parts);
+        assert!(fetched.media.is_none());
+        assert_eq!(fetched.following, None);
+        let d = fetched.details.unwrap();
+        let recommendations = fetched.recommendations.unwrap();
         assert_eq!((d.characters_page, d.characters_has_more, d.staff_has_more), (1, true, false));
         assert_eq!(d.characters[0].name_native, None);
         assert_eq!(d.characters[0].voice_actors.len(), 2);
         assert_eq!(d.characters[0].voice_actors[1].language, "Spanish");
         assert_eq!(d.staff[0].role, "Director");
-        assert_eq!(d.recommendations.len(), 1);
-        assert_eq!((d.recommendations[0].rating, d.recommendations[0].media.id), (42, 77));
+        assert!(d.recommendations.is_empty());
+        assert_eq!(recommendations.len(), 1);
+        assert_eq!((recommendations[0].rating, recommendations[0].media.id), (42, 77));
 
         let page = json!({
             "pageInfo": { "hasNextPage": false },
@@ -2041,11 +2116,23 @@ mod tests {
                 "user": { "id": 3, "name": "friend", "avatar": { "medium": "https://img/a.png" } }
             }]
         });
-        let f = parse_following_page(&page);
-        assert_eq!(f.entries.len(), 1);
+        let pinned = json!({ "mediaList": [
+            { "status": "PLANNING", "progress": 0, "user": { "id": 3, "name": "friend" } },
+            { "status": "COMPLETED", "progress": 12, "user": { "id": 9, "name": "pinned" } }
+        ] });
+        let parts = AnimePageParts { following: true, pinned_users: vec![3, 9], ..Default::default() };
+        let f = parse_anime_page(&json!({ "following": page, "pinned": pinned }), &parts).following.unwrap();
+        // The pinned user already among the followed ones is listed once
+        assert_eq!(f.entries.iter().map(|e| e.user_id).collect::<Vec<_>>(), vec![3, 9]);
         assert_eq!((f.entries[0].progress, f.entries[0].score), (4, 85.0));
         assert_eq!(f.entries[0].notes, None);
         assert_eq!(f.entries[0].updated_at, Some(1700000000));
+
+        // Only the variables a query uses are declared
+        let q = anime_page_query(&AnimePageParts { metadata: true, ..Default::default() });
+        assert!(q.starts_with("query AnimePage($id: Int)"));
+        let q = anime_page_query(&AnimePageParts { details: true, following: true, pinned_users: vec![1], ..Default::default() });
+        assert!(q.starts_with("query AnimePage($id: Int, $page: Int, $pinned: [Int])"));
     }
 
     #[test]
