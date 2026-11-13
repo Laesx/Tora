@@ -42,6 +42,8 @@ pub use crate::db::ResolvedState;
 
 mod details;
 pub use details::{AnimePageData, AnimePageRequest};
+mod saga;
+pub use saga::{SagaGraph, SagaRequest};
 mod history;
 pub use history::{EVENT_HISTORY_PROGRESS, EVENT_HISTORY_UPDATED};
 
@@ -594,6 +596,8 @@ pub struct TrackerSyncService {
     following_cache: Mutex<HashMap<i64, (Instant, String, crate::plugins::FollowingPage)>>,
     /// Serializes anime page reads, so a repeated call is served by the first one's stored results.
     page_lock: tokio::sync::Mutex<()>,
+    /// Serializes saga walks, so a repeated call reads the rows the first one stored.
+    saga_lock: tokio::sync::Mutex<()>,
     custom_list_push_delay: Duration,
     /// Latest membership edit per entry: a delayed push that isn't the latest leaves it to that one.
     custom_list_edits: Mutex<HashMap<i64, u64>>,
@@ -622,6 +626,7 @@ impl TrackerSyncService {
             history_retry_scale: 1,
             following_cache: Mutex::new(HashMap::new()),
             page_lock: tokio::sync::Mutex::new(()),
+            saga_lock: tokio::sync::Mutex::new(()),
             custom_list_push_delay: CUSTOM_LIST_PUSH_DELAY,
             custom_list_edits: Mutex::new(HashMap::new()),
             custom_list_edit_seq: AtomicU64::new(0),
@@ -2391,9 +2396,23 @@ mod tests {
         activity_calls: Mutex<Vec<ActivityPageQuery>>,
         /// `fetch_list_activities` fails with this from call number `.0` (0-based) on.
         activity_error: Mutex<Option<(usize, TrackerError)>>,
+        /// Media `fetch_media_metadata_batch` knows, by id.
+        saga_media: Mutex<HashMap<i64, SeasonalAnime>>,
+        /// Ids of every `fetch_media_metadata_batch` call.
+        batch_calls: Mutex<Vec<Vec<i64>>>,
     }
 
     impl TrackerPlugin for MockTracker {
+        fn fetch_media_metadata_batch<'a>(
+            &'a self,
+            ids: &'a [i64],
+        ) -> BoxFuture<'a, Result<Vec<SeasonalAnime>, TrackerError>> {
+            Box::pin(async move {
+                self.batch_calls.lock().unwrap().push(ids.to_vec());
+                let known = self.saga_media.lock().unwrap();
+                Ok(ids.iter().filter_map(|id| known.get(id).cloned()).collect())
+            })
+        }
         fn fetch_anime_page<'a>(
             &'a self,
             id: i64,
@@ -3745,6 +3764,101 @@ mod tests {
         assert_eq!(mock.page_calls.lock().unwrap().len(), 2);
         svc.anime_page(id, following(true)).await.unwrap();
         assert_eq!(page_parts(&mock)[2..], [(false, false, false, true)]);
+    }
+
+    fn saga_media(id: i64, relations: &[(i64, &str)]) -> SeasonalAnime {
+        let mut entry = test_entry(id, &format!("Media {id}"));
+        entry.airing_status = "FINISHED".into();
+        SeasonalAnime {
+            entry,
+            popularity: Some(1),
+            metadata: crate::plugins::MediaMetadata {
+                relations: Some(
+                    relations
+                        .iter()
+                        .map(|(to, kind)| crate::plugins::MediaRelation {
+                            id: *to,
+                            relation_type: kind.to_string(),
+                            media_type: "ANIME".into(),
+                            ..Default::default()
+                        })
+                        .collect(),
+                ),
+                ..Default::default()
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn saga_asks_once_per_ring_then_walks_stored_rows_for_free() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let mock = Arc::new(MockTracker::default());
+        let (svc, _events) = service(db.clone(), mock.clone());
+        *mock.saga_media.lock().unwrap() = [
+            saga_media(1, &[(2, "SEQUEL")]),
+            saga_media(2, &[(1, "PREQUEL"), (3, "SEQUEL")]),
+            saga_media(3, &[(2, "PREQUEL"), (4, "OTHER")]),
+            saga_media(4, &[]),
+        ]
+        .into_iter()
+        .map(|m| (m.entry.id, m))
+        .collect();
+        let batches = || mock.batch_calls.lock().unwrap().clone();
+
+        // One request per ring; the "other" link stays an end box, never fetched
+        let g = svc.saga(2, SagaRequest::default()).await.unwrap();
+        assert_eq!(batches(), vec![vec![2], vec![1, 3]]);
+        assert_eq!((g.requests, g.nodes.len(), g.more, g.unwalked), (2, 4, false, 0));
+        assert!(!g.nodes.iter().find(|n| n.media.id == 4).unwrap().walked);
+        assert_eq!(g.lines[0].columns.iter().map(|c| c.head).collect::<Vec<_>>(), vec![1, 2, 3]);
+
+        // From another of its anime: the stored rows, no request
+        assert_eq!(svc.saga(1, SagaRequest::default()).await.unwrap().requests, 0);
+        assert_eq!(batches().len(), 2);
+
+        // An old row of an airing anime is fetched again; an expanded end box is walked
+        let mut airing = saga_media(3, &[(2, "PREQUEL"), (4, "OTHER")]);
+        airing.entry.airing_status = "RELEASING".into();
+        db.put_media_metadata(0, &airing).unwrap();
+        let g = svc.saga(1, SagaRequest { expand: vec![4], ..Default::default() }).await.unwrap();
+        assert_eq!(batches()[2..], [vec![3], vec![4]]);
+        assert!(g.nodes.iter().all(|n| n.walked));
+
+        // A refresh fetches every walked anime again, ring by ring
+        svc.saga(1, SagaRequest { refresh: true, ..Default::default() }).await.unwrap();
+        assert_eq!(batches().len(), 7);
+    }
+
+    #[tokio::test]
+    async fn saga_walks_a_spin_off_series_along_its_chain_only() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let mock = Arc::new(MockTracker::default());
+        let (svc, _events) = service(db.clone(), mock.clone());
+        // Fate (1 → 2) and its spin-off series (5 → 6 → 9), which has a side story (7) and a spin-off (8)
+        *mock.saga_media.lock().unwrap() = [
+            saga_media(1, &[(2, "SEQUEL"), (5, "SPIN_OFF")]),
+            saga_media(2, &[(1, "PREQUEL")]),
+            saga_media(5, &[(6, "SEQUEL"), (7, "SIDE_STORY"), (1, "PARENT")]),
+            saga_media(6, &[(5, "PREQUEL"), (9, "SEQUEL"), (8, "SPIN_OFF")]),
+            saga_media(9, &[(6, "PREQUEL")]),
+            saga_media(7, &[]),
+            saga_media(8, &[]),
+        ]
+        .into_iter()
+        .map(|m| (m.entry.id, m))
+        .collect();
+
+        let g = svc.saga(1, SagaRequest::default()).await.unwrap();
+        assert_eq!(*mock.batch_calls.lock().unwrap(), vec![vec![1], vec![2, 5], vec![6], vec![9]]);
+        let walked = |id: i64| g.nodes.iter().find(|n| n.media.id == id).unwrap().walked;
+        assert!([1, 2, 5, 6, 9].into_iter().all(walked));
+        assert!(!walked(7) && !walked(8));
+        let heads: Vec<Vec<i64>> = g.lines.iter().map(|l| l.columns.iter().map(|c| c.head).collect()).collect();
+        assert_eq!(heads, vec![vec![1, 2], vec![5, 6, 9]]);
+
+        // Seen from the spin-off, its own side story is a story link
+        let g = svc.saga(5, SagaRequest::default()).await.unwrap();
+        assert!(g.nodes.iter().find(|n| n.media.id == 7).unwrap().walked);
     }
 
     #[tokio::test]

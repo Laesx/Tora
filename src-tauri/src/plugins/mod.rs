@@ -494,6 +494,24 @@ pub trait TrackerPlugin: Send + Sync {
         id: i64,
     ) -> BoxFuture<'a, Result<Option<SeasonalAnime>, TrackerError>>;
 
+    /// Several media with the same fields as [`fetch_media_metadata`](Self::fetch_media_metadata), at most
+    /// [`MEDIA_DETAILS_CHUNK`] per request. Unknown ids are simply missing from the result. The default
+    /// asks for them one by one; trackers that can batch override it.
+    fn fetch_media_metadata_batch<'a>(
+        &'a self,
+        ids: &'a [i64],
+    ) -> BoxFuture<'a, Result<Vec<SeasonalAnime>, TrackerError>> {
+        Box::pin(async move {
+            let mut out = Vec::with_capacity(ids.len());
+            for &id in ids {
+                if let Some(item) = self.fetch_media_metadata(id).await? {
+                    out.push(item);
+                }
+            }
+            Ok(out)
+        })
+    }
+
     /// Whatever the anime page still needs for one media, in one request: its metadata, details
     /// (first page of characters with every voice actor, first 25 staff), recommendations and the
     /// followed / pinned users' entries (`token` required for those). A media that doesn't exist

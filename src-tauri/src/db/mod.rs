@@ -3568,6 +3568,44 @@ impl Database {
         put_media_metadata_tx(&conn, fetched_at, item)
     }
 
+    /// Stored metadata of several media, by id (`fetched_at`, item); ids with no (readable) row are missing.
+    pub fn get_media_metadata_many(&self, ids: &[i64]) -> Result<HashMap<i64, (i64, SeasonalAnime)>, String> {
+        let mut out = HashMap::with_capacity(ids.len());
+        if ids.is_empty() {
+            return Ok(out);
+        }
+        let ids_json = serde_json::to_string(ids).map_err(|e| e.to_string())?;
+        let conn = self.reader()?;
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT m.anilist_id, m.fetched_at, m.payload_json FROM json_each(?1) j
+                 JOIN media_metadata m ON m.anilist_id = j.value",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![ids_json], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?))
+            })
+            .map_err(|e| e.to_string())?;
+        for r in rows {
+            let (id, fetched_at, json) = r.map_err(|e| e.to_string())?;
+            if let Ok(item) = serde_json::from_str::<SeasonalAnime>(&json) {
+                out.insert(id, (fetched_at, item));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Stores several media in one transaction (details stored next to them are kept).
+    pub fn put_media_metadata_many(&self, fetched_at: i64, items: &[SeasonalAnime]) -> Result<(), String> {
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        for item in items {
+            put_media_metadata_tx(&tx, fetched_at, item)?;
+        }
+        tx.commit().map_err(|e| e.to_string())
+    }
+
     /// Cached airing schedule of the range starting at `from`: `(fetched_at, items)`. A range with a
     /// different end or a corrupt payload counts as a miss.
     pub fn get_airing_schedule_cache(

@@ -44,6 +44,7 @@ import type { WatchlistNav } from "@/features/watchlist/VirtualWatchlist";
 import { AnimeDetailModal } from "@/features/detail/AnimeDetailModal";
 import type { EntryCallbacks } from "@/features/anime/AnimePage";
 import { AnimePageView } from "@/features/anime/AnimePageView";
+import { SagaView } from "@/features/saga/SagaView";
 import { CommandPalette } from "@/features/palette/CommandPalette";
 import { CLOSE_MENUS_EVENT } from "@/components/FloatingQuickMenu";
 import { TorrentsRequest, TorrentsView } from "@/features/torrents/TorrentsView";
@@ -67,8 +68,12 @@ export const App: React.FC = () => {
   const [activeTab, setActiveTabState] = useState<NavTab>("watchlist");
   // The full anime page, shown in place of the tab content; any tab change closes it
   const [animePage, setAnimePage] = useState<AnimeEntry | null>(null);
+  // The saga view (its root anime), a sheet like the anime page; one of the two at a time
+  const [saga, setSaga] = useState<AnimeEntry | null>(null);
+  const sheetOpen = animePage !== null || saga !== null;
   const setActiveTab = (tab: NavTab) => {
     setAnimePage(null);
+    setSaga(null);
     setActiveTabState(tab);
   };
   const [settings, setSettings] = useState<AppSettings | null>(null);
@@ -131,6 +136,7 @@ export const App: React.FC = () => {
       drawerInList: selectedAnime !== null && animeList.some((a) => a.id === selectedAnime.id),
       page: animePage,
       pageInList: animePage !== null && animeList.some((a) => a.id === animePage.id),
+      saga,
       scrollTop: mainScrollRef.current?.scrollTop ?? 0,
     };
   };
@@ -141,8 +147,8 @@ export const App: React.FC = () => {
   const navigation = useMemo<Navigation>(() => ({ remember }), [remember]);
   const listById = useMemo(() => new Map(animeList.map((a) => [a.id, a])), [animeList]);
   useEffect(() => {
-    if (mainScrollRef.current) mainScrollRef.current.inert = animePage !== null;
-  }, [animePage]);
+    if (mainScrollRef.current) mainScrollRef.current.inert = sheetOpen;
+  }, [sheetOpen]);
 
   // Back / forward: each view takes its state back through its own request
   const applyLocation = (loc: NavLocation) => {
@@ -189,6 +195,7 @@ export const App: React.FC = () => {
     setSelectedAnime(fresh || (loc.drawer && !loc.drawerInList ? loc.drawer : null));
     const freshPage = loc.page && animeList.find((a) => a.id === loc.page!.id);
     setAnimePage(freshPage || (loc.page && !loc.pageInList ? loc.page : null));
+    setSaga(loc.saga ?? null);
     setScrollRestore({ top: loc.scrollTop, nonce });
   };
 
@@ -227,7 +234,8 @@ export const App: React.FC = () => {
     const tab = NAV_ITEMS.find((t) => t.id === loc.view.tab)?.label ?? loc.view.tab;
     const anime = loc.view.tab === "history" && loc.view.anime ? loc.view.anime.title : null;
     const drawer = loc.drawer ? titleOf(loc.drawer) : null;
-    return [tab, anime, drawer].filter(Boolean).join(" · ");
+    const sheet = loc.page ? titleOf(loc.page) : loc.saga ? `${titleOf(loc.saga)} saga` : null;
+    return [tab, anime, sheet, drawer].filter(Boolean).join(" · ");
   };
   const backLabel = locationLabel(nav.back[nav.back.length - 1]);
   const forwardLabel = locationLabel(nav.forward[nav.forward.length - 1]);
@@ -434,7 +442,7 @@ export const App: React.FC = () => {
   const navigateTo = (tab: NavTab) => {
     closeTransientLayers();
     setSettingsOpen(false);
-    if (tab !== activeTab || animePage) remember();
+    if (tab !== activeTab || sheetOpen) remember();
     setActiveTab(tab);
   };
 
@@ -533,7 +541,26 @@ export const App: React.FC = () => {
   const openAnimePage = (anime: AnimeEntry) => {
     remember();
     setSelectedAnime(null);
+    setSaga(null);
     setAnimePage(anime);
+  };
+
+  const openSaga = (anime: AnimeEntry) => {
+    remember();
+    setSelectedAnime(null);
+    setAnimePage(null);
+    setSaga(anime);
+  };
+
+  // Closing (Esc, X) drops the history entry its opening added and returns to where it was opened:
+  // the anime page it came from, else the tab
+  const closeSaga = () => {
+    const top = nav.back[nav.back.length - 1];
+    if (top && sameLocation(top, { ...currentLocation(), saga: null, page: top.page ?? null })) {
+      nav.dropTop();
+      if (top.page) return applyLocation(top);
+    }
+    setSaga(null);
   };
 
   const openAnimeHistory = (anime: AnimeEntry) => {
@@ -629,6 +656,7 @@ export const App: React.FC = () => {
     openAnimeAlternate,
     openQuickEdit,
     openAnimePage,
+    openSaga,
     openAnimeHistory,
     resolveAnime,
     stepEpisode: stepper.stepEpisode,
@@ -657,6 +685,7 @@ export const App: React.FC = () => {
       openAnimeAlternate: (a) => latest().openAnimeAlternate(a),
       openQuickEdit: (a) => latest().openQuickEdit(a),
       openAnimePage: (a) => latest().openAnimePage(a),
+      openSaga: (a) => latest().openSaga(a),
       openAnimeHistory: (a) => latest().openAnimeHistory(a),
       resolveAnime: (id) => latest().resolveAnime(id),
       stepEpisode: (a, delta) => latest().stepEpisode(a, delta),
@@ -673,10 +702,10 @@ export const App: React.FC = () => {
   }, []);
 
   useGlobalShortcuts({
-    onWatchlist: activeTab === "watchlist" && animePage === null,
+    onWatchlist: activeTab === "watchlist" && !sheetOpen,
     drawerOpen: selectedAnime !== null,
-    pageOpen: animePage !== null,
-    closePage: closeAnimePage,
+    pageOpen: sheetOpen,
+    closePage: () => (saga ? closeSaga() : closeAnimePage()),
     openAnimeAlternate,
     paletteOpen: cmdOpen,
     signOutOpen: signOutModalOpen,
@@ -850,7 +879,7 @@ export const App: React.FC = () => {
                                 scrollContainerRef={mainScrollRef}
                                 keyboardEnabled={
                                   !selectedAnime &&
-                                  !animePage &&
+                                  !sheetOpen &&
                                   !cmdOpen &&
                                   !signOutModalOpen &&
                                   !shortcutsOpen &&
@@ -927,6 +956,17 @@ export const App: React.FC = () => {
                               fromLabel={NAV_ITEMS.find((n) => n.id === activeTab)?.label ?? "Back"}
                               onOpenSeason={openSeason}
                               onClose={closeAnimePage}
+                            />
+                          </ErrorBoundary>
+                        )}
+                        {saga && (
+                          <ErrorBoundary key="saga" scope="saga">
+                            <SagaView
+                              root={saga}
+                              listById={listById}
+                              backLabel={backLabel}
+                              onBack={() => stepNav("back")}
+                              onClose={closeSaga}
                             />
                           </ErrorBoundary>
                         )}

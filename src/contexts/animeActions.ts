@@ -16,6 +16,8 @@ export interface AnimeActions {
   openQuickEdit: (anime: AnimeEntry) => void;
   /** Opens the full anime page in place of the tab content (closes the drawer) */
   openAnimePage: (anime: AnimeEntry) => void;
+  /** Opens the saga view of this anime's franchise over the main area (closes the drawer and the page) */
+  openSaga: (anime: AnimeEntry) => void;
   /** Opens this anime's episode timeline in the History tab */
   openAnimeHistory: (anime: AnimeEntry) => void;
   /**
@@ -52,6 +54,7 @@ export const AnimeActionsContext = createContext<AnimeActions>({
   openAnimeAlternate: missing,
   openQuickEdit: missing,
   openAnimePage: missing,
+  openSaga: missing,
   openAnimeHistory: missing,
   resolveAnime: missing,
   stepEpisode: missing,

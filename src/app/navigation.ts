@@ -40,6 +40,8 @@ export interface NavLocation {
   /** The full anime page that was open (in place of the tab content) */
   page?: AnimeEntry | null;
   pageInList?: boolean;
+  /** The saga view that was open (its root anime) */
+  saga?: AnimeEntry | null;
   scrollTop: number;
   cache?: NavCache;
 }
@@ -49,6 +51,7 @@ export type NavCapture = { view: NavView; cache?: NavCache };
 export const sameLocation = (a: NavLocation, b: NavLocation) =>
   (a.drawer?.id ?? null) === (b.drawer?.id ?? null) &&
   (a.page?.id ?? null) === (b.page?.id ?? null) &&
+  (a.saga?.id ?? null) === (b.saga?.id ?? null) &&
   JSON.stringify(a.view) === JSON.stringify(b.view);
 
 // The mounted view of each tab registers how to read its current state

@@ -51,6 +51,8 @@ import {
   MonthCount,
   TimelineEpisode,
   MediaDetails,
+  SagaGraph,
+  SagaRequest,
 } from "./types";
 import { errorText, log } from "./log";
 
@@ -106,6 +108,8 @@ export const toraApi = {
   getAnimePage: (anilistId: number, request: AnimePageRequest) =>
     invoke<AnimePageData>("get_anime_page", { anilistId, request }),
   loadMoreCharacters: (anilistId: number) => invoke<MediaDetails>("load_more_characters", { anilistId }),
+  // An anime's franchise graph: stored rows, one batched request per ring for missing / old ones
+  getSaga: (anilistId: number, request: SagaRequest) => invoke<SagaGraph>("get_saga", { anilistId, request }),
 
   // Preferred release per anime (`src/lib/releases.ts` keys): local only, never sent to AniList
   getReleasePreferences: () => invoke<Record<string, string>>("get_release_preferences"),

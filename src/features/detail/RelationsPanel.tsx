@@ -39,7 +39,7 @@ const RELATION_LABELS: Record<string, string> = {
   OTHER: "Other",
 };
 
-const relationLabel = (type: string) => RELATION_LABELS[type] ?? formatEnum(type);
+export const relationLabel = (type: string) => RELATION_LABELS[type] ?? formatEnum(type);
 const orderOf = (type: string) => {
   const i = RELATION_ORDER.indexOf(type);
   return i === -1 ? RELATION_ORDER.length : i;

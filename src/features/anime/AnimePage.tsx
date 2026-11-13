@@ -1,4 +1,5 @@
 import React, { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Network } from "lucide-react";
 import { AnimeEntry } from "@/lib/types";
 import { toraApi } from "@/lib/api";
 import { torrentSearchFor } from "@/lib/torrents";
@@ -67,7 +68,7 @@ export const AnimePage: React.FC<AnimePageProps> = ({
   ...heroSlots
 }) => {
   const showToast = useToast();
-  const { searchTorrents } = useAnimeActions();
+  const { searchTorrents, openSaga } = useAnimeActions();
   const customListNames = useCustomLists().names;
   const editor = useEntryEditor({
     anime,
@@ -207,8 +208,18 @@ export const AnimePage: React.FC<AnimePageProps> = ({
 
         {/* Related: one thin row of cards across the page (the rest on demand); sources are under Information */}
         {hasVisibleRelations(relations, true) && (
-          <div className="bg-bg-secondary border border-border-subtle rounded-2xl p-2">
-            <RelationsPanel relations={relations} listById={listById} maxRows={1} bare />
+          <div className="flex items-stretch gap-2 bg-bg-secondary border border-border-subtle rounded-2xl p-2">
+            <div className="flex-1 min-w-0">
+              <RelationsPanel relations={relations} listById={listById} maxRows={1} bare />
+            </div>
+            <button
+              onClick={() => openSaga(anime)}
+              title="Every anime of this franchise as a graph"
+              className="shrink-0 w-20 flex flex-col items-center justify-center gap-1 rounded-xl border border-dashed border-border-subtle text-[11px] font-semibold text-text-secondary hover:border-accent hover:text-accent transition"
+            >
+              <Network className="w-4 h-4" />
+              View saga
+            </button>
           </div>
         )}
 

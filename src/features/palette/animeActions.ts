@@ -15,6 +15,7 @@ import {
   Check,
   EyeOff,
   Maximize2,
+  Network,
 } from "lucide-react";
 import { AnimeEntry } from "@/lib/types";
 import { CustomListsApi } from "@/contexts/customLists";
@@ -214,6 +215,14 @@ export function buildAnimeActions(
       iconClass: "text-accent",
       hint: "characters, staff, history",
       run: () => h.openAnimePage(anime),
+    },
+    {
+      id: "saga",
+      label: "View Saga",
+      icon: Network,
+      iconClass: "text-accent",
+      hint: "the whole franchise",
+      run: () => h.openSaga(anime),
     },
     {
       id: "edit-details",

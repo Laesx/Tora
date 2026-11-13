@@ -1082,6 +1082,15 @@ fn parse_following_page(page: &Value) -> FollowingPage {
     }
 }
 
+/// `Page.media` of a `fetch_media_metadata_batch` response → season items.
+fn parse_media_page(data: &Value) -> Vec<SeasonalAnime> {
+    data.get("Page")
+        .and_then(|p| p.get("media"))
+        .and_then(|m| m.as_array())
+        .map(|arr| arr.iter().filter_map(parse_seasonal_media).collect())
+        .unwrap_or_default()
+}
+
 fn parse_seasonal_media(m: &Value) -> Option<SeasonalAnime> {
     let entry = AniListPlugin::parse_media_node(m, None)?;
     let tags = m
@@ -1712,6 +1721,32 @@ impl TrackerPlugin for AniListPlugin {
                 Err(TrackerError::NotFound(_)) => Ok(None),
                 Err(e) => Err(e),
             }
+        })
+    }
+
+    fn fetch_media_metadata_batch<'a>(
+        &'a self,
+        ids: &'a [i64],
+    ) -> BoxFuture<'a, Result<Vec<SeasonalAnime>, TrackerError>> {
+        Box::pin(async move {
+            let gql = format!(
+                r#"
+                query ($ids: [Int]) {{
+                    Page(perPage: {MEDIA_DETAILS_CHUNK}) {{
+                        media(id_in: $ids, type: ANIME) {{
+                            {MEDIA_FRAGMENT}
+                            {SEASON_EXTRA_FIELDS}
+                        }}
+                    }}
+                }}
+                "#
+            );
+            let mut out = Vec::with_capacity(ids.len());
+            for chunk in ids.chunks(MEDIA_DETAILS_CHUNK) {
+                let data = self.graphql_request(&gql, json!({ "ids": chunk }), None).await?;
+                out.extend(parse_media_page(&data));
+            }
+            Ok(out)
         })
     }
 
@@ -2366,6 +2401,23 @@ mod tests {
         assert_eq!(items[0].media.id, 7);
         assert_eq!(items[0].media.cover_image, "https://img/7.jpg");
         assert_eq!(items[0].country.as_deref(), Some("CN"));
+    }
+
+    #[test]
+    fn media_page_parses_every_media_with_relations() {
+        let data = json!({ "Page": { "media": [
+            { "id": 1, "title": { "romaji": "One" }, "format": "TV", "status": "FINISHED",
+              "relations": { "edges": [
+                { "relationType": "SEQUEL", "node": { "id": 2, "type": "ANIME", "title": { "romaji": "Two" } } }
+              ] } },
+            { "id": 2, "title": { "romaji": "Two" }, "relations": { "edges": [] } },
+            { "title": { "romaji": "No id" } }
+        ] } });
+        let items = parse_media_page(&data);
+        assert_eq!(items.iter().map(|m| m.entry.id).collect::<Vec<_>>(), vec![1, 2]);
+        assert_eq!(items[0].metadata.relations.as_ref().unwrap()[0].id, 2);
+        assert_eq!(items[1].metadata.relations.as_deref(), Some(&[][..]));
+        assert!(parse_media_page(&json!({})).is_empty());
     }
 
     #[test]

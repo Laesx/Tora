@@ -215,6 +215,76 @@ export interface MediaRelation {
   cover_image: string | null;
 }
 
+/** How two anime of a saga are linked, strongest first (`sync/saga.rs`). */
+export type SagaLinkKind = "chain" | "parent" | "summary" | "weak" | "alternative";
+
+export interface SagaNode {
+  /** Card fields (`relation_type` empty) */
+  media: MediaRelation;
+  /** `YYYY[-MM[-DD]]`; end boxes only know their year (`media.year`) */
+  start_date: string | null;
+  /** Its own relations were read; `false` for an end box */
+  walked: boolean;
+  popularity: number | null;
+  /** Minutes per episode (walked anime only) */
+  duration: number | null;
+}
+
+/** One link, both sides merged: `a < b`; `a_says` = what `b` is to `a` as `a`'s relations say ("SEQUEL"). */
+export interface SagaEdge {
+  a: number;
+  b: number;
+  a_says: string | null;
+  b_says: string | null;
+  kind: SagaLinkKind;
+}
+
+/** A chain anime and the anime hanging off it, oldest first. */
+export interface SagaColumn {
+  head: number;
+  satellites: number[];
+}
+
+/** How a line hangs off an earlier one: `from` (in this line) is linked to `to` (earlier, the main line when it can). */
+export interface SagaLineLink {
+  from: number;
+  to: number;
+  kind: SagaLinkKind;
+}
+
+/** One prequel / sequel chain and the anime hanging off it; the main line first. */
+export interface SagaLine {
+  /** Story order: prequel → sequel */
+  columns: SagaColumn[];
+  /** Null for the main line */
+  link: SagaLineLink | null;
+}
+
+export interface SagaGraph {
+  root: number;
+  /** The saga's name: its most popular anime */
+  title_id: number;
+  nodes: SagaNode[];
+  edges: SagaEdge[];
+  /** The main line first, the others oldest first */
+  lines: SagaLine[];
+  /** Manga / novels the anime are adapted from */
+  sources: MediaRelation[];
+  /** Story-linked anime left as end boxes past the walk's size cap */
+  unwalked: number;
+  /** The walk stopped at its request cap: calling again continues it */
+  more: boolean;
+  requests: number;
+  error: string | null;
+}
+
+export interface SagaRequest {
+  /** End boxes to walk */
+  expand?: number[];
+  /** Fetch every walked anime again */
+  refresh?: boolean;
+}
+
 /** One anime of a seasonal listing / of the media metadata store (never a list entry by itself). */
 export type SeasonalAnime = AnimeEntry & {
   popularity: number | null;

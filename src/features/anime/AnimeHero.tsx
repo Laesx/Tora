@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from "react";
-import { Clock, ExternalLink, Eye, EyeOff, FolderOpen, Magnet, Play, Plus, Star } from "lucide-react";
+import { Clock, ExternalLink, Eye, EyeOff, FolderOpen, Magnet, Network, Play, Plus, Star } from "lucide-react";
 import { AnimeEntry, MediaMetadata } from "@/lib/types";
 import { formatCountdown } from "@/lib/format";
 import { getOptimizedCoverUrl } from "@/lib/covers";
@@ -47,7 +47,8 @@ export const AnimeHero: React.FC<
     onPlayNext?: () => void;
   } & AnimeHeroSlots
 > = ({ anime, inList, metadata, onPlayNext, badges, episodeLine, actions, hidePlayNext }) => {
-  const { searchTorrents, addAnime } = useAnimeActions();
+  const { searchTorrents, addAnime, openSaga } = useAnimeActions();
+  const hasSaga = metadata?.relations?.some((r) => r.media_type === "ANIME") ?? false;
   const showToast = useToast();
   const titleOf = useAnimeTitle();
   const titleLanguage = useTitleLanguage();
@@ -210,6 +211,12 @@ export const AnimeHero: React.FC<
               <Magnet className="w-3.5 h-3.5" />
               Search torrents
             </button>
+            {hasSaga && (
+              <button onClick={() => openSaga(anime)} title="Every anime of this franchise as a graph" className={secondaryButton}>
+                <Network className="w-3.5 h-3.5" />
+                Saga
+              </button>
+            )}
             {actions}
           </div>
 

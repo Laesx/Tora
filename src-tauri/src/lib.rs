@@ -1349,6 +1349,16 @@ async fn get_anime_page(
     state.sync.anime_page(anilist_id, request).await
 }
 
+/// The saga of an anime: its franchise as a graph, from stored rows (a request per ring for missing or old ones).
+#[tauri::command]
+async fn get_saga(
+    state: State<'_, AppState>,
+    anilist_id: i64,
+    request: crate::sync::SagaRequest,
+) -> Result<crate::sync::SagaGraph, String> {
+    state.sync.saga(anilist_id, request).await
+}
+
 /// Fetches and stores the next page of an anime's characters.
 #[tauri::command]
 async fn load_more_characters(
@@ -2162,6 +2172,7 @@ pub fn run() {
             get_custom_lists,
             get_score_format,
             get_anime_page,
+            get_saga,
             load_more_characters,
             get_release_preferences,
             set_release_preference,
