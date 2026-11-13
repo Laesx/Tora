@@ -194,7 +194,7 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
   showKeyHints,
 }) => {
   const showToast = useToast();
-  const { openAnime, addAnime, addAnimeBatch } = useAnimeActions();
+  const { openAnime, openAnimeAlternate, openAnimePage, openQuickEdit, addAnime, addAnimeBatch } = useAnimeActions();
   const titleOf = useAnimeTitle();
   const nowSeason = useMemo(() => currentSeason(), []);
   const [menu, setMenu] = useState<{ anime: SeasonalAnime; x: number; y: number } | null>(null);
@@ -612,6 +612,13 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
           openAnime(selectedItems[0]);
         }
         return;
+      case " ":
+        // The other way to open (quick edit when Enter opens the page), like the watchlist
+        if (selectedItems.length === 1) {
+          e.preventDefault();
+          if (!e.repeat) openAnimeAlternate(selectedItems[0]);
+        }
+        return;
       case "Escape":
         if (selectedIds.length > 0) setSelectedIds([]);
         return;
@@ -1022,7 +1029,7 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
           listEntry={listById.get(menu.anime.id)}
           anchor={{ x: menu.x, y: menu.y }}
           onClose={closeMenu}
-          onOpen={openAnime}
+          onOpen={(a, how) => (how === "page" ? openAnimePage(a) : openQuickEdit(a))}
           onAdd={addAnime}
           selection={selectedSet.has(menu.anime.id) ? selectedItems : undefined}
           listById={listById}

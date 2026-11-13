@@ -94,7 +94,8 @@ export const TorrentsView: React.FC<TorrentsViewProps> = ({
   onRefreshAnimeList,
   onOpenSettings,
 }) => {
-  const { openAnime } = useAnimeActions();
+  // A reference inside another task: quick edit, never the page
+  const { openQuickEdit: openAnime } = useAnimeActions();
   const showToast = useToast();
   const [feedIds, setFeedIdsState] = useState<number[] | null>(memory.feedIds);
   const [search, setSearchState] = useState<TorrentSearchRequest | null>(() => {

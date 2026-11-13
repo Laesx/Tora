@@ -59,7 +59,8 @@ export const LibraryManagerView: React.FC<LibraryManagerViewProps> = ({
   refreshTick = 0,
   onRefreshAnimeList,
 }) => {
-  const { openAnime } = useAnimeActions();
+  // A reference inside another task: quick edit, never the page
+  const { openQuickEdit: openAnime } = useAnimeActions();
   const showToast = useToast();
   const titleOf = useAnimeTitle();
   const [folders, setFolders] = useState<LibraryFolder[]>([]);

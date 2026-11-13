@@ -545,9 +545,21 @@ export const App: React.FC = () => {
     setActiveTab("history");
   };
 
-  const openAnime = (anime: AnimeEntry) => {
+  const openQuickEdit = (anime: AnimeEntry) => {
     if (selectedAnime?.id !== anime.id) remember();
     setSelectedAnime(animeList.find((a) => a.id === anime.id) ?? anime);
+  };
+
+  // Double-click / Enter open what the user chose; Space and Ctrl+click the other one
+  const pageByDefault = (settings?.open_anime_with ?? "page") !== "quick_edit";
+  const openAnime = (anime: AnimeEntry) => (pageByDefault ? openAnimePage(anime) : openQuickEdit(anime));
+  const openAnimeAlternate = (anime: AnimeEntry) => (pageByDefault ? openQuickEdit(anime) : openAnimePage(anime));
+
+  // Closing the anime page drops the history entry its opening added, like the drawer
+  const closeAnimePage = () => {
+    const top = nav.back[nav.back.length - 1];
+    if (top && sameLocation(top, { ...currentLocation(), page: null })) nav.dropTop();
+    setAnimePage(null);
   };
 
   // Closing the drawer drops the history entry its opening added (closing isn't a page of its own)
@@ -585,6 +597,8 @@ export const App: React.FC = () => {
   const latestActions = useRef<AnimeActions | null>(null);
   latestActions.current = {
     openAnime,
+    openAnimeAlternate,
+    openQuickEdit,
     openAnimePage,
     openAnimeHistory,
     stepEpisode: stepper.stepEpisode,
@@ -610,6 +624,8 @@ export const App: React.FC = () => {
     const latest = () => latestActions.current!;
     return {
       openAnime: (a) => latest().openAnime(a),
+      openAnimeAlternate: (a) => latest().openAnimeAlternate(a),
+      openQuickEdit: (a) => latest().openQuickEdit(a),
       openAnimePage: (a) => latest().openAnimePage(a),
       openAnimeHistory: (a) => latest().openAnimeHistory(a),
       stepEpisode: (a, delta) => latest().stepEpisode(a, delta),
@@ -628,6 +644,9 @@ export const App: React.FC = () => {
   useGlobalShortcuts({
     onWatchlist: activeTab === "watchlist" && animePage === null,
     drawerOpen: selectedAnime !== null,
+    pageOpen: animePage !== null,
+    closePage: closeAnimePage,
+    openAnimeAlternate,
     paletteOpen: cmdOpen,
     signOutOpen: signOutModalOpen,
     shortcutsOpen,
@@ -809,6 +828,7 @@ export const App: React.FC = () => {
                               scrollContainerRef={mainScrollRef}
                               keyboardEnabled={
                                 !selectedAnime &&
+                                !animePage &&
                                 !cmdOpen &&
                                 !signOutModalOpen &&
                                 !shortcutsOpen &&

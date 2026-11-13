@@ -5,6 +5,7 @@ import {
   ExternalLink,
   FolderOpen,
   CalendarDays,
+  MousePointerClick,
   Clock,
   Languages,
   Palette,
@@ -290,6 +291,39 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                         }`}
                     >
                       {l.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* What opens an anime */}
+              <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-border-subtle">
+                <div>
+                  <div className="text-xs font-semibold text-text-secondary flex items-center gap-1.5">
+                    <MousePointerClick className="w-3.5 h-3.5 text-accent" />
+                    Double-click and Enter open
+                  </div>
+                  <p className="text-[11px] text-text-muted mt-0.5">
+                    In the watchlist, Seasons, Search, Schedule and the palette. Space and Ctrl+click open the other one;
+                    Torrents, History and Stats always open quick edit.
+                  </p>
+                </div>
+                <div className="flex items-center bg-bg-primary p-1 rounded-xl border border-border-subtle">
+                  {(
+                    [
+                      { id: "page", label: "Anime page" },
+                      { id: "quick_edit", label: "Quick edit" },
+                    ] as const
+                  ).map((o) => (
+                    <button
+                      key={o.id}
+                      onClick={() => onUpdateSettings({ ...settings, open_anime_with: o.id })}
+                      className={`px-3 py-1 rounded-lg text-xs font-semibold transition ${(settings.open_anime_with ?? "page") === o.id
+                          ? "bg-accent text-white"
+                          : "text-text-secondary hover:text-text-primary"
+                        }`}
+                    >
+                      {o.label}
                     </button>
                   ))}
                 </div>

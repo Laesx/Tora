@@ -217,11 +217,11 @@ export function buildAnimeActions(
     },
     {
       id: "edit-details",
-      label: "Edit Details...",
+      label: "Quick Edit...",
       icon: Pencil,
       iconClass: "text-accent",
       hint: "score, notes, dates",
-      run: () => h.openAnime(anime),
+      run: () => h.openQuickEdit(anime),
     },
     {
       id: "copy-title",

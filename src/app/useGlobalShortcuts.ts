@@ -9,6 +9,8 @@ import { log } from "@/lib/log";
 interface ShortcutState {
   onWatchlist: boolean;
   drawerOpen: boolean;
+  /** The full anime page (a sheet over the tab) */
+  pageOpen: boolean;
   paletteOpen: boolean;
   signOutOpen: boolean;
   shortcutsOpen: boolean;
@@ -35,9 +37,12 @@ interface ShortcutState {
   closeSettings: () => void;
   closeQuickMenu: () => void;
   closeDrawer: () => void;
+  closePage: () => void;
   goBack: () => void;
   goForward: () => void;
   openAnime: (anime: AnimeEntry) => void;
+  /** Space: the other way to open (quick edit when Enter opens the page) */
+  openAnimeAlternate: (anime: AnimeEntry) => void;
   setSelectedAnimeIds: (ids: number[]) => void;
   /** Move the selection (and focus) between cards; false when there is no card that way */
   moveSelection: (dir: NavDirection) => boolean;
@@ -77,7 +82,8 @@ const modalOpen = (s: ShortcutState) =>
  * the selected / first card) and Enter (opens the selected anime, else the top result). On the
  * list, arrows move the selection and focus with it, Enter opens it, Ctrl+A selects all, typing
  * goes back to the search box with that character, Backspace goes back and deletes one, and ↑ on
- * the first row goes back. Escape peels one layer: modal → palette → Settings → quick menu → drawer → (on the
+ * the first row goes back, Space opens the other view of the selected anime (and closes quick edit).
+ * Escape peels one layer: modal → palette → Settings → quick menu → drawer → anime page → (on the
  * list during a search) back to the search box, deselecting → selection → search text → search
  * focus. Keep `SHORTCUT_GROUPS` (shortcuts.ts) in step with this.
  */
@@ -170,6 +176,23 @@ export function useGlobalShortcuts(state: ShortcutState) {
           e.preventDefault();
           s.openAnime(anime);
         }
+      } else if (
+        e.key === " " &&
+        !isInputFocused &&
+        !anyModifier &&
+        !e.shiftKey &&
+        !s.quickMenuOpen &&
+        !modalOpen(s) &&
+        (s.drawerOpen || (listFocused && s.selectedAnimeIds.length === 1))
+      ) {
+        // Space toggles the other view of the selected anime (Seasons handles its own selection)
+        e.preventDefault();
+        if (e.repeat) return;
+        if (s.drawerOpen) s.closeDrawer();
+        else {
+          const anime = s.animeList.find((a) => a.id === s.selectedAnimeIds[0]);
+          if (anime) s.openAnimeAlternate(anime);
+        }
       } else if (searchFocused && e.key === "ArrowDown" && !anyModifier && !e.shiftKey && !s.quickMenuOpen) {
         e.preventDefault();
         s.enterList();
@@ -204,6 +227,7 @@ export function useGlobalShortcuts(state: ShortcutState) {
         else if (s.settingsOpen) s.closeSettings();
         else if (s.quickMenuOpen) s.closeQuickMenu();
         else if (s.drawerOpen) s.closeDrawer();
+        else if (s.pageOpen) s.closePage();
         else if (listFocused && s.searchQuery) backToSearch();
         else if (s.selectedAnimeIds.length > 0) s.setSelectedAnimeIds([]);
         else if (s.onWatchlist && s.searchQuery) s.setSearchQuery(() => "");

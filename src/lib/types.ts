@@ -791,6 +791,8 @@ export interface AppSettings {
   players: PlayerDefinition[];
   /** Which title the UI shows; missing English / Native titles fall back to Romaji */
   title_language: TitleLanguage;
+  /** What double-click / Enter open in browsing views; Space and Ctrl+click open the other one */
+  open_anime_with: "page" | "quick_edit";
   /** BCP 47 locale for dates and times; empty = the Windows regional locale */
   date_locale: string;
   time_format: TimeFormat;

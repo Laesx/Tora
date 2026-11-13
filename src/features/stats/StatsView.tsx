@@ -187,7 +187,8 @@ export const StatsView: React.FC<StatsViewProps> = ({
   onOpenStatus,
   onOpenHistory,
 }) => {
-  const { openAnime } = useAnimeActions();
+  // A reference inside another task: quick edit, never the page
+  const { openQuickEdit: openAnime } = useAnimeActions();
   const titleOf = useAnimeTitle();
   const scoreFormat = useScoreFormat();
   const [stats, setStats] = useState<ListStats | null>(null);

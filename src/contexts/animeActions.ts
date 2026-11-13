@@ -4,8 +4,16 @@ import type { TorrentSearchRequest } from "@/lib/torrents";
 
 /** List mutations and navigation shared by every view; App owns the state behind them. */
 export interface AnimeActions {
-  /** Opens the drawer; an anime already in the list opens with its local entry */
+  /**
+   * Opens an anime the way the user chose (`AppSettings.open_anime_with`: the anime page or quick edit).
+   * Browsing views use it; views where the anime is a reference inside another task (Torrents, History,
+   * Stats, Library) call `openQuickEdit`.
+   */
   openAnime: (anime: AnimeEntry) => void;
+  /** The other one of `openAnime` (Space, Ctrl+click) */
+  openAnimeAlternate: (anime: AnimeEntry) => void;
+  /** The quick edit drawer; an anime already in the list opens with its local entry */
+  openQuickEdit: (anime: AnimeEntry) => void;
   /** Opens the full anime page in place of the tab content (closes the drawer) */
   openAnimePage: (anime: AnimeEntry) => void;
   /** Opens this anime's episode timeline in the History tab */
@@ -36,6 +44,8 @@ const missing = () => {
 // App provides a stable object whose functions always call its latest handlers
 export const AnimeActionsContext = createContext<AnimeActions>({
   openAnime: missing,
+  openAnimeAlternate: missing,
+  openQuickEdit: missing,
   openAnimePage: missing,
   openAnimeHistory: missing,
   stepEpisode: missing,

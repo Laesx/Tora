@@ -584,7 +584,6 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
               : [activeQuickMenuAnime]
           }
           onClose={() => onSetQuickMenuAnimeId(null)}
-          onOpenFullModal={(a) => openAnime(a)}
           onClearSelection={() => onSetSelectedAnimeIds([])}
         />
       </div>,

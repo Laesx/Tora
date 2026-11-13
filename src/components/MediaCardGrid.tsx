@@ -22,7 +22,7 @@ const CARD_HEIGHT = "h-[88px]";
 /**
  * Small cards for anime the page points to (relations, recommendations): list status, progress and
  * files on disk for list entries; anime not on the list are dimmed, with a quick add to Planning.
- * Click opens the drawer, Ctrl+click the full page; nothing is fetched until then.
+ * Click opens the way the user chose (page or quick edit), Ctrl+click the other; nothing is fetched until then.
  */
 export const MediaCardGrid: React.FC<{
   items: MediaCardItem[];
@@ -30,7 +30,7 @@ export const MediaCardGrid: React.FC<{
 }> = ({ items, listById }) => {
   const showToast = useToast();
   const titleOf = useAnimeTitle();
-  const { openAnime, openAnimePage, addAnime } = useAnimeActions();
+  const { openAnime, openAnimeAlternate, addAnime } = useAnimeActions();
   const [busyId, setBusyId] = useState<number | null>(null);
 
   /** The full media of an anime not on the list (stored, or fetched once from AniList). */
@@ -48,10 +48,10 @@ export const MediaCardGrid: React.FC<{
     }
   };
 
-  const open = async (m: MediaRelation, fullPage: boolean) => {
+  const open = async (m: MediaRelation, alternate: boolean) => {
     const target = listById.get(m.id) ?? (await remoteMedia(m.id));
     if (!target) return;
-    if (fullPage) openAnimePage(target);
+    if (alternate) openAnimeAlternate(target);
     else openAnime(target);
   };
 
@@ -82,7 +82,7 @@ export const MediaCardGrid: React.FC<{
               type="button"
               onClick={(e) => open(m, e.ctrlKey || e.metaKey)}
               disabled={busyId === m.id}
-              title={`${titleOf(entry ?? m)}${entry ? "" : " (not in your list)"}\nCtrl+click: full page`}
+              title={`${titleOf(entry ?? m)}${entry ? "" : " (not in your list)"}\nCtrl+click: the other view`}
               className="flex gap-2.5 min-w-0 flex-1 text-left disabled:cursor-wait"
             >
               <div className="w-12 h-full shrink-0 rounded-md overflow-hidden bg-bg-tertiary">

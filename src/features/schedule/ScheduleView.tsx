@@ -103,7 +103,7 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({
   onRequestHandled,
 }) => {
   const showToast = useToast();
-  const { openAnime, addAnime } = useAnimeActions();
+  const { openAnime, openAnimePage, openQuickEdit, addAnime } = useAnimeActions();
   const [start, setStart] = useState(() => (request ? new Date(request.weekStart) : weekStart()));
   const [prefs, updatePrefs] = usePrefs<SchedulePrefs>(PREFS_KEY, DEFAULT_PREFS, (stored) =>
     // Values from older versions (e.g. the removed "hide_planning") fall back to "all"
@@ -268,9 +268,12 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({
     }
   };
 
-  const openItem = async (media: AnimeEntry) => {
-    const entry = listById.get(media.id);
-    openAnime(entry ?? (await fullMedia(media)));
+  /** `how` from the right-click menu; a click opens the way the user chose */
+  const openItem = async (media: AnimeEntry, how?: "page" | "quick_edit") => {
+    const target = listById.get(media.id) ?? (await fullMedia(media));
+    if (how === "page") openAnimePage(target);
+    else if (how === "quick_edit") openQuickEdit(target);
+    else openAnime(target);
   };
 
   const openMenu = (media: AnimeEntry, e: React.MouseEvent) => {
@@ -515,7 +518,6 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({
           <AnimeQuickMenu
             anime={listById.get(menu.anime.id) ?? menu.anime}
             onClose={closeMenu}
-            onOpenFullModal={openAnime}
           />
         </FloatingQuickMenu>
       )}

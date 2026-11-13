@@ -127,7 +127,8 @@ const AniListBadge: React.FC = () => (
  * shows that anime's episode timeline.
  */
 export const HistoryView: React.FC<HistoryViewProps> = ({ animeList, refreshKey, request, onRequestHandled }) => {
-  const { openAnime } = useAnimeActions();
+  // A reference inside another task: quick edit, never the page
+  const { openQuickEdit: openAnime } = useAnimeActions();
   const { remember } = useNavigation();
   const titleOf = useAnimeTitle();
   const anilist = useAniListHistory();
@@ -622,7 +623,8 @@ const AnimeTimeline: React.FC<{
   refreshKey: unknown[];
   onBack: () => void;
 }> = ({ animeId, title, anime, refreshKey, onBack }) => {
-  const { openAnime } = useAnimeActions();
+  // A reference inside another task: quick edit, never the page
+  const { openQuickEdit: openAnime } = useAnimeActions();
   const [episodes, setEpisodes] = useState<TimelineEpisode[] | null>(null);
 
   useEffect(() => {

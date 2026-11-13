@@ -160,7 +160,8 @@ export const ReleaseCard: React.FC<ReleaseCardProps> = ({
   onContextMenu,
   onDownload,
 }) => {
-  const { openAnime } = useAnimeActions();
+  // A reference inside another task: quick edit, never the page
+  const { openQuickEdit: openAnime } = useAnimeActions();
   const titleOf = useAnimeTitle();
   const [showOthers, setShowOthers] = useState(false);
   const visible = card.releases.filter((r) => showDiscarded || !r.discarded_by);

@@ -291,7 +291,6 @@ export const NowPlayingDashboard: React.FC<NowPlayingDashboardProps> = ({
           <AnimeQuickMenu
             anime={animeList.find((a) => a.id === menu.anime.id) ?? menu.anime}
             onClose={() => setMenu(null)}
-            onOpenFullModal={openAnime}
           />
         </FloatingQuickMenu>
       )}

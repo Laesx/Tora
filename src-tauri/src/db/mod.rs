@@ -356,6 +356,10 @@ pub struct AppSettings {
     /// Has a serde default so settings saved before it existed still deserialize.
     #[serde(default = "default_title_language")]
     pub title_language: String,
+    /// What double-click / Enter open in browsing views: "page" (the full anime page) | "quick_edit" (the
+    /// drawer); Space and Ctrl+click open the other one.
+    #[serde(default = "default_open_anime_with")]
+    pub open_anime_with: String,
     /// BCP 47 locale for dates and times (Settings → Appearance); empty = the Windows regional locale.
     #[serde(default)]
     pub date_locale: String,
@@ -395,6 +399,10 @@ fn default_update_mode() -> String {
 
 fn default_title_language() -> String {
     "romaji".into()
+}
+
+fn default_open_anime_with() -> String {
+    "page".into()
 }
 
 fn default_time_format() -> String {
@@ -440,6 +448,7 @@ impl Default for AppSettings {
             torrent_auto_download: false,
             players: default_players(),
             title_language: default_title_language(),
+            open_anime_with: default_open_anime_with(),
             date_locale: String::new(),
             time_format: default_time_format(),
             check_updates_on_startup: true,

@@ -14,6 +14,7 @@ import {
   Plus,
   Trash2,
   Tv,
+  Pencil,
 } from "lucide-react";
 import { AnimeEntry } from "@/lib/types";
 import { toraApi } from "@/lib/api";
@@ -32,7 +33,8 @@ interface SeasonAnimeMenuProps {
   /** Cursor position of the right-click */
   anchor: { x: number; y: number };
   onClose: () => void;
-  onOpen: (anime: AnimeEntry) => void;
+  /** The anime page or quick edit (the menu offers both) */
+  onOpen: (anime: AnimeEntry, how: "page" | "quick_edit") => void;
   onAdd: (anime: AnimeEntry, status: "CURRENT" | "PLANNING") => void;
   /** Seasons: with 2+ anime here the menu acts on all of them */
   selection?: AnimeEntry[];
@@ -355,10 +357,16 @@ export const SeasonAnimeMenu: React.FC<SeasonAnimeMenuProps> = ({
 
       {/* Details, AniList, Copy & Remove */}
       <div className="py-1">
-        <button onClick={run(() => onOpen(anime))} className={itemClass}>
+        <button onClick={run(() => onOpen(anime, "page"))} className={itemClass}>
           <span className="flex items-center gap-2">
             <Info className="w-3.5 h-3.5 text-accent" />
-            <span>View Details</span>
+            <span>Open Page</span>
+          </span>
+        </button>
+        <button onClick={run(() => onOpen(anime, "quick_edit"))} className={itemClass}>
+          <span className="flex items-center gap-2">
+            <Pencil className="w-3.5 h-3.5 text-accent" />
+            <span>Quick Edit...</span>
           </span>
         </button>
 

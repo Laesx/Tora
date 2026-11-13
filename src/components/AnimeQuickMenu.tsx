@@ -8,6 +8,7 @@ import {
   Search,
   Copy,
   Pencil,
+  Maximize2,
   Trash2,
   CheckCircle2,
   Calendar,
@@ -41,7 +42,6 @@ interface AnimeQuickMenuProps {
   anime: AnimeEntry;
   selectedAnime?: AnimeEntry[];
   onClose: () => void;
-  onOpenFullModal: (anime: AnimeEntry) => void;
   onClearSelection?: () => void;
 }
 
@@ -59,11 +59,19 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
   anime,
   selectedAnime = [],
   onClose,
-  onOpenFullModal,
   onClearSelection,
 }) => {
-  const { batchDelete, batchUpdate, changeStatus, deleteAnime, searchTorrents, startRewatch, stepEpisode } =
-    useAnimeActions();
+  const {
+    batchDelete,
+    batchUpdate,
+    changeStatus,
+    deleteAnime,
+    searchTorrents,
+    startRewatch,
+    stepEpisode,
+    openAnimePage,
+    openQuickEdit,
+  } = useAnimeActions();
   const showToast = useToast();
   const titleOf = useAnimeTitle();
   const scoreFormat = useScoreFormat();
@@ -973,14 +981,26 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
       <div className="py-1">
         <button
           onClick={() => {
-            onOpenFullModal(anime);
+            openAnimePage(anime);
+            onClose();
+          }}
+          className={itemClass}
+        >
+          <span className="flex items-center gap-2">
+            <Maximize2 className="w-3.5 h-3.5 text-accent" />
+            <span>Open Page</span>
+          </span>
+        </button>
+        <button
+          onClick={() => {
+            openQuickEdit(anime);
             onClose();
           }}
           className={itemClass}
         >
           <span className="flex items-center gap-2">
             <Pencil className="w-3.5 h-3.5 text-accent" />
-            <span>Edit Details...</span>
+            <span>Quick Edit...</span>
           </span>
         </button>
 
