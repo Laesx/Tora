@@ -9,8 +9,11 @@
   (WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS, the same for every build): Ctrl+1–8 to each tab, scrolled to
   the bottom in steps and back.
 
-  Phases: start (idle after startup), tour1 (after one tour), tourN (after all tours), settled (a minute
-  later), minimized, restored. One summary row per phase is appended to -Csv (MB, private working set
+  Then, with -Pages N > 0, N anime opened from the watchlist the way a user would (→ to the next one,
+  Enter, scroll, Esc): the anime page, or the drawer in builds from before it.
+
+  Phases: start (idle after startup), tour1 (after one tour), tourN (after all tours), pages (after the
+  anime were opened and closed), settled (a minute later), minimized, restored. One summary row per phase is appended to -Csv (MB, private working set
   unless noted) and printed.
 #>
 param(
@@ -19,6 +22,8 @@ param(
   [Parameter(Mandatory)] [string]$Build,
   [string]$Csv,
   [int]$Tours = 3,
+  # Anime opened and closed from the watchlist after the tours (0 = none)
+  [int]$Pages = 10,
   [int]$IdleSeconds = 60,
   [int]$Port = 9333
 )
@@ -83,6 +88,33 @@ $tour = @'
       el.scrollTop = 0;
       await sleep(500);
     }
+  }
+})
+'@
+# N anime opened from the watchlist (Ctrl+2) and closed again: → selects the next one, Enter opens it
+$pagesJs = @'
+(async (n) => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const key = (k, extra = {}) => window.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, ...extra }));
+  key("2", { code: "Digit2", ctrlKey: true });
+  await sleep(3000);
+  for (let i = 0; i < n; i++) {
+    key("ArrowRight");
+    await sleep(400);
+    key("Enter");
+    await sleep(5000);
+    // The page / drawer scroller: the tallest one outside <main> (the tab underneath)
+    const el =
+      [...document.querySelectorAll("*")]
+        .filter((e) => !e.closest("main"))
+        .filter((e) => e.scrollHeight > e.clientHeight + 50 && /(auto|scroll)/.test(getComputedStyle(e).overflowY))
+        .sort((a, b) => b.scrollHeight - a.scrollHeight)[0];
+    for (let j = 0; el && j < 15 && el.scrollTop + el.clientHeight < el.scrollHeight - 2; j++) {
+      el.scrollTop += el.clientHeight * 0.8;
+      await sleep(250);
+    }
+    key("Escape");
+    await sleep(1000);
   }
 })
 '@
@@ -152,6 +184,12 @@ try {
     Invoke-Js $ws "$tour($($Tours - 1))" | Out-Null
     Start-Sleep -Seconds 10
     Write-Phase $ws "tour$Tours"
+  }
+
+  if ($Pages -gt 0) {
+    Invoke-Js $ws "$pagesJs($Pages)" | Out-Null
+    Start-Sleep -Seconds 10
+    Write-Phase $ws "pages"
   }
 
   Start-Sleep -Seconds 60

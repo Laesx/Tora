@@ -24,6 +24,8 @@ param(
   [int]$Rounds = 1,
   # Tours of every tab per run
   [int]$Tours = 3,
+  # Anime opened and closed from the watchlist after the tours (mem-tour.ps1)
+  [int]$Pages = 10,
   # Reuse the last `current` exe instead of rebuilding the working tree
   [switch]$SkipBuild,
   # Recopy the benchmark data from %APPDATA%\Tora
@@ -96,7 +98,7 @@ foreach ($round in 1..$Rounds) {
   $order = if ($round % 2) { $names } else { $names[($names.Count - 1)..0] }
   foreach ($b in $order) {
     Write-Host "`nRound $round · $b" -ForegroundColor Cyan
-    & (Join-Path $PSScriptRoot "mem-tour.ps1") -Exe $builds[$b] -Build $b -Csv $csv -Tours $Tours
+    & (Join-Path $PSScriptRoot "mem-tour.ps1") -Exe $builds[$b] -Build $b -Csv $csv -Tours $Tours -Pages $Pages
   }
 }
 
