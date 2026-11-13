@@ -946,29 +946,34 @@ export const App: React.FC = () => {
                             )}
                           </ErrorBoundary>
                         </main>
-                        {animePage && (
-                          <ErrorBoundary key="anime-page" scope="anime-page">
-                            <AnimePageView
-                              anime={listById.get(animePage.id) ?? animePage}
-                              inList={listById.has(animePage.id)}
-                              listById={listById}
-                              callbacks={entryCallbacks}
-                              fromLabel={NAV_ITEMS.find((n) => n.id === activeTab)?.label ?? "Back"}
-                              onOpenSeason={openSeason}
-                              onClose={closeAnimePage}
-                            />
-                          </ErrorBoundary>
-                        )}
-                        {saga && (
-                          <ErrorBoundary key="saga" scope="saga">
-                            <SagaView
-                              root={saga}
-                              listById={listById}
-                              backLabel={backLabel}
-                              onBack={() => stepNav("back")}
-                              onClose={closeSaga}
-                            />
-                          </ErrorBoundary>
+                        {/* One sheet layer for the anime page and the saga: switching between them doesn't slide in again */}
+                        {sheetOpen && (
+                          <div className="absolute inset-0 z-30 shadow-[0_-8px_32px_rgba(0,0,0,0.35)] animate-sheet-in">
+                            {animePage && (
+                              <ErrorBoundary key="anime-page" scope="anime-page">
+                                <AnimePageView
+                                  anime={listById.get(animePage.id) ?? animePage}
+                                  inList={listById.has(animePage.id)}
+                                  listById={listById}
+                                  callbacks={entryCallbacks}
+                                  fromLabel={NAV_ITEMS.find((n) => n.id === activeTab)?.label ?? "Back"}
+                                  onOpenSeason={openSeason}
+                                  onClose={closeAnimePage}
+                                />
+                              </ErrorBoundary>
+                            )}
+                            {saga && (
+                              <ErrorBoundary key="saga" scope="saga">
+                                <SagaView
+                                  root={saga}
+                                  listById={listById}
+                                  backLabel={backLabel}
+                                  onBack={() => stepNav("back")}
+                                  onClose={closeSaga}
+                                />
+                              </ErrorBoundary>
+                            )}
+                          </div>
                         )}
                       </div>
                     </div>

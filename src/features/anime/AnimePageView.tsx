@@ -5,7 +5,7 @@ import { useAnimeTitle } from "@/contexts/titles";
 import { AnimePage, EntryCallbacks } from "./AnimePage";
 
 /**
- * The full anime page as a sheet over the main area: the tab underneath stays mounted (its scroll,
+ * The full anime page as a sheet over the main area (App's sheet layer slides it in): the tab underneath stays mounted (its scroll,
  * filters and selection wait there), the sidebar stays usable. Esc, the back pill or the X on the banner
  * closes it.
  */
@@ -24,7 +24,7 @@ export const AnimePageView: React.FC<{
     <div
       role="dialog"
       aria-label={titleOf(anime)}
-      className="absolute inset-0 z-30 flex flex-col bg-bg-primary shadow-[0_-8px_32px_rgba(0,0,0,0.35)] animate-sheet-in"
+      className="absolute inset-0 flex flex-col bg-bg-primary"
     >
       {/* Keyed: another anime opened here starts at the top */}
       <div key={anime.id} className="relative flex-1 overflow-y-auto [scrollbar-gutter:stable]">

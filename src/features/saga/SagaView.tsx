@@ -165,10 +165,32 @@ export const SagaView: React.FC<{
     [graph, prefs.order, hidden, size.w, size.h, expanded]
   );
 
-  // Pan / zoom
-  const [view, setView] = useState<View>({ x: 0, y: 0, scale: 1 });
+  // Pan / zoom, kept near the board: it never zooms out much past fitting the window, and at most a
+  // quarter of the window (or half the board, when it is smaller) can be empty past its edges
+  const minScale = () =>
+    layout ? Math.min(1, Math.max(MIN_SCALE, Math.min(size.w / layout.width, size.h / layout.height) * 0.8)) : MIN_SCALE;
+  const clamp = (v: View): View => {
+    if (!layout) return v;
+    const scale = Math.min(MAX_SCALE, Math.max(minScale(), v.scale));
+    const axis = (pos: number, board: number, viewport: number) => {
+      const slack = Math.min(viewport * 0.25, board * 0.5);
+      return Math.min(Math.max(viewport - board, 0) + slack, Math.max(Math.min(viewport - board, 0) - slack, pos));
+    };
+    return {
+      scale,
+      x: axis(v.x, layout.width * scale, size.w),
+      y: axis(v.y, layout.height * scale, size.h),
+    };
+  };
+  const clampRef = useRef(clamp);
+  clampRef.current = clamp;
+  const [view, setRawView] = useState<View>({ x: 0, y: 0, scale: 1 });
+  const setView = (next: View | ((v: View) => View)) =>
+    setRawView((v) => clampRef.current(typeof next === "function" ? next(v) : next));
   const viewRef = useRef(view);
   viewRef.current = view;
+  // A smaller board or window: back inside the limits
+  useEffect(() => setRawView((v) => clampRef.current(v)), [layout, size.w, size.h]);
   const fitView = (): View | null => {
     if (!layout) return null;
     const scale = Math.max(MIN_SCALE, Math.min(1, size.w / layout.width, size.h / layout.height));
@@ -204,11 +226,13 @@ export const SagaView: React.FC<{
 
   const zoomAt = (factor: number, cx = size.w / 2, cy = size.h / 2) =>
     setView((v) => {
-      const scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, v.scale * factor));
+      const scale = Math.min(MAX_SCALE, Math.max(minScale(), v.scale * factor));
       const k = scale / v.scale;
       return { scale, x: cx - (cx - v.x) * k, y: cy - (cy - v.y) * k };
     });
 
+  const zoomRef = useRef(zoomAt);
+  zoomRef.current = zoomAt;
   // The wheel zooms at the pointer; Shift+wheel (or a sideways trackpad swipe) pans sideways
   useEffect(() => {
     const el = viewportRef.current;
@@ -221,7 +245,7 @@ export const SagaView: React.FC<{
         return;
       }
       const rect = el.getBoundingClientRect();
-      zoomAt(Math.exp(-e.deltaY * 0.0015), e.clientX - rect.left, e.clientY - rect.top);
+      zoomRef.current(Math.exp(-e.deltaY * 0.0015), e.clientX - rect.left, e.clientY - rect.top);
     };
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
@@ -285,7 +309,7 @@ export const SagaView: React.FC<{
     <div
       role="dialog"
       aria-label={`Saga of ${titleOf(root)}`}
-      className="absolute inset-0 z-30 flex flex-col bg-bg-primary shadow-[0_-8px_32px_rgba(0,0,0,0.35)] animate-sheet-in"
+      className="absolute inset-0 flex flex-col bg-bg-primary"
     >
       {/* Toolbar */}
       <div className="shrink-0 border-b border-border-subtle bg-bg-secondary/80 px-4 py-2.5 space-y-2">
@@ -399,7 +423,8 @@ export const SagaView: React.FC<{
               {layout.paths.map((p, i) => {
                 const s = strokeOf(p.kind);
                 const touches = related !== null && related.has(p.ids[0]) && related.has(p.ids[1]) && p.ids.includes(hovered!);
-                const base = p.role === "link" ? 0.4 : 1;
+                // Loose links only show for the hovered anime: there are too many to read otherwise
+                const base = p.role === "link" ? 0 : 1;
                 const opacity = related === null ? base : touches ? 1 : 0.1;
                 return (
                   <path
