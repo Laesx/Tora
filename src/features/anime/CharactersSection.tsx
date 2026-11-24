@@ -4,6 +4,7 @@ import { CharacterRole, MediaDetails, VoiceActor } from "@/lib/types";
 import { openExternal } from "@/lib/anime";
 import { usePrefs } from "@/hooks/usePrefs";
 import { useToast } from "@/contexts/toast";
+import { useTracker } from "@/contexts/tracker";
 import { PageSection } from "./PageSection";
 import { useSectionCollapsed } from "./sectionPrefs";
 
@@ -45,6 +46,7 @@ const Portrait: React.FC<{ src: string | null; alt: string }> = ({ src, alt }) =
 
 const CharacterCard: React.FC<{ character: CharacterRole; language: string }> = ({ character, language }) => {
   const showToast = useToast();
+  const tracker = useTracker();
   const actors: VoiceActor[] = character.voice_actors.filter((v) => v.language === language);
   const va = actors[0];
   const others = actors.slice(1).map((v) => v.name);
@@ -55,7 +57,7 @@ const CharacterCard: React.FC<{ character: CharacterRole; language: string }> = 
     >
       <button
         type="button"
-        onClick={() => openExternal(`https://anilist.co/character/${character.id}`, showToast)}
+        onClick={() => openExternal(tracker.link("character", character.id), showToast)}
         title={character.name_native ? `${character.name} (${character.name_native})` : character.name}
         className="flex items-stretch gap-2 min-w-0 flex-1 text-left group"
       >
@@ -70,7 +72,7 @@ const CharacterCard: React.FC<{ character: CharacterRole; language: string }> = 
       {va && (
         <button
           type="button"
-          onClick={() => openExternal(`https://anilist.co/staff/${va.id}`, showToast)}
+          onClick={() => openExternal(tracker.link("staff", va.id), showToast)}
           title={[va.name_native ? `${va.name} (${va.name_native})` : va.name, ...others.map((n) => `also ${n}`)].join("\n")}
           className="flex items-stretch gap-2 min-w-0 flex-1 justify-end text-right group"
         >

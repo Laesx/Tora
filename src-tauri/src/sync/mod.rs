@@ -1,9 +1,11 @@
-//! Unified tracker (AniList) sync service.
+//! Unified tracker sync service.
 //!
 //! `TrackerSyncService` is the single owner of user-list state changes:
 //! validation and status/date derivation ([`normalize_change`]), local SQLite writes, keeping the active
-//! playback session in sync, pushing to AniList (save + delete through tombstones), pulling the remote
-//! list with newest-wins conflict resolution, retries and error reporting via events.
+//! playback session in sync, pushing to the active tracker (save + delete through tombstones), pulling the
+//! remote list with newest-wins conflict resolution, retries and error reporting via events. The active
+//! tracker is the signed-in account's, else the list owner's (`Database::active_tracker_id`); the token
+//! comes from the stored account (`Database::tracker_account`), never from the settings.
 //!
 //! Events emitted (names are a frontend contract):
 //! - `tracker-sync-started`  `{ reason }`
@@ -13,21 +15,23 @@
 //! - `tracker-auth-invalid`  `{ message }`
 //! - `tracker-entry-synced`  `{ entry }`
 //! - `library-changed`       `ScanSummary` (after a pull, when background matching bound new local files)
-//! - `tracker-account-switched` `{ previous_user_id, user_id, username, discarded_changes }`
+//! - `tracker-account-switched` `{ previous_tracker, previous_user_id, tracker, user_id, username,
+//!   discarded_changes }`
 //! - `anilist-history-progress` / `anilist-history-updated` (see [`history`])
 //!
 //! Edits and deletes are always queued (`sync_pending` / tombstones), signed in or not; they are only sent
-//! while signed in, so changes made while signed out reach AniList on the owner's next sign-in. Without a
-//! token `pull` fails with "Not signed in to AniList". The local list belongs to one account
+//! while signed in, so changes made while signed out reach the tracker on the owner's next sign-in. Without
+//! an account `pull` fails with "Not signed in". The local list belongs to one account
 //! (`Database::list_owner`): a different account signing in wipes it ([`TrackerSyncService::sign_in`]).
 
 use crate::db::{
-    AnimeEntry, AppSettings, BatchAnimeUpdatePatch, CustomListChange, CustomListsState, Database,
+    AccountInfo, AnimeEntry, BatchAnimeUpdatePatch, CustomListChange, CustomListsState, Database, ListOwner,
+    TrackerAccount,
 };
 use crate::detection::anisthesia::DetectedMediaSession;
 use crate::library::scanner::ScanSummary;
-use crate::plugins::{
-    AiringScheduleItem, PluginManager, SeasonalAnime, TrackerEntryUpdate, TrackerError, TrackerPlugin,
+use crate::trackers::{
+    AccessTokens, AiringScheduleItem, SeasonalAnime, Tracker, TrackerEntryUpdate, TrackerError, TrackerRegistry,
     TrackerUserProfile, MEDIA_DETAILS_CHUNK,
 };
 use serde::{Deserialize, Serialize};
@@ -61,9 +65,6 @@ pub const EVENT_ENTRY_SYNCED: &str = "tracker-entry-synced";
 pub const EVENT_LIBRARY_CHANGED: &str = "library-changed";
 pub const EVENT_ACCOUNT_SWITCHED: &str = "tracker-account-switched";
 
-/// Plugin id used for all sync traffic (login is always AniList OAuth).
-const TRACKER_PLUGIN_ID: &str = "anilist";
-const MIN_REQUEST_INTERVAL: Duration = Duration::from_millis(700);
 const MAX_RETRY_AFTER_SECS: u64 = 90;
 
 pub const STATUS_CURRENT: &str = "CURRENT";
@@ -85,15 +86,18 @@ pub const VALID_STATUSES: [&str; 6] = [
 // Rate limiter
 // ---------------------------------------------------------------------------------------------
 
-/// Serializes tracker requests with a minimum spacing and waits out one `RateLimited` response.
+/// Serializes one tracker's requests with a minimum spacing and waits out one `RateLimited` response.
 pub struct RateLimiter {
+    /// The tracker's name, for the log
+    name: String,
     min_interval: Duration,
     last_request: tokio::sync::Mutex<Option<Instant>>,
 }
 
 impl RateLimiter {
-    pub fn new(min_interval: Duration) -> Self {
+    pub fn new(name: impl Into<String>, min_interval: Duration) -> Self {
         Self {
+            name: name.into(),
             min_interval,
             last_request: tokio::sync::Mutex::new(None),
         }
@@ -121,7 +125,7 @@ impl RateLimiter {
         match op().await {
             Err(TrackerError::RateLimited { retry_after_secs }) => {
                 let wait = retry_after_secs.clamp(1, MAX_RETRY_AFTER_SECS);
-                log::warn!(target: "anilist", "rate limited, retrying in {}s", wait);
+                log::warn!(target: "sync", "{} rate limited, retrying in {}s", self.name, wait);
                 tokio::time::sleep(Duration::from_secs(wait)).await;
                 self.wait_turn().await;
                 op().await
@@ -406,8 +410,19 @@ pub fn today_string() -> String {
     chrono::Local::now().format("%Y-%m-%d").to_string()
 }
 
-fn has_token(settings: &AppSettings) -> bool {
-    !settings.anilist_token.trim().is_empty()
+/// Whether the account `viewer` (the id the tracker resolved for the token) may read and write the local
+/// list: it must be the stored account's user (when known) and the list owner (when there is one, on the
+/// same tracker).
+fn owns_list(account: &TrackerAccount, owner: Option<&ListOwner>, viewer: i64) -> bool {
+    account.known_user_id().is_none_or(|id| id == viewer)
+        && owner.is_none_or(|o| o.tracker == account.tracker && o.user_id == viewer)
+}
+
+/// "anilist user 7" (or "another account" when there is no owner), for ownership errors.
+fn owner_text(owner: Option<&ListOwner>) -> String {
+    owner
+        .map(|o| format!("{} user {}", o.tracker, o.user_id))
+        .unwrap_or_else(|| "another account".into())
 }
 
 /// Blocking: normalize + write one change. Rematches local episodes if folder/synonyms changed.
@@ -521,11 +536,14 @@ pub struct SyncStatus {
 /// Result of [`TrackerSyncService::sign_in`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SignInOutcome {
-    /// A different account than the list owner signed in; the previous account's list data was wiped.
+    /// A different account than the list owner signed in (another user, or another tracker); the previous
+    /// account's list data was wiped.
     pub account_switched: bool,
-    pub previous_user_id: Option<i64>,
+    pub previous_owner: Option<ListOwner>,
     /// Unsent changes (pending entries + queued deletions) of the previous account that were dropped.
     pub discarded_changes: usize,
+    /// The account now signed in.
+    pub account: Option<AccountInfo>,
 }
 
 /// Result of [`TrackerSyncService::sign_out`], returned by the `sign_out_tracker` command.
@@ -535,7 +553,6 @@ pub struct SignOutOutcome {
     pub deleted: usize,
     /// Changes still queued after the final flush; they are sent when the same account signs in again.
     pub unsent: usize,
-    pub settings: AppSettings,
 }
 
 #[derive(Debug, Default)]
@@ -577,12 +594,15 @@ const CUSTOM_LIST_PUSH_DELAY: Duration = Duration::from_millis(1500);
 
 pub struct TrackerSyncService {
     db: Arc<Database>,
-    plugins: Arc<PluginManager>,
+    trackers: Arc<TrackerRegistry>,
     emit: SyncEmitter,
     active_session: Arc<Mutex<Option<DetectedMediaSession>>>,
     /// Serializes everything that talks to the tracker (pushes, deletion flushes, pulls).
     op_lock: tokio::sync::Mutex<()>,
-    limiter: RateLimiter,
+    /// One rate limiter per tracker id, made on first use from [`Tracker::min_request_interval`]
+    limiters: Mutex<HashMap<String, Arc<RateLimiter>>>,
+    /// Tests: every limiter uses this spacing instead
+    min_interval_override: Option<Duration>,
     in_progress: AtomicBool,
     last_synced_at: Mutex<Option<i64>>,
     /// An AniList history import or refresh is running (one at a time).
@@ -593,7 +613,7 @@ pub struct TrackerSyncService {
     /// Multiplies the import's retry waits (0 in tests).
     history_retry_scale: u64,
     /// Followed users' entries per media: `(fetched, token, page)` (`details::following_entries`).
-    following_cache: Mutex<HashMap<i64, (Instant, String, crate::plugins::FollowingPage)>>,
+    following_cache: Mutex<HashMap<i64, (Instant, String, crate::trackers::FollowingPage)>>,
     /// Serializes anime page reads, so a repeated call is served by the first one's stored results.
     page_lock: tokio::sync::Mutex<()>,
     /// Serializes saga walks, so a repeated call reads the rows the first one stored.
@@ -607,17 +627,18 @@ pub struct TrackerSyncService {
 impl TrackerSyncService {
     pub fn new(
         db: Arc<Database>,
-        plugins: Arc<PluginManager>,
+        trackers: Arc<TrackerRegistry>,
         emit: SyncEmitter,
         active_session: Arc<Mutex<Option<DetectedMediaSession>>>,
     ) -> Self {
         Self {
             db,
-            plugins,
+            trackers,
             emit,
             active_session,
             op_lock: tokio::sync::Mutex::new(()),
-            limiter: RateLimiter::new(MIN_REQUEST_INTERVAL),
+            limiters: Mutex::new(HashMap::new()),
+            min_interval_override: None,
             in_progress: AtomicBool::new(false),
             last_synced_at: Mutex::new(None),
             history_running: AtomicBool::new(false),
@@ -648,8 +669,21 @@ impl TrackerSyncService {
 
     /// Override the minimum spacing between tracker requests (tests).
     pub fn with_min_request_interval(mut self, interval: Duration) -> Self {
-        self.limiter = RateLimiter::new(interval);
+        self.min_interval_override = Some(interval);
         self
+    }
+
+    /// The rate limiter of `tracker`: every request to a tracker goes through its own.
+    fn limiter(&self, tracker: &Arc<dyn Tracker>) -> Arc<RateLimiter> {
+        let descriptor = tracker.descriptor();
+        let mut limiters = self.limiters.lock().unwrap_or_else(|e| e.into_inner());
+        limiters
+            .entry(descriptor.id)
+            .or_insert_with(|| {
+                let interval = self.min_interval_override.unwrap_or_else(|| tracker.min_request_interval());
+                Arc::new(RateLimiter::new(descriptor.name, interval))
+            })
+            .clone()
     }
 
     async fn blocking<T, F>(&self, f: F) -> Result<T, String>
@@ -663,16 +697,35 @@ impl TrackerSyncService {
             .map_err(|e| e.to_string())?
     }
 
-    async fn current_token(&self) -> Result<Option<String>, String> {
-        let settings = self.blocking(|db| db.get_settings()).await?;
-        let tok = settings.anilist_token.trim().to_string();
-        Ok(if tok.is_empty() { None } else { Some(tok) })
+    /// The signed-in account (`None` when signed out).
+    async fn current_account(&self) -> Result<Option<TrackerAccount>, String> {
+        self.blocking(|db| db.tracker_account()).await
     }
 
-    fn plugin(&self) -> Result<Arc<dyn TrackerPlugin>, TrackerError> {
-        self.plugins
-            .get(TRACKER_PLUGIN_ID)
-            .ok_or_else(|| TrackerError::Api("AniList tracker plugin is not registered".into()))
+    async fn current_token(&self) -> Result<Option<String>, String> {
+        Ok(self
+            .current_account()
+            .await?
+            .map(|a| a.access_token.trim().to_string())
+            .filter(|t| !t.is_empty()))
+    }
+
+    /// The tracker with this id (an unknown id is an error, never another tracker).
+    fn tracker_by_id(&self, id: &str) -> Result<Arc<dyn Tracker>, TrackerError> {
+        self.trackers
+            .get(id)
+            .ok_or_else(|| TrackerError::Api(format!("Unknown tracker `{}`", id)))
+    }
+
+    /// The active tracker: the signed-in account's, else the list owner's, else the default.
+    async fn tracker(&self) -> Result<Arc<dyn Tracker>, TrackerError> {
+        let id = self.blocking(|db| db.active_tracker_id()).await.map_err(TrackerError::Api)?;
+        self.tracker_by_id(&id)
+    }
+
+    /// Every registered tracker's descriptor.
+    pub fn trackers(&self) -> &TrackerRegistry {
+        &self.trackers
     }
 
     fn emit(&self, event: &str, payload: Value) {
@@ -767,7 +820,7 @@ impl TrackerSyncService {
         let today = today_string();
         let (entry, signed_in) = self
             .blocking(move |db| {
-                let signed_in = has_token(&db.get_settings()?);
+                let signed_in = db.tracker_account()?.is_some();
                 let entry = write_local_change(db, &change, &today, true)?;
                 Ok((entry, signed_in))
             })
@@ -793,7 +846,7 @@ impl TrackerSyncService {
         let today = today_string();
         let (entries, signed_in) = self
             .blocking(move |db| {
-                let signed_in = has_token(&db.get_settings()?);
+                let signed_in = db.tracker_account()?.is_some();
                 let entries = write_batch_change(db, &patch, &today, true)?;
                 Ok((entries, signed_in))
             })
@@ -830,7 +883,7 @@ impl TrackerSyncService {
         let now = chrono::Utc::now().timestamp();
         let (state, ids, signed_in) = self
             .blocking(move |db| {
-                let signed_in = has_token(&db.get_settings()?);
+                let signed_in = db.tracker_account()?.is_some();
                 let ids = db.apply_custom_list_change(&change, now)?;
                 Ok((db.get_custom_lists()?, ids, signed_in))
             })
@@ -899,8 +952,8 @@ impl TrackerSyncService {
     /// store its resulting names.
     async fn edit_custom_lists(&self, edit: ListEdit) -> Result<CustomListsState, String> {
         let _op = self.op_lock.lock().await;
-        let (settings, owner, local) = self
-            .blocking(|db| Ok((db.get_settings()?, db.list_owner()?, db.get_custom_lists()?.names)))
+        let (account, owner, local) = self
+            .blocking(|db| Ok((db.tracker_account()?, db.list_owner()?, db.get_custom_lists()?.names)))
             .await?;
         match &edit {
             ListEdit::Create(name) if local.iter().any(|n| n.trim().eq_ignore_ascii_case(name)) => {
@@ -917,21 +970,25 @@ impl TrackerSyncService {
             }
             _ => {}
         }
-        let token = settings.anilist_token.trim().to_string();
-        if token.is_empty() {
-            return Err("Sign in to AniList to edit custom lists".into());
+        let Some(account) = account.filter(|a| !a.access_token.trim().is_empty()) else {
+            return Err("Sign in to edit custom lists".into());
+        };
+        let token = account.access_token.trim().to_string();
+        let tracker = self.tracker_by_id(&account.tracker)?;
+        let viewer = tracker.auth().viewer_id(&token).await?;
+        if !owns_list(&account, owner.as_ref(), viewer) {
+            return Err(format!(
+                "The signed-in {} account doesn't own this list; sign in again",
+                tracker.descriptor().name
+            ));
         }
-        let plugin = self.plugin()?;
-        let viewer = plugin.viewer_id(&token).await?;
-        if [settings.anilist_user_id, owner].into_iter().flatten().any(|id| id != viewer) {
-            return Err("The signed-in AniList account doesn't own this list; sign in again".into());
-        }
+        let extras = tracker.extras();
         let names = match self
-            .limiter
+            .limiter(&tracker)
             .run(|| match &edit {
-                ListEdit::Create(name) => plugin.create_custom_list(&token, name),
-                ListEdit::Delete(name) => plugin.delete_custom_list(&token, name),
-                ListEdit::Rename { old, new } => plugin.rename_custom_list(&token, old, new),
+                ListEdit::Create(name) => extras.create_custom_list(&token, name),
+                ListEdit::Delete(name) => extras.delete_custom_list(&token, name),
+                ListEdit::Rename { old, new } => extras.rename_custom_list(&token, old, new),
             })
             .await
         {
@@ -963,7 +1020,7 @@ impl TrackerSyncService {
         let today = today_string();
         let (stored, push_id) = self
             .blocking(move |db| {
-                let signed_in = has_token(&db.get_settings()?);
+                let signed_in = db.tracker_account()?.is_some();
                 let mut entry = entry;
                 let push_id = if let Some(existing_id) = db.find_entry_id_by_anilist_id(media_id)? {
                     entry.id = existing_id;
@@ -1029,7 +1086,7 @@ impl TrackerSyncService {
         let deleted_ids = ids.clone();
         let queued = self
             .blocking(move |db| {
-                let signed_in = has_token(&db.get_settings()?);
+                let signed_in = db.tracker_account()?.is_some();
                 let queued = !db.delete_entries_with_tombstones(&ids)?.is_empty();
                 Ok(queued && signed_in)
             })
@@ -1114,10 +1171,10 @@ impl TrackerSyncService {
             hidden_from_status_lists: dirty_lists.as_ref().map(|m| m.hidden_from_status_lists),
         };
 
-        let result = match self.plugin() {
-            Ok(plugin) => {
-                self.limiter
-                    .run(|| plugin.save_list_entry(token, &update))
+        let result = match self.tracker().await {
+            Ok(tracker) => {
+                self.limiter(&tracker)
+                    .run(|| tracker.list().save_list_entry(token, &update))
                     .await
             }
             Err(e) => Err(e),
@@ -1192,8 +1249,8 @@ impl TrackerSyncService {
         if tombstones.is_empty() {
             return out;
         }
-        let plugin = match self.plugin() {
-            Ok(p) => p,
+        let tracker = match self.tracker().await {
+            Ok(t) => t,
             Err(e) => {
                 out.failed = tombstones.len();
                 for t in &tombstones {
@@ -1205,8 +1262,8 @@ impl TrackerSyncService {
         let total = tombstones.len();
         for (i, t) in tombstones.into_iter().enumerate() {
             let res = self
-                .limiter
-                .run(|| plugin.delete_list_entry(token, t.media_id, t.list_entry_id))
+                .limiter(&tracker)
+                .run(|| tracker.list().delete_list_entry(token, t.media_id, t.list_entry_id))
                 .await;
             match res {
                 Ok(()) => {
@@ -1236,59 +1293,65 @@ impl TrackerSyncService {
         let token = self
             .current_token()
             .await?
-            .ok_or_else(|| "Not signed in to AniList".to_string())?;
+            .ok_or_else(|| "Not signed in".to_string())?;
         let out = self.flush_pending_inner(&token).await;
         Ok((out.succeeded, out.failed))
     }
 
-    /// Retry every queued AniList deletion (tombstone). Returns `(deleted, failed)`.
+    /// Retry every queued tracker deletion (tombstone). Returns `(deleted, failed)`.
     pub async fn flush_deletions(&self) -> Result<(usize, usize), String> {
         let _op = self.op_lock.lock().await;
         let token = self
             .current_token()
             .await?
-            .ok_or_else(|| "Not signed in to AniList".to_string())?;
+            .ok_or_else(|| "Not signed in".to_string())?;
         let out = self.flush_deletions_inner(&token).await;
         Ok((out.succeeded, out.failed))
     }
 
-    /// Adopt a verified AniList account and save its token/profile. If the list has no owner yet or belongs
-    /// to this account, the local list and its queued changes are kept (the next pull sends them). A
-    /// different account wipes the previous account's list data ([`Database::reset_for_account_switch`]),
-    /// clears the playback match and emits `tracker-account-switched`. Callers run `pull("post_auth")` after.
+    /// Adopt a verified account of `tracker` and store it with its tokens. If the list has no owner yet or
+    /// belongs to this account, the local list and its queued changes are kept (the next pull sends them).
+    /// A different account (another user, or another tracker) wipes the previous account's list data
+    /// ([`Database::reset_for_account_switch`]), clears the playback match and emits
+    /// `tracker-account-switched`. Callers run `pull("post_auth")` after.
     pub async fn sign_in(
         &self,
-        token: &str,
+        tracker: &str,
+        tokens: AccessTokens,
         profile: &TrackerUserProfile,
     ) -> Result<SignInOutcome, String> {
         let _op = self.op_lock.lock().await;
-        let token = token.trim().to_string();
-        if token.is_empty() {
-            return Err("AniList sign-in requires an OAuth access token".into());
+        self.tracker_by_id(tracker)?;
+        if tokens.access_token.trim().is_empty() {
+            return Err("Sign-in requires an access token".into());
         }
-        let p = profile.clone();
+        let account = TrackerAccount {
+            tracker: tracker.to_string(),
+            user_id: profile.user_id,
+            username: profile.username.clone(),
+            avatar_url: profile.avatar_url.clone(),
+            access_token: tokens.access_token.trim().to_string(),
+            refresh_token: tokens.refresh_token,
+            expires_at: tokens.expires_at,
+        };
         let outcome = self
             .blocking(move |db| {
                 let previous = db.list_owner()?;
+                let new_owner = ListOwner::new(&account.tracker, account.user_id);
                 let mut outcome = SignInOutcome {
-                    previous_user_id: previous,
+                    previous_owner: previous.clone(),
+                    account: Some(account.info()),
                     ..Default::default()
                 };
                 match previous {
-                    Some(owner) if owner != p.user_id => {
+                    Some(owner) if owner != new_owner => {
                         outcome.account_switched = true;
-                        outcome.discarded_changes = db.reset_for_account_switch(p.user_id)?;
+                        outcome.discarded_changes = db.reset_for_account_switch(&new_owner)?;
                     }
                     Some(_) => {}
-                    None => db.set_list_owner(p.user_id)?,
+                    None => db.set_list_owner(&new_owner)?,
                 }
-                let mut settings = db.get_settings()?;
-                settings.active_tracker_plugin = TRACKER_PLUGIN_ID.into();
-                settings.anilist_username = p.username.clone();
-                settings.anilist_user_id = Some(p.user_id);
-                settings.anilist_avatar = p.avatar_url.clone();
-                settings.anilist_token = token;
-                db.save_settings(&settings)?;
+                db.set_tracker_account(&account)?;
                 Ok(outcome)
             })
             .await?;
@@ -1296,8 +1359,9 @@ impl TrackerSyncService {
         if outcome.account_switched {
             log::info!(
                 target: "sync",
-                "signed in as a different AniList account ({:?} -> {}): local list reset",
-                outcome.previous_user_id,
+                "signed in as a different account ({:?} -> {} {}): local list reset",
+                outcome.previous_owner,
+                tracker,
                 profile.user_id
             );
             if let Ok(mut last) = self.last_synced_at.lock() {
@@ -1314,7 +1378,9 @@ impl TrackerSyncService {
             self.emit(
                 EVENT_ACCOUNT_SWITCHED,
                 json!({
-                    "previous_user_id": outcome.previous_user_id,
+                    "previous_tracker": outcome.previous_owner.as_ref().map(|o| o.tracker.clone()),
+                    "previous_user_id": outcome.previous_owner.as_ref().map(|o| o.user_id),
+                    "tracker": tracker,
                     "user_id": profile.user_id,
                     "username": profile.username,
                     "discarded_changes": outcome.discarded_changes,
@@ -1324,8 +1390,34 @@ impl TrackerSyncService {
         Ok(outcome)
     }
 
-    /// Send queued deletions and changes one last time, then clear the token and profile. The list and its
-    /// owner stay, so anything that could not be sent goes out when the same account signs in again.
+    /// Fetch the signed-in account's profile again and store its name and avatar (the tokens and the list
+    /// are untouched). Fills in an account migrated without a user id. Returns the updated account.
+    pub async fn refresh_profile(&self) -> Result<Option<AccountInfo>, String> {
+        let Some(mut account) = self.current_account().await? else {
+            return Ok(None);
+        };
+        let tracker = self.tracker_by_id(&account.tracker)?;
+        let profile = self
+            .limiter(&tracker)
+            .run(|| tracker.auth().profile(&account.access_token))
+            .await
+            .map_err(|e| e.to_string())?;
+        if account.known_user_id().is_some_and(|id| id != profile.user_id) {
+            return Err(format!(
+                "The stored {} token belongs to another account; sign in again",
+                tracker.descriptor().name
+            ));
+        }
+        account.user_id = profile.user_id;
+        account.username = profile.username;
+        account.avatar_url = profile.avatar_url;
+        let info = account.info();
+        self.blocking(move |db| db.set_tracker_account(&account)).await?;
+        Ok(Some(info))
+    }
+
+    /// Send queued deletions and changes one last time, then forget the account and its tokens. The list
+    /// and its owner stay, so anything that could not be sent goes out when the same account signs in again.
     pub async fn sign_out(&self) -> Result<SignOutOutcome, String> {
         let _op = self.op_lock.lock().await;
         let (mut pushed, mut deleted) = (0, 0);
@@ -1336,37 +1428,29 @@ impl TrackerSyncService {
                 pushed = self.flush_pending_inner(&token).await.succeeded;
             }
         }
-        let (unsent, settings) = self
+        let unsent = self
             .blocking(|db| {
                 let unsent = db.count_pending()? + db.count_pending_deletions()?;
-                let mut settings = db.get_settings()?;
-                settings.anilist_username.clear();
-                settings.anilist_token.clear();
-                settings.anilist_user_id = None;
-                settings.anilist_avatar = None;
-                db.save_settings(&settings)?;
-                Ok((unsent, db.get_settings()?))
+                db.clear_tracker_account()?;
+                Ok(unsent)
             })
             .await?;
         Ok(SignOutOutcome {
             pushed,
             deleted,
             unsent,
-            settings,
         })
     }
 
-    /// Full two-way sync: flush queued deletions and pushes, fetch the AniList list and merge it
+    /// Full two-way sync: flush queued deletions and pushes, fetch the tracker's list and merge it
     /// (newest wins; remote-missing entries are deleted unless pending). Only changed rows are written and
     /// returned (delta). Local files are matched afterwards in the background, and only for new entries or
     /// entries whose titles changed (`library-changed` is emitted if anything matched).
     /// Never runs two pulls at once: a pull requested while one is running waits for it and returns an
     /// empty delta (the running pull's `tracker-list-synced` event carries the changes).
     pub async fn pull(self: &Arc<Self>, reason: &str) -> Result<SyncSummary, String> {
-        let settings = self.blocking(|db| db.get_settings()).await?;
-        let token = settings.anilist_token.trim().to_string();
-        if token.is_empty() {
-            return Err("Not signed in to AniList".into());
+        if self.current_token().await?.is_none() {
+            return Err("Not signed in".into());
         }
 
         if self
@@ -1383,20 +1467,14 @@ impl TrackerSyncService {
         let op = self.op_lock.lock().await;
         // Re-read under the lock: a sign-in may have switched the account while this pull was waiting.
         let result = match self
-            .blocking(|db| Ok((db.get_settings()?, db.list_owner()?)))
+            .blocking(|db| Ok((db.tracker_account()?, db.list_owner()?)))
             .await
         {
-            Ok((settings, owner)) if !settings.anilist_token.trim().is_empty() => {
-                self.pull_inner(
-                    settings.anilist_token.trim(),
-                    owner,
-                    settings.anilist_user_id,
-                    reason,
-                )
-                .await
+            Ok((Some(account), owner)) if !account.access_token.trim().is_empty() => {
+                self.pull_inner(&account, owner, reason).await
             }
             Ok(_) => Err(PullFailure {
-                error: TrackerError::Unauthorized("Not signed in to AniList".into()),
+                error: TrackerError::Unauthorized("Not signed in".into()),
                 auth_reported: true,
             }),
             Err(m) => Err(PullFailure {
@@ -1440,46 +1518,43 @@ impl TrackerSyncService {
     }
 
     /// Returns the delta summary plus the ids whose local files should be matched in the background.
-    /// `owner` is the account the local list belongs to and `signed_in_user` the stored account of `token`
-    /// (both set by [`sign_in`](Self::sign_in)). The token's real account is resolved first; if it differs
-    /// from either, the local list must never reach it, so the pull stops before flushing or merging.
+    /// `account` is the signed-in account and `owner` the account the local list belongs to (both set by
+    /// [`sign_in`](Self::sign_in)). The token's real account is resolved first; if it isn't both of them,
+    /// the local list must never reach it, so the pull stops before flushing or merging.
     async fn pull_inner(
         &self,
-        token: &str,
-        owner: Option<i64>,
-        signed_in_user: Option<i64>,
+        account: &TrackerAccount,
+        owner: Option<ListOwner>,
         reason: &str,
     ) -> Result<(SyncSummary, Vec<i64>), PullFailure> {
         let started = Instant::now();
-        let mismatch = |viewer: i64, owner: i64| PullFailure {
-            error: TrackerError::Api(format!(
-                "The local list belongs to AniList user {} but the signed-in account is {}; sign in again to switch accounts",
-                owner, viewer
-            )),
+        let token = account.access_token.trim();
+        let fail = |error: TrackerError| PullFailure {
+            error,
             auth_reported: false,
         };
-        let plugin = self.plugin().map_err(|error| PullFailure {
-            error,
-            auth_reported: false,
-        })?;
-        // Resolve the token's account BEFORE anything is sent with it (cached per token by the plugin).
-        let viewer = plugin.viewer_id(token).await.map_err(|error| PullFailure {
-            error,
-            auth_reported: false,
-        })?;
-        for expected in [signed_in_user, owner].into_iter().flatten() {
-            if expected != viewer {
-                return Err(mismatch(viewer, expected));
-            }
+        let tracker = self.tracker_by_id(&account.tracker).map_err(fail)?;
+        let tracker_name = tracker.descriptor().name;
+        // Resolve the token's account BEFORE anything is sent with it (cached per token by the tracker).
+        let viewer = tracker.auth().viewer_id(token).await.map_err(fail)?;
+        if !owns_list(account, owner.as_ref(), viewer) {
+            // Without an owner yet, the list is meant for the stored account
+            let expected = owner
+                .clone()
+                .or_else(|| account.known_user_id().map(|id| ListOwner::new(&account.tracker, id)));
+            return Err(fail(TrackerError::Api(format!(
+                "The local list belongs to {} but the signed-in {} account is {}; sign in again to switch accounts",
+                owner_text(expected.as_ref()),
+                tracker_name,
+                viewer
+            ))));
         }
         if owner.is_none() {
             // A list from before owner tracking (or never signed in): it now belongs to this account.
-            self.blocking(move |db| db.set_list_owner(viewer))
+            let new_owner = ListOwner::new(&account.tracker, viewer);
+            self.blocking(move |db| db.set_list_owner(&new_owner))
                 .await
-                .map_err(|m| PullFailure {
-                    error: TrackerError::Api(m),
-                    auth_reported: false,
-                })?;
+                .map_err(|m| fail(TrackerError::Api(m)))?;
         }
 
         let phase = Instant::now();
@@ -1503,18 +1578,18 @@ impl TrackerSyncService {
 
         let phase = Instant::now();
         let snapshot = self
-            .limiter
-            .run(|| plugin.fetch_user_list(token))
+            .limiter(&tracker)
+            .run(|| tracker.list().fetch_user_list(token))
             .await
-            .map_err(|error| PullFailure {
-                error,
-                auth_reported: false,
-            })?;
+            .map_err(fail)?;
         let fetch_ms = phase.elapsed().as_millis();
         let fetched = snapshot.entries.len();
 
         if snapshot.viewer_id != viewer {
-            return Err(mismatch(snapshot.viewer_id, viewer));
+            return Err(fail(TrackerError::Api(format!(
+                "{} sent the list of user {} instead of {}; nothing was merged",
+                tracker_name, snapshot.viewer_id, viewer
+            ))));
         }
 
         let remote_entries = snapshot.entries;
@@ -1541,10 +1616,7 @@ impl TrackerSyncService {
                 Ok((stats, lists_changed, db.score_format()?))
             })
             .await
-            .map_err(|m| PullFailure {
-                error: TrackerError::Api(format!("Failed to merge AniList list: {}", m)),
-                auth_reported: false,
-            })?;
+            .map_err(|m| fail(TrackerError::Api(format!("Failed to merge the {} list: {}", tracker_name, m))))?;
         let merge_ms = phase.elapsed().as_millis();
 
         // Heavy metadata (synopsis, genres, studios, …) only for entries new to the local list.
@@ -1555,8 +1627,8 @@ impl TrackerSyncService {
             let mut details: Vec<AnimeEntry> = Vec::with_capacity(stats.new_ids.len());
             for chunk in stats.new_ids.chunks(MEDIA_DETAILS_CHUNK) {
                 match self
-                    .limiter
-                    .run(|| plugin.fetch_media_details(chunk))
+                    .limiter(&tracker)
+                    .run(|| tracker.catalog().fetch_media_details(chunk))
                     .await
                 {
                     Ok(mut part) => details.append(&mut part),
@@ -1743,6 +1815,18 @@ pub fn season_cache_is_stale(past: bool, fetched_at: i64, now: i64) -> bool {
 }
 
 impl TrackerSyncService {
+    /// Search the active tracker's catalog (one request, not rate limited: the Search view sends one per
+    /// submitted query).
+    pub async fn search_anime(
+        &self,
+        query: &str,
+        season: Option<&str>,
+        year: Option<u32>,
+    ) -> Result<Vec<AnimeEntry>, String> {
+        let tracker = self.tracker().await?;
+        Ok(tracker.catalog().search_anime(query, season, year).await?)
+    }
+
     /// Every anime of a season. Serves the cached snapshot unless `force_refresh` or none exists;
     /// otherwise fetches all pages (through the shared rate limiter) and replaces the snapshot.
     /// Never touches `anime_entries`.
@@ -1782,15 +1866,15 @@ impl TrackerSyncService {
             }
         }
 
-        let plugin = self.plugin()?;
+        let tracker = self.tracker().await?;
         let phase = Instant::now();
         let mut items: Vec<SeasonalAnime> = Vec::new();
         let mut seen = HashSet::new();
         let mut page = 1;
         loop {
             let result = self
-                .limiter
-                .run(|| plugin.fetch_season_page(&season, year, page))
+                .limiter(&tracker)
+                .run(|| tracker.catalog().fetch_season_page(&season, year, page))
                 .await?;
             items.extend(
                 result
@@ -1840,8 +1924,8 @@ impl TrackerSyncService {
             Some(item) if item.metadata.relations.is_some() => return Ok(Some(item)),
             other => other,
         };
-        let fetched = match self.plugin() {
-            Ok(plugin) => self.limiter.run(|| plugin.fetch_media_metadata(anilist_id)).await,
+        let fetched = match self.tracker().await {
+            Ok(tracker) => self.limiter(&tracker).run(|| tracker.catalog().fetch_media_metadata(anilist_id)).await,
             Err(e) => Err(e),
         };
         let item = match (fetched, stored) {
@@ -1920,15 +2004,15 @@ impl TrackerSyncService {
             }
         }
 
-        let plugin = self.plugin()?;
+        let tracker = self.tracker().await?;
         let phase = Instant::now();
         let mut items: Vec<AiringScheduleItem> = Vec::new();
         let mut seen = HashSet::new();
         let mut page = 1;
         loop {
             let result = self
-                .limiter
-                .run(|| plugin.fetch_airing_schedule_page(from, to, page))
+                .limiter(&tracker)
+                .run(|| tracker.catalog().fetch_airing_schedule_page(from, to, page))
                 .await?;
             items.extend(
                 result
@@ -1979,7 +2063,7 @@ mod tests {
     use crate::db::test_entry;
     use crate::db::CustomListToggle;
     use crate::db::{HistoryQuery, HistorySource, ImportStatus};
-    use crate::plugins::{
+    use crate::trackers::{
         ActivityMedia, ActivityPage, ActivityPageQuery, BoxFuture, RemoteEntryState, RemoteListActivity,
         RemoteListMembership, RemoteListSnapshot, TrackerUserProfile,
     };
@@ -2367,7 +2451,7 @@ mod tests {
     struct MockTracker {
         viewer_id: i64,
         /// `(id, parts)` of every `fetch_anime_page` call.
-        page_calls: Mutex<Vec<(i64, crate::plugins::AnimePageParts)>>,
+        page_calls: Mutex<Vec<(i64, crate::trackers::AnimePageParts)>>,
         /// `(id, page)` of every `fetch_characters_page` call.
         character_page_calls: Mutex<Vec<(i64, u32)>>,
         remote: Mutex<Vec<AnimeEntry>>,
@@ -2402,85 +2486,35 @@ mod tests {
         batch_calls: Mutex<Vec<Vec<i64>>>,
     }
 
-    impl TrackerPlugin for MockTracker {
-        fn fetch_media_metadata_batch<'a>(
-            &'a self,
-            ids: &'a [i64],
-        ) -> BoxFuture<'a, Result<Vec<SeasonalAnime>, TrackerError>> {
-            Box::pin(async move {
-                self.batch_calls.lock().unwrap().push(ids.to_vec());
-                let known = self.saga_media.lock().unwrap();
-                Ok(ids.iter().filter_map(|id| known.get(id).cloned()).collect())
-            })
+    impl Tracker for MockTracker {
+        fn descriptor(&self) -> crate::trackers::TrackerDescriptor {
+            // Registered in AniList's place
+            crate::trackers::anilist::AniListPlugin::new().descriptor()
         }
-        fn fetch_anime_page<'a>(
-            &'a self,
-            id: i64,
-            parts: &'a crate::plugins::AnimePageParts,
-            token: Option<&'a str>,
-        ) -> BoxFuture<'a, Result<crate::plugins::AnimePageFetch, TrackerError>> {
-            Box::pin(async move {
-                self.page_calls.lock().unwrap().push((id, parts.clone()));
-                if parts.following && token.is_none() {
-                    return Err(TrackerError::Unauthorized("no token".into()));
-                }
-                Ok(crate::plugins::AnimePageFetch {
-                    media: parts.metadata.then(|| SeasonalAnime {
-                        entry: test_entry(id, "Fetched"),
-                        popularity: Some(5),
-                        metadata: crate::plugins::MediaMetadata {
-                            relations: Some(vec![]),
-                            ..Default::default()
-                        },
-                    }),
-                    details: parts.details.then(|| crate::plugins::MediaDetails {
-                        characters: vec![character(1), character(2)],
-                        characters_page: 1,
-                        characters_has_more: true,
-                        ..Default::default()
-                    }),
-                    recommendations: parts.recommendations.then(Vec::new),
-                    following: parts.following.then(|| crate::plugins::FollowingPage {
-                        entries: vec![crate::plugins::FollowingEntry {
-                            user_id: 7,
-                            user_name: "friend".into(),
-                            status: "CURRENT".into(),
-                            progress: 3,
-                            score: 85.0,
-                            ..Default::default()
-                        }],
-                        has_more: false,
-                    }),
-                })
-            })
+        fn auth(&self) -> &dyn crate::trackers::TrackerAuth {
+            self
         }
-        fn fetch_characters_page<'a>(
-            &'a self,
-            id: i64,
-            page: u32,
-        ) -> BoxFuture<'a, Result<crate::plugins::CharactersPage, TrackerError>> {
-            Box::pin(async move {
-                self.character_page_calls.lock().unwrap().push((id, page));
-                Ok(crate::plugins::CharactersPage {
-                    // One already known (AniList pages can overlap), one new
-                    characters: vec![character(2), character(3)],
-                    has_more: false,
-                })
-            })
+        fn list(&self) -> &dyn crate::trackers::ListSync {
+            self
         }
-        fn descriptor(&self) -> crate::plugins::TrackerPluginDescriptor {
-            unimplemented!()
+        fn catalog(&self) -> &dyn crate::trackers::Catalog {
+            self
         }
-        fn verify_account<'a>(
-            &'a self,
-            _username: &'a str,
-            _token: Option<&'a str>,
-        ) -> BoxFuture<'a, Result<TrackerUserProfile, String>> {
-            Box::pin(async { Err("mock".to_string()) })
+        fn extras(&self) -> &dyn crate::trackers::AccountExtras {
+            self
+        }
+    }
+
+    impl crate::trackers::TrackerAuth for MockTracker {
+        fn profile<'a>(&'a self, _token: &'a str) -> BoxFuture<'a, Result<TrackerUserProfile, TrackerError>> {
+            Box::pin(async { Err(TrackerError::Api("mock".into())) })
         }
         fn viewer_id<'a>(&'a self, _token: &'a str) -> BoxFuture<'a, Result<i64, TrackerError>> {
             Box::pin(async move { Ok(self.viewer_id) })
         }
+    }
+
+    impl crate::trackers::ListSync for MockTracker {
         fn fetch_user_list<'a>(
             &'a self,
             _token: &'a str,
@@ -2496,102 +2530,6 @@ mod tests {
                     memberships: self.memberships.lock().unwrap().clone(),
                     score_format: self.score_format.lock().unwrap().clone(),
                 })
-            })
-        }
-        fn fetch_media_details<'a>(
-            &'a self,
-            ids: &'a [i64],
-        ) -> BoxFuture<'a, Result<Vec<AnimeEntry>, TrackerError>> {
-            Box::pin(async move {
-                self.details_calls.lock().unwrap().push(ids.to_vec());
-                Ok(self
-                    .remote
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .filter(|e| ids.contains(&e.id))
-                    .map(|e| {
-                        let mut d = e.clone();
-                        d.synopsis = format!("Details {}", e.id);
-                        d.genres = vec!["Action".into()];
-                        d.anilist_list_entry_id = None;
-                        d
-                    })
-                    .collect())
-            })
-        }
-        fn search_anime<'a>(
-            &'a self,
-            _query: &'a str,
-            _season: Option<&'a str>,
-            _year: Option<u32>,
-        ) -> BoxFuture<'a, Result<Vec<AnimeEntry>, String>> {
-            Box::pin(async { Ok(vec![]) })
-        }
-        fn fetch_season_page<'a>(
-            &'a self,
-            season: &'a str,
-            year: u32,
-            page: u32,
-        ) -> BoxFuture<'a, Result<crate::plugins::SeasonPage, TrackerError>> {
-            Box::pin(async move {
-                self.season_calls
-                    .lock()
-                    .unwrap()
-                    .push((season.to_string(), year, page));
-                let all = self.season_media.lock().unwrap().clone();
-                let start = ((page - 1) * 2) as usize;
-                let items = all
-                    .iter()
-                    .skip(start)
-                    .take(2)
-                    .map(|e| SeasonalAnime {
-                        entry: e.clone(),
-                        popularity: Some(1000 - e.id as u32),
-                        metadata: crate::plugins::MediaMetadata {
-                            prequels: Some(vec![]),
-                            relations: Some(vec![]),
-                            ..Default::default()
-                        },
-                    })
-                    .collect();
-                Ok(crate::plugins::SeasonPage {
-                    items,
-                    has_next_page: start + 2 < all.len(),
-                })
-            })
-        }
-        fn fetch_airing_schedule_page<'a>(
-            &'a self,
-            from: i64,
-            to: i64,
-            page: u32,
-        ) -> BoxFuture<'a, Result<crate::plugins::AiringSchedulePage, TrackerError>> {
-            Box::pin(async move {
-                self.schedule_calls.lock().unwrap().push((from, to, page));
-                let all = self.schedule_items.lock().unwrap().clone();
-                let start = ((page - 1) * 2) as usize;
-                Ok(crate::plugins::AiringSchedulePage {
-                    items: all.iter().skip(start).take(2).cloned().collect(),
-                    has_next_page: start + 2 < all.len(),
-                })
-            })
-        }
-        fn fetch_media_metadata<'a>(
-            &'a self,
-            id: i64,
-        ) -> BoxFuture<'a, Result<Option<SeasonalAnime>, TrackerError>> {
-            Box::pin(async move {
-                self.metadata_calls.lock().unwrap().push(id);
-                Ok(Some(SeasonalAnime {
-                    entry: test_entry(id, "Fetched"),
-                    popularity: Some(5),
-                    metadata: crate::plugins::MediaMetadata {
-                        favourites: Some(7),
-                        relations: Some(vec![]),
-                        ..Default::default()
-                    },
-                }))
             })
         }
         fn save_list_entry<'a>(
@@ -2622,6 +2560,179 @@ mod tests {
                 self.deletes.lock().unwrap().push((media_id, list_entry_id));
                 Ok(())
             })
+        }
+    }
+
+    impl crate::trackers::Catalog for MockTracker {
+        fn tracker_name(&self) -> &str {
+            "Mock"
+        }
+        fn fetch_media_details<'a>(
+            &'a self,
+            ids: &'a [i64],
+        ) -> BoxFuture<'a, Result<Vec<AnimeEntry>, TrackerError>> {
+            Box::pin(async move {
+                self.details_calls.lock().unwrap().push(ids.to_vec());
+                Ok(self
+                    .remote
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|e| ids.contains(&e.id))
+                    .map(|e| {
+                        let mut d = e.clone();
+                        d.synopsis = format!("Details {}", e.id);
+                        d.genres = vec!["Action".into()];
+                        d.remote_entry_id = None;
+                        d
+                    })
+                    .collect())
+            })
+        }
+        fn search_anime<'a>(
+            &'a self,
+            _query: &'a str,
+            _season: Option<&'a str>,
+            _year: Option<u32>,
+        ) -> BoxFuture<'a, Result<Vec<AnimeEntry>, TrackerError>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+        fn fetch_season_page<'a>(
+            &'a self,
+            season: &'a str,
+            year: u32,
+            page: u32,
+        ) -> BoxFuture<'a, Result<crate::trackers::SeasonPage, TrackerError>> {
+            Box::pin(async move {
+                self.season_calls
+                    .lock()
+                    .unwrap()
+                    .push((season.to_string(), year, page));
+                let all = self.season_media.lock().unwrap().clone();
+                let start = ((page - 1) * 2) as usize;
+                let items = all
+                    .iter()
+                    .skip(start)
+                    .take(2)
+                    .map(|e| SeasonalAnime {
+                        entry: e.clone(),
+                        popularity: Some(1000 - e.id as u32),
+                        metadata: crate::trackers::MediaMetadata {
+                            prequels: Some(vec![]),
+                            relations: Some(vec![]),
+                            ..Default::default()
+                        },
+                    })
+                    .collect();
+                Ok(crate::trackers::SeasonPage {
+                    items,
+                    has_next_page: start + 2 < all.len(),
+                })
+            })
+        }
+        fn fetch_media_metadata<'a>(
+            &'a self,
+            id: i64,
+        ) -> BoxFuture<'a, Result<Option<SeasonalAnime>, TrackerError>> {
+            Box::pin(async move {
+                self.metadata_calls.lock().unwrap().push(id);
+                Ok(Some(SeasonalAnime {
+                    entry: test_entry(id, "Fetched"),
+                    popularity: Some(5),
+                    metadata: crate::trackers::MediaMetadata {
+                        favourites: Some(7),
+                        relations: Some(vec![]),
+                        ..Default::default()
+                    },
+                }))
+            })
+        }
+        fn fetch_media_metadata_batch<'a>(
+            &'a self,
+            ids: &'a [i64],
+        ) -> BoxFuture<'a, Result<Vec<SeasonalAnime>, TrackerError>> {
+            Box::pin(async move {
+                self.batch_calls.lock().unwrap().push(ids.to_vec());
+                let known = self.saga_media.lock().unwrap();
+                Ok(ids.iter().filter_map(|id| known.get(id).cloned()).collect())
+            })
+        }
+        fn fetch_airing_schedule_page<'a>(
+            &'a self,
+            from: i64,
+            to: i64,
+            page: u32,
+        ) -> BoxFuture<'a, Result<crate::trackers::AiringSchedulePage, TrackerError>> {
+            Box::pin(async move {
+                self.schedule_calls.lock().unwrap().push((from, to, page));
+                let all = self.schedule_items.lock().unwrap().clone();
+                let start = ((page - 1) * 2) as usize;
+                Ok(crate::trackers::AiringSchedulePage {
+                    items: all.iter().skip(start).take(2).cloned().collect(),
+                    has_next_page: start + 2 < all.len(),
+                })
+            })
+        }
+        fn fetch_anime_page<'a>(
+            &'a self,
+            id: i64,
+            parts: &'a crate::trackers::AnimePageParts,
+            token: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<crate::trackers::AnimePageFetch, TrackerError>> {
+            Box::pin(async move {
+                self.page_calls.lock().unwrap().push((id, parts.clone()));
+                if parts.following && token.is_none() {
+                    return Err(TrackerError::Unauthorized("no token".into()));
+                }
+                Ok(crate::trackers::AnimePageFetch {
+                    media: parts.metadata.then(|| SeasonalAnime {
+                        entry: test_entry(id, "Fetched"),
+                        popularity: Some(5),
+                        metadata: crate::trackers::MediaMetadata {
+                            relations: Some(vec![]),
+                            ..Default::default()
+                        },
+                    }),
+                    details: parts.details.then(|| crate::trackers::MediaDetails {
+                        characters: vec![character(1), character(2)],
+                        characters_page: 1,
+                        characters_has_more: true,
+                        ..Default::default()
+                    }),
+                    recommendations: parts.recommendations.then(Vec::new),
+                    following: parts.following.then(|| crate::trackers::FollowingPage {
+                        entries: vec![crate::trackers::FollowingEntry {
+                            user_id: 7,
+                            user_name: "friend".into(),
+                            status: "CURRENT".into(),
+                            progress: 3,
+                            score: 85.0,
+                            ..Default::default()
+                        }],
+                        has_more: false,
+                    }),
+                })
+            })
+        }
+        fn fetch_characters_page<'a>(
+            &'a self,
+            id: i64,
+            page: u32,
+        ) -> BoxFuture<'a, Result<crate::trackers::CharactersPage, TrackerError>> {
+            Box::pin(async move {
+                self.character_page_calls.lock().unwrap().push((id, page));
+                Ok(crate::trackers::CharactersPage {
+                    // One already known (AniList pages can overlap), one new
+                    characters: vec![character(2), character(3)],
+                    has_more: false,
+                })
+            })
+        }
+    }
+
+    impl crate::trackers::AccountExtras for MockTracker {
+        fn tracker_name(&self) -> &str {
+            "Mock"
         }
         fn create_custom_list<'a>(
             &'a self,
@@ -2699,22 +2810,63 @@ mod tests {
     type Events = Arc<Mutex<Vec<(String, Value)>>>;
 
     fn service(db: Arc<Database>, mock: Arc<MockTracker>) -> (Arc<TrackerSyncService>, Events) {
-        let mut plugins = PluginManager::new();
-        plugins.register("anilist", mock);
+        let mut trackers = TrackerRegistry::new();
+        trackers.register(mock);
         let events: Events = Arc::new(Mutex::new(Vec::new()));
         let sink = events.clone();
         let emit: SyncEmitter = Arc::new(move |name: &str, payload: Value| {
             sink.lock().unwrap().push((name.to_string(), payload));
         });
-        let svc = TrackerSyncService::new(db, Arc::new(plugins), emit, Arc::new(Mutex::new(None)))
+        let svc = TrackerSyncService::new(db, Arc::new(trackers), emit, Arc::new(Mutex::new(None)))
             .with_min_request_interval(Duration::from_millis(0))
             .with_history_pacing(Duration::ZERO, 0)
             .with_custom_list_push_delay(Duration::ZERO);
         (Arc::new(svc), events)
     }
 
-    fn character(id: i64) -> crate::plugins::CharacterRole {
-        crate::plugins::CharacterRole {
+    /// The mock under another tracker id, with the default request spacing.
+    struct OtherTracker(Arc<MockTracker>);
+
+    impl Tracker for OtherTracker {
+        fn descriptor(&self) -> crate::trackers::TrackerDescriptor {
+            crate::trackers::TrackerDescriptor {
+                id: "other".into(),
+                name: "Other".into(),
+                ..self.0.descriptor()
+            }
+        }
+        fn auth(&self) -> &dyn crate::trackers::TrackerAuth {
+            &*self.0
+        }
+        fn list(&self) -> &dyn crate::trackers::ListSync {
+            &*self.0
+        }
+        fn catalog(&self) -> &dyn crate::trackers::Catalog {
+            &*self.0
+        }
+        fn extras(&self) -> &dyn crate::trackers::AccountExtras {
+            &*self.0
+        }
+    }
+
+    #[test]
+    fn each_tracker_gets_its_own_rate_limiter() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let anilist: Arc<dyn Tracker> = Arc::new(crate::trackers::anilist::AniListPlugin::new());
+        let other: Arc<dyn Tracker> = Arc::new(OtherTracker(Arc::new(MockTracker::default())));
+        let emit: SyncEmitter = Arc::new(|_: &str, _: Value| {});
+        let svc = TrackerSyncService::new(db, Arc::new(TrackerRegistry::new()), emit, Arc::new(Mutex::new(None)));
+
+        let a = svc.limiter(&anilist);
+        assert!(Arc::ptr_eq(&a, &svc.limiter(&anilist)), "one tracker always gets the same limiter");
+        let b = svc.limiter(&other);
+        assert!(!Arc::ptr_eq(&a, &b), "another tracker never waits on AniList's");
+        assert_eq!(a.min_interval, Duration::from_millis(700));
+        assert_eq!(b.min_interval, crate::trackers::DEFAULT_MIN_REQUEST_INTERVAL);
+    }
+
+    fn character(id: i64) -> crate::trackers::CharacterRole {
+        crate::trackers::CharacterRole {
             id,
             name: format!("Character {id}"),
             role: "MAIN".into(),
@@ -2722,11 +2874,20 @@ mod tests {
         }
     }
 
+    fn account(user_id: i64, token: &str) -> TrackerAccount {
+        TrackerAccount {
+            tracker: "anilist".into(),
+            user_id,
+            username: String::new(),
+            avatar_url: None,
+            access_token: token.into(),
+            refresh_token: None,
+            expires_at: None,
+        }
+    }
+
     fn sign_in(db: &Database, user_id: i64) {
-        let mut s = db.get_settings().unwrap();
-        s.anilist_token = "token".into();
-        s.anilist_user_id = Some(user_id);
-        db.save_settings(&s).unwrap();
+        db.set_tracker_account(&account(user_id, "token")).unwrap();
     }
 
     fn names(events: &Events) -> Vec<String> {
@@ -2899,7 +3060,7 @@ mod tests {
         pending.sync_pending = true;
         let gone = test_entry(2, "Gone Remotely");
         let mut to_delete = test_entry(3, "Deleted Locally");
-        to_delete.anilist_list_entry_id = Some(333);
+        to_delete.remote_entry_id = Some(333);
         db.upsert_anime_entries_batch(&[pending, gone, to_delete]).unwrap();
         db.delete_entries_with_tombstones(&[3]).unwrap();
 
@@ -2934,7 +3095,7 @@ mod tests {
         let e1 = db.get_anime_entry_by_id(1).unwrap();
         assert!(!e1.sync_pending);
         assert_eq!(e1.user_progress, 3);
-        assert_eq!(e1.anilist_list_entry_id, Some(5001));
+        assert_eq!(e1.remote_entry_id, Some(5001));
         assert!(db.get_anime_entry_by_id(2).is_err());
         // Delta: entry 1 kept local and had nothing to write; 3 and 4 were inserted; 2 removed
         let mut changed: Vec<i64> = summary.changed.iter().map(|e| e.id).collect();
@@ -3119,7 +3280,7 @@ mod tests {
         assert_eq!(db.score_format().unwrap(), "POINT_10_DECIMAL");
         assert!(!db.set_score_format("POINT_10_DECIMAL").unwrap());
 
-        db.reset_for_account_switch(7).unwrap();
+        db.reset_for_account_switch(&crate::db::ListOwner::new("anilist", 7)).unwrap();
         assert_eq!(db.score_format().unwrap(), "POINT_100");
     }
 
@@ -3348,10 +3509,7 @@ mod tests {
             ..Default::default()
         });
         let (svc, _events) = service(db.clone(), mock.clone());
-        assert_eq!(
-            svc.pull("manual").await.unwrap_err(),
-            "Not signed in to AniList"
-        );
+        assert_eq!(svc.pull("manual").await.unwrap_err(), "Not signed in");
 
         // Token belongs to viewer 7 but the stored account is 42: nothing is flushed or merged
         sign_in(&db, 42);
@@ -3359,15 +3517,15 @@ mod tests {
         local.sync_pending = true;
         db.upsert_anime_entry(&local).unwrap();
         *mock.remote.lock().unwrap() = vec![test_entry(9, "Other")];
-        assert!(svc.pull("manual").await.unwrap_err().contains("belongs to AniList user"));
+        assert!(svc.pull("manual").await.unwrap_err().contains("belongs to anilist user 42"));
         assert!(db.get_anime_entry_by_id(2).unwrap().sync_pending);
         assert!(db.get_anime_entry_by_id(9).is_err());
         assert!(mock.saves.lock().unwrap().is_empty());
 
         // Same for a list owned by another account than the signed-in one
         sign_in(&db, 7);
-        db.set_list_owner(42).unwrap();
-        assert!(svc.pull("manual").await.unwrap_err().contains("belongs to AniList user 42"));
+        db.set_list_owner(&crate::db::ListOwner::new("anilist", 42)).unwrap();
+        assert!(svc.pull("manual").await.unwrap_err().contains("belongs to anilist user 42"));
         assert!(mock.saves.lock().unwrap().is_empty());
     }
 
@@ -3478,7 +3636,6 @@ mod tests {
             avatar_url: None,
             anime_count: 0,
             episodes_watched: 0,
-            authenticated: true,
         }
     }
 
@@ -3490,8 +3647,8 @@ mod tests {
             ..Default::default()
         });
         let (svc, _events) = service(db.clone(), mock.clone());
-        svc.sign_in("token", &profile(42, "alice")).await.unwrap();
-        assert_eq!(db.list_owner().unwrap(), Some(42));
+        svc.sign_in("anilist", AccessTokens::access_only("token"), &profile(42, "alice")).await.unwrap();
+        assert_eq!(db.list_owner().unwrap(), Some(crate::db::ListOwner::new("anilist", 42)));
         let mut e = test_entry(1, "Alpha");
         e.episodes = Some(12);
         db.upsert_anime_entry(&e).unwrap();
@@ -3499,8 +3656,8 @@ mod tests {
 
         let out = svc.sign_out().await.unwrap();
         assert_eq!(out.unsent, 0);
-        assert!(out.settings.anilist_token.is_empty());
-        assert_eq!(db.list_owner().unwrap(), Some(42));
+        assert!(db.tracker_account().unwrap().is_none());
+        assert_eq!(db.list_owner().unwrap(), Some(crate::db::ListOwner::new("anilist", 42)));
 
         // Signed out: written locally and queued, nothing sent
         let updated = svc.apply_local_update(step_for(1, 3)).await.unwrap();
@@ -3512,7 +3669,7 @@ mod tests {
         assert!(mock.deletes.lock().unwrap().is_empty());
 
         // Same account signs back in: the list is kept and the next pull sends the queue
-        let outcome = svc.sign_in("token", &profile(42, "alice")).await.unwrap();
+        let outcome = svc.sign_in("anilist", AccessTokens::access_only("token"), &profile(42, "alice")).await.unwrap();
         assert!(!outcome.account_switched);
         *mock.remote.lock().unwrap() = vec![e.clone()];
         let summary = svc.pull("post_auth").await.unwrap();
@@ -3530,7 +3687,7 @@ mod tests {
             ..Default::default()
         });
         let (svc, _events) = service(db.clone(), mock.clone());
-        svc.sign_in("token", &profile(42, "alice")).await.unwrap();
+        svc.sign_in("anilist", AccessTokens::access_only("token"), &profile(42, "alice")).await.unwrap();
         let mut e = test_entry(1, "Alpha");
         e.sync_pending = true;
         db.upsert_anime_entry(&e).unwrap();
@@ -3538,9 +3695,9 @@ mod tests {
         *mock.save_error.lock().unwrap() = Some(TrackerError::Network("offline".into()));
         let out = svc.sign_out().await.unwrap();
         assert_eq!((out.pushed, out.unsent), (0, 1));
-        assert!(db.get_settings().unwrap().anilist_token.is_empty());
+        assert!(db.tracker_account().unwrap().is_none());
 
-        svc.sign_in("token", &profile(42, "alice")).await.unwrap();
+        svc.sign_in("anilist", AccessTokens::access_only("token"), &profile(42, "alice")).await.unwrap();
         *mock.save_error.lock().unwrap() = None;
         let out = svc.sign_out().await.unwrap();
         assert_eq!((out.pushed, out.unsent), (1, 0));
@@ -3554,7 +3711,7 @@ mod tests {
             ..Default::default()
         });
         let (svc, events) = service(db.clone(), mock.clone());
-        svc.sign_in("token-a", &profile(42, "alice")).await.unwrap();
+        svc.sign_in("anilist", AccessTokens::access_only("token-a"), &profile(42, "alice")).await.unwrap();
 
         let mut a = test_entry(1, "Alpha");
         a.sync_pending = true;
@@ -3569,13 +3726,13 @@ mod tests {
         crate::torrents::config::set_anime_fansubs(&db, 1, vec!["Judas".into()]).unwrap();
         let generation = db.matcher_generation();
 
-        let outcome = svc.sign_in("token-b", &profile(7, "bob")).await.unwrap();
+        let outcome = svc.sign_in("anilist", AccessTokens::access_only("token-b"), &profile(7, "bob")).await.unwrap();
         assert!(outcome.account_switched);
-        assert_eq!(outcome.previous_user_id, Some(42));
+        assert_eq!(outcome.previous_owner, Some(crate::db::ListOwner::new("anilist", 42)));
         assert_eq!(outcome.discarded_changes, 2);
-        assert_eq!(db.list_owner().unwrap(), Some(7));
-        let settings = db.get_settings().unwrap();
-        assert_eq!((settings.anilist_user_id, settings.anilist_token.as_str()), (Some(7), "token-b"));
+        assert_eq!(db.list_owner().unwrap(), Some(crate::db::ListOwner::new("anilist", 7)));
+        let stored = db.tracker_account().unwrap().unwrap();
+        assert_eq!((stored.user_id, stored.access_token.as_str(), stored.username.as_str()), (7, "token-b", "bob"));
 
         // Account data is gone…
         assert!(db.list_anime_entries().unwrap().is_empty());
@@ -3772,11 +3929,11 @@ mod tests {
         SeasonalAnime {
             entry,
             popularity: Some(1),
-            metadata: crate::plugins::MediaMetadata {
+            metadata: crate::trackers::MediaMetadata {
                 relations: Some(
                     relations
                         .iter()
-                        .map(|(to, kind)| crate::plugins::MediaRelation {
+                        .map(|(to, kind)| crate::trackers::MediaRelation {
                             id: *to,
                             relation_type: kind.to_string(),
                             media_type: "ANIME".into(),
@@ -3869,7 +4026,7 @@ mod tests {
         let old = SeasonalAnime {
             entry: test_entry(9, "Stored"),
             popularity: None,
-            metadata: crate::plugins::MediaMetadata::default(),
+            metadata: crate::trackers::MediaMetadata::default(),
         };
         db.put_media_metadata(1, &old).unwrap();
 
@@ -3916,7 +4073,7 @@ mod tests {
     async fn history_import_pauses_on_errors_and_resumes_from_its_cursor() {
         let db = Arc::new(Database::open_in_memory().unwrap());
         sign_in(&db, 42);
-        db.set_list_owner(42).unwrap();
+        db.set_list_owner(&crate::db::ListOwner::new("anilist", 42)).unwrap();
         let mock = Arc::new(MockTracker {
             viewer_id: 42,
             ..Default::default()
@@ -3973,7 +4130,7 @@ mod tests {
     async fn history_import_refuses_another_account_and_user_pauses_stay() {
         let db = Arc::new(Database::open_in_memory().unwrap());
         sign_in(&db, 42);
-        db.set_list_owner(7).unwrap();
+        db.set_list_owner(&crate::db::ListOwner::new("anilist", 7)).unwrap();
         let mock = Arc::new(MockTracker {
             viewer_id: 42,
             ..Default::default()
@@ -3985,14 +4142,14 @@ mod tests {
         wait_for_import(&svc).await;
         let state = db.anilist_history_state().unwrap();
         assert_eq!(state.status, ImportStatus::Paused);
-        assert!(state.last_error.unwrap().contains("belongs to AniList user 7"));
+        assert!(state.last_error.unwrap().contains("belongs to anilist user 7"));
         assert!(mock.activity_calls.lock().unwrap().is_empty());
 
         // Paused by the user (no error): startup leaves it alone
         let mut state = db.anilist_history_state().unwrap();
         state.last_error = None;
         db.set_anilist_history_state(&state).unwrap();
-        db.set_list_owner(42).unwrap();
+        db.set_list_owner(&crate::db::ListOwner::new("anilist", 42)).unwrap();
         svc.resume_history_import_if_interrupted().await;
         wait_for_import(&svc).await;
         assert!(mock.activity_calls.lock().unwrap().is_empty());
@@ -4002,7 +4159,7 @@ mod tests {
     async fn history_refresh_rereads_the_overlap_and_grows_merged_ranges() {
         let db = Arc::new(Database::open_in_memory().unwrap());
         sign_in(&db, 42);
-        db.set_list_owner(42).unwrap();
+        db.set_list_owner(&crate::db::ListOwner::new("anilist", 42)).unwrap();
         let mock = Arc::new(MockTracker {
             viewer_id: 42,
             ..Default::default()

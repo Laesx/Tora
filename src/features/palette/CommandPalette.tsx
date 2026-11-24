@@ -27,6 +27,7 @@ import { AnimeAction, buildAnimeActions } from "./animeActions";
 import { useAnimeActions } from "@/contexts/animeActions";
 import { useToast } from "@/contexts/toast";
 import { useCustomLists } from "@/contexts/customLists";
+import { useTracker } from "@/contexts/tracker";
 import { AiringDot } from "@/components/AiringDot";
 import { altTitles, useAnimeTitle, useTitleLanguage } from "@/contexts/titles";
 
@@ -125,9 +126,10 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
   const animeActions = useAnimeActions();
   const showToast = useToast();
   const customLists = useCustomLists();
+  const tracker = useTracker();
   // Actions for one anime, shown with Right arrow (or right-click) on an anime row
   const getAnimeActions = (anime: AnimeEntry) =>
-    buildAnimeActions(anime, { ...animeActions, showToast, customLists });
+    buildAnimeActions(anime, { ...animeActions, showToast, customLists, tracker });
   const inputRef = useRef<HTMLInputElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const [tab, setTab] = useState<PaletteTab>("anime");
@@ -241,7 +243,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
 
   const items = useMemo(() => sections.flatMap((s) => s.items), [sections]);
 
-  // New results: highlight the first one (the AniList row only when nothing in the list matches)
+  // New results: highlight the first one (the tracker search row only when nothing in the list matches)
   useLayoutEffect(() => {
     setActiveIndex(tab === "anime" && trimmed && animeHits.length > 0 ? 1 : 0);
   }, [tab, trimmed, open]);
@@ -722,12 +724,13 @@ function PaletteRow({
 }) {
   const titleOf = useAnimeTitle();
   const titleLanguage = useTitleLanguage();
+  const tracker = useTracker();
   if (item.kind === "anilist") {
     return (
       <div className="flex items-center gap-3.5 min-w-0">
         <Globe className="w-5 h-5 text-accent shrink-0" />
         <span className="truncate text-sm text-text-primary">
-          Search AniList for <span className="font-semibold">"{rawQuery}"</span>
+          Search {tracker.name} for <span className="font-semibold">"{rawQuery}"</span>
         </span>
       </div>
     );

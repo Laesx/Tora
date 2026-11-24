@@ -16,6 +16,7 @@ import {
 import type { AnimeEntry, SagaEdge, SagaLinkKind } from "@/lib/types";
 import { formatEnum } from "@/lib/anime";
 import { useAnimeTitle } from "@/contexts/titles";
+import { useTracker } from "@/contexts/tracker";
 import { usePrefs } from "@/hooks/usePrefs";
 import { MediaCard } from "@/components/MediaCard";
 import { SourceLinks, relationLabel } from "@/features/detail/RelationsPanel";
@@ -121,6 +122,7 @@ export const SagaView: React.FC<{
 }> = ({ root, listById, backLabel, onBack, onClose }) => {
   const rootId = root.anilist_id ?? root.id;
   const titleOf = useAnimeTitle();
+  const tracker = useTracker();
   const { graph, loading, error, refresh, expand, loadMore } = useSagaData(rootId);
   const [prefs, setPrefs] = usePrefs<SagaPrefs>("tora.saga.prefs", DEFAULT_PREFS);
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
@@ -357,7 +359,7 @@ export const SagaView: React.FC<{
                 </button>
               ))}
             </div>
-            <ToolButton title="Refresh from AniList" onClick={refresh} disabled={loading}>
+            <ToolButton title={`Refresh from ${tracker.name}`} onClick={refresh} disabled={loading}>
               <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
             </ToolButton>
             <ToolButton title="Close (Esc)" onClick={onClose}>
@@ -564,7 +566,7 @@ export const SagaView: React.FC<{
             <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
             {graph.error || error ? (
               <>
-                AniList couldn't be reached: showing what's stored.
+                {tracker.name} couldn't be reached: showing what's stored.
                 <button onClick={refresh} className="font-semibold text-accent hover:underline">
                   Retry
                 </button>

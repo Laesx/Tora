@@ -10,7 +10,7 @@
 
 use super::details::details_max_age;
 use super::TrackerSyncService;
-use crate::plugins::{MediaRelation, SeasonalAnime, MEDIA_DETAILS_CHUNK};
+use crate::trackers::{MediaRelation, SeasonalAnime, MEDIA_DETAILS_CHUNK};
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap, HashMap, HashSet, VecDeque};
@@ -590,8 +590,8 @@ impl TrackerSyncService {
                     break;
                 }
                 requests += 1;
-                let result = match self.plugin() {
-                    Ok(plugin) => self.limiter.run(|| plugin.fetch_media_metadata_batch(chunk)).await,
+                let result = match self.tracker().await {
+                    Ok(tracker) => self.limiter(&tracker).run(|| tracker.catalog().fetch_media_metadata_batch(chunk)).await,
                     Err(e) => Err(e),
                 };
                 match result {
@@ -679,7 +679,7 @@ impl TrackerSyncService {
 mod tests {
     use super::*;
     use crate::db::test_entry;
-    use crate::plugins::MediaMetadata;
+    use crate::trackers::MediaMetadata;
 
     pub(crate) fn rel(id: i64, kind: &str, media_type: &str, year: Option<u32>) -> MediaRelation {
         MediaRelation {

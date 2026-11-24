@@ -4,15 +4,16 @@ import { AnimeEntry, StudioRef } from "@/lib/types";
 import { formatCountdown } from "@/lib/format";
 import { getOptimizedCoverUrl } from "@/lib/covers";
 import { altTitles, useAnimeTitle, useTitleLanguage } from "@/contexts/titles";
-import { anilistAnimeUrl, anilistStudioUrl, formatEnum, formatMinutes, openExternal } from "@/lib/anime";
+import { formatEnum, formatMinutes, openExternal } from "@/lib/anime";
 import { seasonName } from "@/lib/seasons";
 import { AiringDot } from "@/components/AiringDot";
 import { useToast } from "@/contexts/toast";
+import { useTracker } from "@/contexts/tracker";
 
-/** Banner, cover and titles (both open AniList), badges and the meta line. */
+/** Banner, cover and titles (both open the anime on the tracker), badges and the meta line. */
 export const DetailHero: React.FC<{
   anime: AnimeEntry;
-  /** Animation studios with AniList ids; null while the stored metadata loads */
+  /** Animation studios with the tracker's ids; null while the stored metadata loads */
   studioRefs: StudioRef[] | null;
   onOpenSeason: (season: string, year: number) => void;
   /** Opens the full anime page (closes the drawer) */
@@ -20,13 +21,14 @@ export const DetailHero: React.FC<{
   onClose: () => void;
 }> = ({ anime, studioRefs, onOpenSeason, onOpenFullPage, onClose }) => {
   const showToast = useToast();
+  const tracker = useTracker();
   const titleOf = useAnimeTitle();
   const titleLanguage = useTitleLanguage();
-  const handleOpenAniList = () => openExternal(anilistAnimeUrl(anime), showToast);
+  const handleOpenOnTracker = () => openExternal(tracker.animeUrl(anime), showToast);
   const countdown = formatCountdown(anime.next_airing_at);
   const alternatives = altTitles(anime, titleLanguage);
 
-  // Meta line: season (→ Seasons tab) · episodes · length · studios (→ AniList)
+  // Meta line: season (→ Seasons tab) · episodes · length · studios (→ the tracker)
   const metaItems: React.ReactNode[] = [];
   if (anime.season && anime.season_year) {
     const season = anime.season;
@@ -57,8 +59,8 @@ export const DetailHero: React.FC<{
           <button
             key={s.id}
             type="button"
-            onClick={() => openExternal(anilistStudioUrl(s.id), showToast)}
-            title="Open studio on AniList"
+            onClick={() => openExternal(tracker.link("studio", s.id), showToast)}
+            title={`Open studio on ${tracker.name}`}
             className="font-semibold text-accent hover:underline"
           >
             {s.name}
@@ -114,8 +116,8 @@ export const DetailHero: React.FC<{
       <div className="absolute bottom-3 left-6 right-6 flex items-end gap-5">
         <button
           type="button"
-          onClick={handleOpenAniList}
-          title="Open on AniList"
+          onClick={handleOpenOnTracker}
+          title={`Open on ${tracker.name}`}
           className="group relative w-24 h-36 shrink-0 rounded-xl overflow-hidden shadow-xl border-2 border-border-subtle bg-bg-tertiary"
         >
           <img
@@ -126,7 +128,7 @@ export const DetailHero: React.FC<{
           />
           <span className="absolute inset-0 bg-black/55 opacity-0 group-hover:opacity-100 transition flex items-center justify-center gap-1 text-white text-[11px] font-semibold">
             <ExternalLink className="w-3.5 h-3.5" />
-            AniList
+            {tracker.name}
           </span>
           <AiringDot anime={anime} onCover className="absolute top-1.5 left-1.5" />
         </button>
@@ -153,8 +155,8 @@ export const DetailHero: React.FC<{
           <h2 className="text-xl font-bold text-text-primary truncate">
             <button
               type="button"
-              onClick={handleOpenAniList}
-              title="Open on AniList"
+              onClick={handleOpenOnTracker}
+              title={`Open on ${tracker.name}`}
               className="max-w-full truncate text-left hover:text-accent hover:underline transition"
             >
               {titleOf(anime)}

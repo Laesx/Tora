@@ -3,16 +3,18 @@ import { FolderOpen, Save, Tag, Trash2 } from "lucide-react";
 import { AnimeEntry } from "@/lib/types";
 import { toraApi } from "@/lib/api";
 import { useToast } from "@/contexts/toast";
+import { useTracker } from "@/contexts/tracker";
 import { useAnimeTitle } from "@/contexts/titles";
 import { EntryEditor } from "./useEntryEditor";
 
-/** Notes, custom folder and the user's own recognition aliases (AniList synonyms are not shown). */
+/** Notes, custom folder and the user's own recognition aliases (the tracker's synonyms are not shown). */
 export const EntrySettings: React.FC<{
   anime: AnimeEntry;
   editor: EntryEditor;
   onDeleted: (animeId: number) => void;
 }> = ({ anime, editor, onDeleted }) => {
   const showToast = useToast();
+  const tracker = useTracker();
   const titleOf = useAnimeTitle();
   const {
     status,
@@ -95,7 +97,7 @@ export const EntrySettings: React.FC<{
       </div>
 
       <div>
-        <label className="block text-[11px] text-text-muted mb-1">Personal Notes (synced with AniList)</label>
+        <label className="block text-[11px] text-text-muted mb-1">Personal Notes (synced with {tracker.name})</label>
         <textarea
           rows={2}
           value={notes}

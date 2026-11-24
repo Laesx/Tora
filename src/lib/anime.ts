@@ -7,17 +7,10 @@ import type { ShowToast } from "@/contexts/toast";
 import { dateLocale } from "./dates";
 import { loadReleasePreferences, pickEpisodeFile, pinnedRelease } from "./releases";
 
-const ANILIST = "https://anilist.co";
+// Tracker page links: `useTracker().link` / `.animeUrl` (src/contexts/tracker.ts), never a hard-coded site
 
-export const anilistAnimeUrl = (anime: AnimeEntry) =>
-  anime.site_url || `${ANILIST}/anime/${anime.anilist_id ?? anime.id}`;
-export const anilistStudioUrl = (id: number) => `${ANILIST}/studio/${id}`;
-export const anilistGenreUrl = (genre: string) =>
-  `${ANILIST}/search/anime/${encodeURIComponent(genre)}`;
-export const anilistTagUrl = (tag: string) =>
-  `${ANILIST}/search/anime?genres=${encodeURIComponent(tag)}`;
-
-export async function openExternal(url: string, showToast: ShowToast) {
+export async function openExternal(url: string | null, showToast: ShowToast) {
+  if (!url) return;
   try {
     await toraApi.openExternalUrl(url);
   } catch (e) {

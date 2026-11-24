@@ -1,15 +1,17 @@
 import React, { useState } from "react";
 import { ChevronUp, ExternalLink, Clapperboard } from "lucide-react";
 import { AnimeEntry, MediaDetails } from "@/lib/types";
-import { anilistAnimeUrl, openExternal } from "@/lib/anime";
+import { openExternal } from "@/lib/anime";
 import { useToast } from "@/contexts/toast";
+import { useTracker } from "@/contexts/tracker";
 import { PageSection } from "./PageSection";
 
 const PREVIEW_COUNT = 9;
 
-/** Staff and their roles: a few, "Show all" for the stored ones, AniList for the rest. */
+/** Staff and their roles: a few, "Show all" for the stored ones, the tracker's page for the rest. */
 export const StaffSection: React.FC<{ anime: AnimeEntry; details: MediaDetails }> = ({ anime, details }) => {
   const showToast = useToast();
+  const tracker = useTracker();
   const [expanded, setExpanded] = useState(false);
   const staff = details.staff;
   if (staff.length === 0) return null;
@@ -30,7 +32,7 @@ export const StaffSection: React.FC<{ anime: AnimeEntry; details: MediaDetails }
           <button
             key={`${s.id}-${i}`}
             type="button"
-            onClick={() => openExternal(`https://anilist.co/staff/${s.id}`, showToast)}
+            onClick={() => openExternal(tracker.link("staff", s.id), showToast)}
             title={s.name_native ? `${s.name} (${s.name_native})` : s.name}
             className="flex items-center gap-2 p-1.5 h-14 rounded-xl border border-border-subtle bg-bg-primary/60 hover:border-accent/60 text-left transition overflow-hidden group"
           >
@@ -46,13 +48,13 @@ export const StaffSection: React.FC<{ anime: AnimeEntry; details: MediaDetails }
       </div>
       {(staff.length > PREVIEW_COUNT || details.staff_has_more) && (
         <div className="flex items-center justify-end gap-4">
-          {expanded && details.staff_has_more && (
+          {expanded && details.staff_has_more && tracker.link("anime_staff", anime.anilist_id ?? anime.id) && (
             <button
-              onClick={() => openExternal(`${anilistAnimeUrl(anime)}/staff`, showToast)}
+              onClick={() => openExternal(tracker.link("anime_staff", anime.anilist_id ?? anime.id), showToast)}
               className="flex items-center gap-1 text-[11px] font-semibold text-text-secondary hover:text-accent"
             >
               <ExternalLink className="w-3 h-3" />
-              More on AniList
+              More on {tracker.name}
             </button>
           )}
           {staff.length > PREVIEW_COUNT && (

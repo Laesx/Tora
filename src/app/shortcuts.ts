@@ -72,7 +72,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { keys: ["↑", "↓"], label: "Row above / below (↓ with nothing selected: the first anime)" },
       { keys: ["Enter"], label: "Open the selected anime (anime page or quick edit, see Settings → Appearance)" },
       { keys: ["Space"], label: "Open the other view of the selected anime; Space again closes quick edit" },
-      { keys: ["Enter"], label: "In the filter box: search AniList for the text" },
+      { keys: ["Enter"], label: "In the filter box: search the tracker for the text" },
       { keys: ["Esc"], label: "Deselect" },
       { keys: ["Ctrl+A"], label: "Select every anime in the view" },
       { keys: ["Ctrl+Click"], label: "Add to / remove from the selection" },

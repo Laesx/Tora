@@ -4,6 +4,7 @@ import { AnimeEntry } from "@/lib/types";
 import { toraApi } from "@/lib/api";
 import { AnimePosterCard } from "@/components/AnimePosterCard";
 import { useToast } from "@/contexts/toast";
+import { useTracker } from "@/contexts/tracker";
 import { useAnimeActions } from "@/contexts/animeActions";
 import { useNavCapture } from "@/app/navigation";
 
@@ -25,6 +26,7 @@ interface SearchViewProps {
 export const SearchView: React.FC<SearchViewProps> = ({ animeList, request }) => {
   const { addAnime, openAnime } = useAnimeActions();
   const showToast = useToast();
+  const tracker = useTracker();
   const [query, setQuery] = useState(request?.query ?? "");
   const [searched, setSearched] = useState(request?.cache?.searched ?? "");
   const [loading, setLoading] = useState(false);
@@ -91,7 +93,7 @@ export const SearchView: React.FC<SearchViewProps> = ({ animeList, request }) =>
               autoFocus
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search AniList..."
+              placeholder={`Search ${tracker.name}...`}
               className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-bg-primary border border-border-subtle text-xs text-text-primary focus:outline-none focus:border-accent"
             />
           </div>

@@ -1,12 +1,13 @@
 import React, { useState } from "react";
 import { Clock, CornerLeftUp, Eye, EyeOff, Play, Plus, Star } from "lucide-react";
 import { AnimeEntry, SeasonalAnime } from "@/lib/types";
-import { anilistStudioUrl, formatEnum, formatFuzzyDate, openExternal } from "@/lib/anime";
+import { formatEnum, formatFuzzyDate, openExternal } from "@/lib/anime";
 import { getOptimizedCoverUrl } from "@/lib/covers";
 import { formatCountdown } from "@/lib/format";
 import { STATUS_INFO } from "@/lib/status";
 import { secondaryTitles, useAnimeTitle, useTitleLanguage } from "@/contexts/titles";
 import { useToast } from "@/contexts/toast";
+import { useTracker } from "@/contexts/tracker";
 import { useAnimeActions } from "@/contexts/animeActions";
 import { AiringDot } from "@/components/AiringDot";
 import { relevantTags, TagFilterState } from "./tagFilters";
@@ -59,6 +60,7 @@ export const SeasonExtendedCard: React.FC<SeasonExtendedCardProps> = ({
   onSetNotInterested,
 }) => {
   const showToast = useToast();
+  const tracker = useTracker();
   const { openAnime, resolveAnime } = useAnimeActions();
   const titleOf = useAnimeTitle();
   const titleLanguage = useTitleLanguage();
@@ -169,10 +171,10 @@ export const SeasonExtendedCard: React.FC<SeasonExtendedCardProps> = ({
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
-                        void openExternal(anilistStudioUrl(s.id), showToast);
+                        void openExternal(tracker.link("studio", s.id), showToast);
                       }}
                       onDoubleClick={(e) => e.stopPropagation()}
-                      title="Open studio on AniList"
+                      title={`Open studio on ${tracker.name}`}
                       className="text-accent hover:underline cursor-pointer"
                     >
                       {s.name}

@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
+  AccountInfo,
   AniListHistoryStatus,
   AppSettings,
   DetectedMediaSession,
@@ -20,7 +21,8 @@ import { log } from "@/lib/log";
 export interface AppEventHandlers {
   libraryChanged: (summary: ScanSummary) => void;
   torrentAutoDownloaded: (event: TorrentAutoDownloadedEvent) => void;
-  authUpdated: (settings: AppSettings) => void;
+  /** A sign-in finished: the account now stored */
+  authUpdated: (account: AccountInfo) => void;
   /** The backend changed settings (tray detection toggle) */
   settingsChanged: (settings: AppSettings) => void;
   syncStarted: (event: TrackerSyncStartedEvent) => void;

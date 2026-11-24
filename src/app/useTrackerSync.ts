@@ -3,27 +3,29 @@ import { SyncSummary, TrackerSyncFailedEvent, TrackerSyncStartedEvent } from "@/
 import { toraApi } from "@/lib/api";
 import type { ShowToast } from "@/contexts/toast";
 
-// Short human-readable AniList sync summary for the toast (null when nothing changed)
-function describeSyncSummary(summary: SyncSummary): string | null {
+// Short human-readable sync summary for the toast (null when nothing changed)
+function describeSyncSummary(summary: SyncSummary, trackerName: string): string | null {
   const parts: string[] = [];
   if (summary.added > 0) parts.push(`${summary.added} added`);
   if (summary.updated_from_remote > 0) parts.push(`${summary.updated_from_remote} updated`);
   if (summary.deleted > 0) parts.push(`${summary.deleted} removed`);
   if (summary.pushed > 0) parts.push(`${summary.pushed} pushed`);
-  if (summary.remote_deleted > 0) parts.push(`${summary.remote_deleted} deleted on AniList`);
+  if (summary.remote_deleted > 0) parts.push(`${summary.remote_deleted} deleted on ${trackerName}`);
   if (summary.push_failed > 0) parts.push(`${summary.push_failed} failed to push (will retry)`);
   if (summary.deletion_skipped_reason) parts.push(`removals skipped: ${summary.deletion_skipped_reason}`);
-  return parts.length > 0 ? `AniList sync: ${parts.join(", ")}` : null;
+  return parts.length > 0 ? `${trackerName} sync: ${parts.join(", ")}` : null;
 }
 
 /**
- * AniList pull state (spinner, last synced) driven by the tracker-sync-* events and the manual
+ * Tracker pull state (spinner, last synced) driven by the tracker-sync-* events and the manual
  * Sync button. `applySummary` merges a pull's delta into the list; it is idempotent.
  */
 export function useTrackerSync(
   applySummary: (summary: SyncSummary) => void,
   showToast: ShowToast,
-  listSize: number
+  listSize: number,
+  /** The active tracker's name, for the toasts */
+  trackerName: string
 ) {
   const [isSyncing, setIsSyncing] = useState(false);
   const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
@@ -59,16 +61,16 @@ export function useTrackerSync(
     setLastSyncedAt(now());
     applySummary(summary);
     // Stay quiet at startup when nothing changed; manual / post-auth syncs always confirm
-    const msg = describeSyncSummary(summary);
+    const msg = describeSyncSummary(summary, trackerName);
     if (msg) showToast(msg, summary.push_failed > 0 ? "error" : "success");
-    else if (reasonRef.current !== "startup") showToast(`AniList sync: up to date (${listSize} entries)`, "info");
+    else if (reasonRef.current !== "startup") showToast(`${trackerName} sync: up to date (${listSize} entries)`, "info");
   };
 
   const onFailed = (event: TrackerSyncFailedEvent) => {
     eventSeqRef.current += 1;
     failureSeqRef.current += 1;
     setIsSyncing(false);
-    showToast(`AniList sync failed: ${event.message}`, "error");
+    showToast(`${trackerName} sync failed: ${event.message}`, "error");
   };
 
   /** Manual pull; the tracker-list-synced event owns the summary toast */
@@ -81,7 +83,7 @@ export function useTrackerSync(
       applySummary(await toraApi.syncTrackerList());
       setLastSyncedAt(now());
     } catch (err) {
-      if (failureSeqRef.current === failureSeq) showToast(`AniList sync failed: ${String(err)}`, "error");
+      if (failureSeqRef.current === failureSeq) showToast(`${trackerName} sync failed: ${String(err)}`, "error");
     } finally {
       setIsSyncing(false);
     }

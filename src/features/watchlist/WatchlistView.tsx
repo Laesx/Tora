@@ -16,6 +16,7 @@ import { AnimeEntry, AppSettings } from "@/lib/types";
 import { formatLastSynced } from "@/lib/format";
 import { WATCHLIST_TABS } from "@/lib/status";
 import { useAnimeActions } from "@/contexts/animeActions";
+import { useTracker } from "@/contexts/tracker";
 import { KeyHint } from "@/components/KeyHint";
 import { CustomListsChip } from "./CustomListsChip";
 import { VirtualWatchlist, WatchlistNav } from "./VirtualWatchlist";
@@ -85,6 +86,7 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
   showKeyHints,
 }) => {
   const { openAnime } = useAnimeActions();
+  const { name: trackerName } = useTracker();
   const toolbarRef = useRef<HTMLDivElement | null>(null);
   // Toolbar height (it wraps on narrow windows): scrolling to a card keeps it below the bar
   const [toolbarHeight, setToolbarHeight] = useState(0);
@@ -252,10 +254,10 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
             className="p-2 rounded-xl bg-bg-secondary hover:bg-bg-tertiary border border-border-subtle text-text-secondary hover:text-text-primary transition disabled:opacity-50 disabled:cursor-not-allowed"
             title={
               !isSignedIn
-                ? "Sign in to AniList to sync your list"
+                ? `Sign in to ${trackerName} to sync your list`
                 : isSyncing
-                  ? "Syncing with AniList…"
-                  : `Sync from AniList${lastSyncedAt ? ` • Last synced ${formatLastSynced(lastSyncedAt)}` : ""}`
+                  ? `Syncing with ${trackerName}…`
+                  : `Sync from ${trackerName}${lastSyncedAt ? ` • Last synced ${formatLastSynced(lastSyncedAt)}` : ""}`
             }
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? "animate-spin" : ""}`} />

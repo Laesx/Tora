@@ -8,7 +8,7 @@
 //! directly with `media_id`.
 
 use super::{Database, WatchEvent, MANUAL_HISTORY_PLAYER};
-use crate::plugins::RemoteListActivity;
+use crate::trackers::RemoteListActivity;
 use rusqlite::{named_params, params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
@@ -638,7 +638,7 @@ fn write_state(conn: &Connection, state: &AniListHistoryState) -> Result<(), Str
 mod tests {
     use super::*;
     use crate::db::test_entry;
-    use crate::plugins::ActivityMedia;
+    use crate::trackers::ActivityMedia;
 
     fn activity(id: i64, media_id: i64, range: Option<(u32, u32)>, at: i64) -> RemoteListActivity {
         RemoteListActivity {
@@ -889,7 +889,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        db.reset_for_account_switch(9).unwrap();
+        db.reset_for_account_switch(&crate::db::ListOwner::new("anilist", 9)).unwrap();
         assert_eq!(db.anilist_history_counts().unwrap(), (0, 0));
         assert_eq!(db.anilist_history_state().unwrap().status, ImportStatus::Idle);
     }

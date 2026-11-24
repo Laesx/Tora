@@ -6,7 +6,7 @@
 //! memory for a few minutes.
 
 use super::TrackerSyncService;
-use crate::plugins::{AnimePageFetch, AnimePageParts, FollowingPage, MediaDetails, SeasonalAnime};
+use crate::trackers::{AnimePageFetch, AnimePageParts, FollowingPage, MediaDetails, SeasonalAnime};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
@@ -107,10 +107,10 @@ impl TrackerSyncService {
             return Ok(data);
         }
 
-        let fetched = match self.plugin() {
-            Ok(plugin) => {
+        let fetched = match self.tracker().await {
+            Ok(tracker) => {
                 let token = token.as_deref();
-                self.limiter.run(|| plugin.fetch_anime_page(anilist_id, &parts, token)).await
+                self.limiter(&tracker).run(|| tracker.catalog().fetch_anime_page(anilist_id, &parts, token)).await
             }
             Err(e) => Err(e),
         };
@@ -195,10 +195,10 @@ impl TrackerSyncService {
             return Ok(details);
         }
         let page_number = details.characters_page + 1;
-        let plugin = self.plugin()?;
+        let tracker = self.tracker().await?;
         let page = self
-            .limiter
-            .run(|| plugin.fetch_characters_page(anilist_id, page_number))
+            .limiter(&tracker)
+            .run(|| tracker.catalog().fetch_characters_page(anilist_id, page_number))
             .await?;
         let known: HashSet<i64> = details.characters.iter().map(|c| c.id).collect();
         details

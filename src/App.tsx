@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AnimeEntry, AppSettings, DetectedMediaSession, ScanSummary } from "@/lib/types";
+import { AccountInfo, AnimeEntry, AppSettings, DetectedMediaSession, ScanSummary, TrackerState } from "@/lib/types";
 import { toraApi } from "@/lib/api";
 import { applyThemeToDocument } from "@/lib/theme";
 import { plural } from "@/lib/format";
@@ -10,6 +10,8 @@ import { setDateSettings } from "@/lib/dates";
 import { CustomListsContext } from "@/contexts/customLists";
 import { ToastContext } from "@/contexts/toast";
 import { ScoreFormatContext } from "@/contexts/scoreFormat";
+import { TrackerContext, TrackerContextValue } from "@/contexts/tracker";
+import { trackerLink } from "@/lib/trackers";
 import { DEFAULT_SCORE_FORMAT, parseScoreFormat, ScoreFormat } from "@/lib/scores";
 import { AnimeActions, AnimeActionsContext } from "@/contexts/animeActions";
 import { NAV_ITEMS, NavTab } from "@/app/nav";
@@ -77,6 +79,20 @@ export const App: React.FC = () => {
     setActiveTabState(tab);
   };
   const [settings, setSettings] = useState<AppSettings | null>(null);
+  // The active tracker and the signed-in account (never a token)
+  const [trackerState, setTrackerState] = useState<TrackerState | null>(null);
+  const trackerContext = useMemo<TrackerContextValue>(
+    () => ({ tracker: trackerState?.tracker ?? null, account: trackerState?.account ?? null }),
+    [trackerState]
+  );
+  const trackerName = trackerState?.tracker.name ?? "your tracker";
+  const setAccount = (account: AccountInfo | null) =>
+    setTrackerState((prev) => (prev ? { ...prev, account } : prev));
+  const reloadTrackerState = () =>
+    toraApi
+      .getTrackerState()
+      .then(setTrackerState)
+      .catch(() => { });
   const titleLanguage = settings?.title_language ?? "romaji";
   setCurrentTitleLanguage(titleLanguage);
   const [systemLocale, setSystemLocale] = useState("");
@@ -247,10 +263,9 @@ export const App: React.FC = () => {
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const showShortcutHints = useModifierHint("Control");
   const showAltKeyHints = useModifierHint("Alt");
-  const [isAuthorizingAnilist, setIsAuthorizingAnilist] = useState(false);
+  const [isAuthorizing, setIsAuthorizing] = useState(false);
   const [libraryRefreshTick, setLibraryRefreshTick] = useState(0);
-  // Sync requires an OAuth token; a bare username no longer counts as signed in
-  const isSignedIn = Boolean(settings?.anilist_token?.trim());
+  const isSignedIn = Boolean(trackerState?.account);
   // Stats / History reload only when what they show can change (not on sync flags or metadata)
   const statsKey = useMemo(
     () =>
@@ -285,7 +300,8 @@ export const App: React.FC = () => {
       if (summary.score_format) setScoreFormat(parseScoreFormat(summary.score_format));
     },
     showToast,
-    animeList.length
+    animeList.length,
+    trackerName
   );
 
   // The list was updated from playback (countdown, Update button, or once the player closed)
@@ -313,13 +329,15 @@ export const App: React.FC = () => {
 
   const loadInitialData = async () => {
     try {
-      const [s, entries, locale] = await Promise.all([
+      const [s, entries, locale, tracking] = await Promise.all([
         toraApi.getAppSettings(),
         toraApi.getAnimeList(),
         toraApi.getSystemLocale().catch(() => ""),
+        toraApi.getTrackerState(),
       ]);
       setSystemLocale(locale);
       setSettings(s);
+      setTrackerState(tracking);
       applyThemeToDocument(s.theme, s.accent_color);
       list.setList(entries);
       if (s.settings_recovered) {
@@ -333,11 +351,12 @@ export const App: React.FC = () => {
         .catch(() => { });
       sync.loadStatus();
 
-      // Hydrate the AniList avatar / username in the background if signed in without them
-      if (s.anilist_token && (!s.anilist_avatar || !s.anilist_username)) {
+      // Fill in the account's avatar / name (or user id, after the move out of the settings) in the background
+      const account = tracking.account;
+      if (account && (!account.avatar_url || !account.username || account.user_id === 0)) {
         toraApi
-          .verifyTrackerAccount(s.active_tracker_plugin || "anilist", s.anilist_username || "", s.anilist_token || null)
-          .then(async () => setSettings(await toraApi.getAppSettings()))
+          .refreshTrackerProfile()
+          .then(setAccount)
           .catch(() => { });
       }
 
@@ -367,10 +386,11 @@ export const App: React.FC = () => {
       if (failed.length) showToast(`Auto-download failed: ${failed.join(" · ")}`, "error");
       if (bound_anime_ids?.length) await list.refreshEntries(bound_anime_ids);
     },
-    authUpdated: (next) => {
-      setSettings(next);
-      setIsAuthorizingAnilist(false);
-      if (next.anilist_username) showToast(`Signed in to AniList as @${next.anilist_username}!`, "success");
+    authUpdated: (account) => {
+      setIsAuthorizing(false);
+      // The active tracker follows the account
+      reloadTrackerState();
+      if (account.username) showToast(`Signed in as @${account.username}!`, "success");
     },
     settingsChanged: setSettings,
     syncStarted: sync.onStarted,
@@ -378,14 +398,13 @@ export const App: React.FC = () => {
     syncFailed: sync.onFailed,
     // A background push/delete failed; the entry stays queued and retries on next sync
     syncError: ({ operation, title, message }) =>
-      showToast(`AniList ${operation} failed for "${title}": ${message} — will retry on next sync`, "error"),
+      showToast(`${trackerName} ${operation} failed for "${title}": ${message} — will retry on next sync`, "error"),
     authInvalid: () => {
-      showToast("AniList session expired or was revoked — please sign in again", "error");
-      // Pick up any token the backend cleared
-      toraApi.getAppSettings().then(setSettings).catch(() => { });
+      showToast(`${trackerName} session expired or was revoked — please sign in again`, "error");
+      reloadTrackerState();
     },
-    // A different AniList account signed in: the previous account's list was wiped and the new
-    // account's list is imported next (it arrives through tracker-list-synced)
+    // A different account signed in: the previous account's list was wiped and the new account's list is
+    // imported next (it arrives through tracker-list-synced)
     accountSwitched: ({ username, discarded_changes }) => {
       stepper.cancel();
       nav.clear();
@@ -397,7 +416,7 @@ export const App: React.FC = () => {
       showToast(
         discarded_changes > 0
           ? `Switched to @${username}. ${plural(discarded_changes, "unsent change")} from the previous account ${discarded_changes === 1 ? "was" : "were"} discarded.`
-          : `Switched to @${username}. Importing their AniList list…`,
+          : `Switched to @${username}. Importing their list…`,
         discarded_changes > 0 ? "error" : "info"
       );
     },
@@ -479,32 +498,33 @@ export const App: React.FC = () => {
     }
   };
 
-  const handleSyncFromAnilist = () => {
-    if (!isSignedIn) showToast("Sign in to AniList in Settings to sync", "info");
+  const handleSyncFromTracker = () => {
+    if (!isSignedIn) showToast(`Sign in to ${trackerName} in Settings to sync`, "info");
     else void sync.syncNow();
   };
 
-  const handleStartAnilistLogin = async () => {
+  const handleStartSignIn = async () => {
+    if (!trackerState) return;
     try {
-      setIsAuthorizingAnilist(true);
-      await toraApi.startAnilistOauth();
-      showToast("Opened AniList in your browser — click Authorize to sign in", "info");
+      setIsAuthorizing(true);
+      await toraApi.startTrackerSignIn(trackerState.tracker.id);
+      showToast(`Opened ${trackerName} in your browser — click Authorize to sign in`, "info");
     } catch (err) {
-      setIsAuthorizingAnilist(false);
+      setIsAuthorizing(false);
       showToast(String(err), "error");
     }
   };
 
   const handleConfirmSignOut = async () => {
     try {
-      const { settings: updated, unsent } = await toraApi.signOutTracker();
-      setSettings(updated);
+      const { unsent } = await toraApi.signOutTracker();
+      setAccount(null);
       setSignOutModalOpen(false);
-      setIsAuthorizingAnilist(false);
+      setIsAuthorizing(false);
       showToast(
         unsent > 0
-          ? `Signed out of AniList. ${plural(unsent, "change")} couldn't be sent; ${unsent === 1 ? "it" : "they"} will be sent next time this account signs in.`
-          : "Signed out of AniList",
+          ? `Signed out of ${trackerName}. ${plural(unsent, "change")} couldn't be sent; ${unsent === 1 ? "it" : "they"} will be sent next time this account signs in.`
+          : `Signed out of ${trackerName}`,
         unsent > 0 ? "error" : "info"
       );
     } catch (err) {
@@ -512,10 +532,10 @@ export const App: React.FC = () => {
     }
   };
 
-  const handleOpenAnilistProfile = () => {
-    if (!settings?.anilist_username) return;
-    const url = `https://anilist.co/user/${encodeURIComponent(settings.anilist_username.trim())}`;
-    toraApi.openExternalUrl(url).catch((err) => showToast(String(err), "error"));
+  const handleOpenProfile = () => {
+    const username = trackerState?.account?.username.trim();
+    const url = username ? trackerLink(trackerState?.tracker.links, "user", username) : null;
+    if (url) toraApi.openExternalUrl(url).catch((err) => showToast(String(err), "error"));
   };
 
   const dismissSession = async () => {
@@ -585,7 +605,7 @@ export const App: React.FC = () => {
     if (entry) return entry;
     try {
       const media = await toraApi.getMediaMetadata(id);
-      if (!media) showToast("AniList has no data for this anime", "error");
+      if (!media) showToast(`${trackerName} has no data for this anime`, "error");
       return media;
     } catch (e) {
       showToast(String(e), "error");
@@ -762,7 +782,8 @@ export const App: React.FC = () => {
     openSettings: () => openSettings(),
     openTorrentSettings: () => openSettings("torrents"),
     rescanLibrary: () => void handleRescanLibrary(),
-    syncFromAnilist: handleSyncFromAnilist,
+    syncFromTracker: handleSyncFromTracker,
+    trackerName,
     openRandomAnime,
     openShortcuts: () => setShortcutsOpen(true),
     checkForUpdates: () => void updater.checkForUpdates(true),
@@ -785,6 +806,7 @@ export const App: React.FC = () => {
             <AnimeActionsContext.Provider value={animeActions}>
               <NavigationContext.Provider value={navigation}>
                 <ScoreFormatContext.Provider value={scoreFormat}>
+                <TrackerContext.Provider value={trackerContext}>
                   <div
                     className="flex h-screen w-screen overflow-hidden bg-bg-primary text-text-primary select-none"
                     onClick={() => list.setQuickMenuAnimeId(null)}
@@ -803,12 +825,10 @@ export const App: React.FC = () => {
                       onOpenShortcuts={() => setShortcutsOpen(true)}
                       showShortcutHints={showShortcutHints}
                       listCount={animeList.length}
-                      settings={settings}
-                      isSignedIn={isSignedIn}
-                      isAuthorizing={isAuthorizingAnilist}
-                      onSignIn={handleStartAnilistLogin}
+                      isAuthorizing={isAuthorizing}
+                      onSignIn={handleStartSignIn}
                       onSignOut={() => setSignOutModalOpen(true)}
-                      onOpenProfile={handleOpenAnilistProfile}
+                      onOpenProfile={handleOpenProfile}
                       version={updater.version}
                       updateDot={updater.showDot}
                       updateChecking={updater.checking}
@@ -856,7 +876,7 @@ export const App: React.FC = () => {
                                 isSignedIn={isSignedIn}
                                 isSyncing={sync.isSyncing}
                                 lastSyncedAt={sync.lastSyncedAt}
-                                onSync={handleSyncFromAnilist}
+                                onSync={handleSyncFromTracker}
                                 scrollContainerRef={mainScrollRef}
                                 selectedAnimeIds={list.selectedAnimeIds}
                                 onSetSelectedAnimeIds={list.setSelectedAnimeIds}
@@ -1030,7 +1050,6 @@ export const App: React.FC = () => {
 
                     {signOutModalOpen && (
                       <SignOutModal
-                        username={settings?.anilist_username}
                         onCancel={() => setSignOutModalOpen(false)}
                         onConfirm={handleConfirmSignOut}
                       />
@@ -1064,6 +1083,7 @@ export const App: React.FC = () => {
 
                     {toast && <Toast toast={toast} />}
                   </div>
+                </TrackerContext.Provider>
                 </ScoreFormatContext.Provider>
               </NavigationContext.Provider>
             </AnimeActionsContext.Provider>

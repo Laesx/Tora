@@ -10,7 +10,7 @@
 
 use super::{TrackerSyncService, EVENT_AUTH_INVALID};
 use crate::db::{AniListHistoryState, AniListHistoryStatus, ImportStatus};
-use crate::plugins::{ActivityPage, ActivityPageQuery, TrackerError, TrackerPlugin, ACTIVITY_PAGE_SIZE};
+use crate::trackers::{ActivityPage, ActivityPageQuery, TrackerError, Tracker, ACTIVITY_PAGE_SIZE};
 use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -117,46 +117,50 @@ impl TrackerSyncService {
         Ok(())
     }
 
-    /// Token and AniList user id the import may use: the token's viewer must own the local list.
-    async fn history_account(&self) -> Result<(String, i64, Arc<dyn TrackerPlugin>), TrackerError> {
-        let token = self
-            .current_token()
+    /// Token and user id the import may use: the token's viewer must own the local list.
+    async fn history_account(&self) -> Result<(String, i64, Arc<dyn Tracker>), TrackerError> {
+        let account = self
+            .current_account()
             .await
             .map_err(TrackerError::Api)?
-            .ok_or_else(|| TrackerError::Unauthorized("Not signed in to AniList".into()))?;
-        let plugin = self.plugin()?;
-        let viewer = plugin.viewer_id(&token).await?;
+            .filter(|a| !a.access_token.trim().is_empty())
+            .ok_or_else(|| TrackerError::Unauthorized("Not signed in".into()))?;
+        let token = account.access_token.trim().to_string();
+        let tracker = self.tracker_by_id(&account.tracker)?;
+        let viewer = tracker.auth().viewer_id(&token).await?;
         let owner = self.blocking(|db| db.list_owner()).await.map_err(TrackerError::Api)?;
-        if let Some(owner) = owner.filter(|o| *o != viewer) {
+        if !super::owns_list(&account, owner.as_ref(), viewer) {
             return Err(TrackerError::Api(format!(
-                "The local list belongs to AniList user {} but the signed-in account is {}",
-                owner, viewer
+                "The local list belongs to {} but the signed-in {} account is {}",
+                super::owner_text(owner.as_ref()),
+                tracker.descriptor().name,
+                viewer
             )));
         }
-        Ok((token, viewer, plugin))
+        Ok((token, viewer, tracker))
     }
 
     async fn fetch_activity_page(
         &self,
-        plugin: &Arc<dyn TrackerPlugin>,
+        tracker: &Arc<dyn Tracker>,
         token: &str,
         query: &ActivityPageQuery,
     ) -> Result<ActivityPage, TrackerError> {
-        self.limiter
-            .run(|| plugin.fetch_list_activities(token, query))
+        self.limiter(&tracker)
+            .run(|| tracker.extras().fetch_list_activities(token, query))
             .await
     }
 
     /// One page with retries for transient failures (network, 5xx, a second rate limit).
     async fn fetch_activity_page_retrying(
         &self,
-        plugin: &Arc<dyn TrackerPlugin>,
+        tracker: &Arc<dyn Tracker>,
         token: &str,
         query: &ActivityPageQuery,
     ) -> Result<ActivityPage, TrackerError> {
         let mut attempt = 0;
         loop {
-            match self.fetch_activity_page(plugin, token, query).await {
+            match self.fetch_activity_page(tracker, token, query).await {
                 Err(e @ (TrackerError::Network(_) | TrackerError::RateLimited { .. }))
                     if attempt < RETRY_DELAYS_SECS.len() =>
                 {
@@ -245,7 +249,7 @@ impl TrackerSyncService {
             }
             Stop::Failed(e.to_string())
         };
-        let (token, user_id, plugin) = self.history_account().await.map_err(|e| failed(e, self))?;
+        let (token, user_id, tracker) = self.history_account().await.map_err(|e| failed(e, self))?;
         self.save_history_state(state).await.map_err(Stop::Failed)?;
         self.emit_history_status().await;
 
@@ -257,7 +261,7 @@ impl TrackerSyncService {
                 ..Default::default()
             };
             let page = self
-                .fetch_activity_page_retrying(&plugin, &token, &oldest)
+                .fetch_activity_page_retrying(&tracker, &token, &oldest)
                 .await
                 .map_err(|e| failed(e, self))?;
             state.earliest_at = page.items.first().map(|a| a.created_at);
@@ -281,7 +285,7 @@ impl TrackerSyncService {
                 ..Default::default()
             };
             let page = self
-                .fetch_activity_page_retrying(&plugin, &token, &query)
+                .fetch_activity_page_retrying(&tracker, &token, &query)
                 .await
                 .map_err(|e| failed(e, self))?;
 
@@ -358,7 +362,7 @@ impl TrackerSyncService {
 
     async fn refresh_history_inner(&self, reason: &str) -> Result<usize, String> {
         let started = Instant::now();
-        let (token, user_id, plugin) = self.history_account().await.map_err(|e| e.to_string())?;
+        let (token, user_id, tracker) = self.history_account().await.map_err(|e| e.to_string())?;
         let newest = self.blocking(|db| db.newest_anilist_activity_at()).await?;
         let since = newest.unwrap_or_else(|| chrono::Utc::now().timestamp()) - REFRESH_OVERLAP_SECS;
         let mut cursor: Option<i64> = None;
@@ -372,7 +376,7 @@ impl TrackerSyncService {
                 ..Default::default()
             };
             let page = self
-                .fetch_activity_page(&plugin, &token, &query)
+                .fetch_activity_page(&tracker, &token, &query)
                 .await
                 .map_err(|e| e.to_string())?;
             pages += 1;

@@ -5,16 +5,42 @@
 #   scripts/tracker-test-db.ps1 restore <name>   put a snapshot back (the current state is saved first as auto-<time>)
 #   scripts/tracker-test-db.ps1 list             snapshots, newest first
 #
+# -Dev works on the debug build's folder instead (%APPDATA%\ToraDev, `pnpm tauri dev`). Snapshots are shared,
+# so `save real` then `restore real -Dev` gives the dev build a copy of the release build's data.
+#
 # Tora must be closed (tray included): a running Tora keeps the database open with its -wal / -shm files.
-# Nothing is ever deleted: snapshots are only added. Remove old ones by hand from %APPDATA%\Tora-testdb.
+# Snapshots are only added (remove old ones by hand from %APPDATA%\Tora-testdb); a restore replaces the data folder
+# after saving it as auto-<time>. Run it from your own terminal (see Assert-RealAppData).
 param(
     [Parameter(Position = 0, Mandatory = $true)][ValidateSet("save", "restore", "list")][string]$Command,
     [Parameter(Position = 1)][string]$Name,
-    # The app's data folder (the dev and release builds share %APPDATA%\Tora).
-    [string]$DataDir = (Join-Path $env:APPDATA "Tora"),
+    # The debug build's data folder (%APPDATA%\ToraDev) instead of the release build's
+    [switch]$Dev,
+    [string]$DataDir = (Join-Path $env:APPDATA $(if ($Dev) { "ToraDev" } else { "Tora" })),
     [string]$SnapshotDir = (Join-Path $env:APPDATA "Tora-testdb")
 )
 $ErrorActionPreference = "Stop"
+
+# Run it from your own terminal, never from a packaged app's shell (the Claude desktop app's terminal and tools):
+# Windows redirects a packaged app's writes under %APPDATA% into its private copy
+# (%LOCALAPPDATA%\Packages\<app>\LocalCache\Roaming) while deletes still reach the real folder. A restore there
+# deleted the real %APPDATA%\Tora and put the snapshot where only that app could see it.
+function Assert-RealAppData {
+    $probe = "tora-testdb-probe-$PID-$([guid]::NewGuid().ToString('N')).tmp"
+    $path = Join-Path $env:APPDATA $probe
+    Set-Content -LiteralPath $path -Value "probe"
+    try {
+        $redirected = @(Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA "Packages\*\LocalCache\Roaming\$probe") -ErrorAction SilentlyContinue)
+    } finally {
+        Remove-Item -LiteralPath $path -ErrorAction SilentlyContinue
+    }
+    if ($redirected.Count -gt 0) {
+        $redirected | Remove-Item -ErrorAction SilentlyContinue
+        throw "This shell's %APPDATA% writes are redirected into $($redirected[0].DirectoryName) (a packaged app's private copy): " +
+            "copies would land there while deletes reach the real folder. Run this script from your own terminal."
+    }
+}
+Assert-RealAppData
 
 function Assert-ToraClosed {
     $running = Get-Process -Name tora -ErrorAction SilentlyContinue

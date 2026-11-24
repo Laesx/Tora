@@ -2,13 +2,14 @@ import React, { useMemo } from "react";
 import { Star } from "lucide-react";
 import { AnimeEntry, MediaRelation, SeasonalAnime } from "@/lib/types";
 import { seasonName } from "@/lib/seasons";
-import { anilistStudioUrl, formatEnum, formatFuzzyDate, formatRanking, openExternal } from "@/lib/anime";
+import { formatEnum, formatFuzzyDate, formatRanking, openExternal } from "@/lib/anime";
 import { useToast } from "@/contexts/toast";
+import { useTracker } from "@/contexts/tracker";
 import { SourceLinks } from "@/features/detail/RelationsPanel";
 import { PageSection } from "./PageSection";
 
 /**
- * Facts about the anime (season → Seasons tab, studios and the source manga / novel → AniList) and its
+ * Facts about the anime (season → Seasons tab, studios and the source manga / novel → the tracker) and its
  * best rankings.
  */
 export const InfoPanel: React.FC<{
@@ -19,6 +20,7 @@ export const InfoPanel: React.FC<{
   onOpenSeason: (season: string, year: number) => void;
 }> = ({ anime, media, sources = [], onOpenSeason }) => {
   const showToast = useToast();
+  const tracker = useTracker();
   const meta = media?.metadata;
   const studios = meta?.studios.filter((s) => s.is_animation_studio) ?? [];
   const producers = meta?.studios.filter((s) => !s.is_animation_studio) ?? [];
@@ -34,7 +36,7 @@ export const InfoPanel: React.FC<{
   const studioLinks = (list: typeof studios, className: string) => (
     <span className="flex flex-wrap gap-x-2 gap-y-0.5">
       {list.map((s) => (
-        <button key={s.id} onClick={() => openExternal(anilistStudioUrl(s.id), showToast)} className={className}>
+        <button key={s.id} onClick={() => openExternal(tracker.link("studio", s.id), showToast)} className={className}>
           {s.name}
         </button>
       ))}

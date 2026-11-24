@@ -62,9 +62,10 @@ export interface AnimeEntry {
   user_completed_at?: string | null;
   custom_folder: string | null;
   updated_at: number;
-  // AniList sync state (true while a local change is queued for push / retry)
+  // Tracker sync state (true while a local change is queued for push / retry)
   sync_pending: boolean;
-  anilist_list_entry_id: number | null;
+  /** The tracker's id of this list entry (needed for deletes) */
+  remote_entry_id: number | null;
   // Local library state
   local_episode_count: number;
   available_episodes: number[];
@@ -827,36 +828,55 @@ export interface ProcessMemory {
   working_set: number;
 }
 
-export interface TrackerPluginDescriptor {
-  id: string;
-  name: string;
-  description: string;
-  website_url: string;
-  oauth_authorize_url: string;
-  supports_public_username_sync: boolean;
-  supports_oauth_token: boolean;
-  supports_seasonal_browse: boolean;
-  status: string;
+/** How a tracker signs a user in (`AuthMethod` in Rust). */
+export type TrackerAuthMethod = { kind: "browser_token"; authorize_url: string };
+
+/**
+ * URL templates of a tracker's public pages: `{id}` is replaced by the id, `{name}` by the URL-encoded name
+ * (`trackerLink`). A page the tracker doesn't have is null: show plain text instead of a link.
+ */
+export interface TrackerLinks {
+  anime: string;
+  manga: string;
+  character: string;
+  staff: string;
+  user: string;
+  /** An anime's full staff list */
+  anime_staff: string | null;
+  studio: string | null;
+  /** Anime of one genre */
+  genre: string | null;
+  /** Anime with one tag */
+  tag: string | null;
 }
 
-export interface TrackerUserProfile {
+/** A tracker Tora can sync with (`get_trackers`). */
+export interface TrackerDescriptor {
+  id: string;
+  name: string;
+  website_url: string;
+  auth: TrackerAuthMethod;
+  links: TrackerLinks;
+}
+
+/** The signed-in account (never a token). */
+export interface AccountInfo {
+  tracker: string;
   user_id: number;
   username: string;
   avatar_url: string | null;
-  anime_count: number;
-  episodes_watched: number;
-  authenticated: boolean;
+}
+
+/** `get_tracker_state`: the active tracker (the account's, else the list owner's) and the signed-in account. */
+export interface TrackerState {
+  tracker: TrackerDescriptor;
+  account: AccountInfo | null;
 }
 
 export interface AppSettings {
   theme: string;
   accent_color: string;
   view_mode: "grid" | "compact" | "table";
-  active_tracker_plugin: string;
-  anilist_username: string;
-  anilist_token: string;
-  anilist_user_id: number | null;
-  anilist_avatar: string | null;
   recognition_enabled: boolean;
   /** Only files in the library start a playback session (anything else counts as nothing playing) */
   recognition_library_only: boolean;
@@ -994,18 +1014,19 @@ export interface TorrentAutoDownloadedEvent {
   bound_anime_ids?: number[];
 }
 
-/** Result of `sign_out_tracker`: queued changes are sent one last time before the token is cleared. */
+/** Result of `sign_out_tracker`: queued changes are sent one last time before the account is forgotten. */
 export interface SignOutOutcome {
   pushed: number;
   deleted: number;
   /** Changes still queued; they are sent when the same account signs in again. */
   unsent: number;
-  settings: AppSettings;
 }
 
-/** A different AniList account signed in: the previous account's list data was wiped. */
+/** A different account (another user or another tracker) signed in: the previous account's list data was wiped. */
 export interface TrackerAccountSwitchedEvent {
+  previous_tracker: string | null;
   previous_user_id: number | null;
+  tracker: string;
   user_id: number;
   username: string;
   /** Unsent changes of the previous account that were dropped. */

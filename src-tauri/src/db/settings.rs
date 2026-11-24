@@ -23,7 +23,8 @@ pub const SEASONS_NOT_INTERESTED_KEY: &str = "seasons_not_interested";
 /// local only, kept on account switch (it describes the files, not the list).
 pub const RELEASE_PREFERENCES_KEY: &str = "release_preferences";
 
-/// Every key a backup snapshots (and a restore writes back).
+/// Every key a backup snapshots (and a restore writes back). Never the tracker account (`accounts`): a
+/// backup must not hold a token, and a restore must not bring back an expired one.
 const BACKED_UP_KEYS: [&str; 9] = [
     MAIN_SETTINGS_KEY,
     TORRENT_FEEDS_KEY,
@@ -34,14 +35,6 @@ const BACKED_UP_KEYS: [&str; 9] = [
     TORRENT_SEARCH_FEEDS_KEY,
     SEASONS_NOT_INTERESTED_KEY,
     RELEASE_PREFERENCES_KEY,
-];
-/// Account fields a restore never takes from the backup: an old token may be expired or belong to an
-/// account other than the list owner.
-const ACCOUNT_FIELDS: [&str; 4] = [
-    "anilist_token",
-    "anilist_user_id",
-    "anilist_username",
-    "anilist_avatar",
 ];
 /// Settings fields that were renamed: old key → new key (the old value is used when the new one is absent).
 const RENAMED_FIELDS: [(&str, &str); 1] = [("qbittorrent_category", "torrent_category")];
@@ -145,6 +138,7 @@ fn snapshot_summary(snapshot: &SettingsSnapshot) -> String {
         if let Some(theme) = main.get("theme").and_then(|v| v.as_str()) {
             parts.push(format!("theme {}", theme));
         }
+        // Only backups from before the account left the settings have it
         if let Some(user) = main
             .get("anilist_username")
             .and_then(|v| v.as_str())
@@ -345,25 +339,20 @@ impl Database {
             .collect())
     }
 
-    /// Restores every backed-up key from `file_name` (current state is snapshotted first), keeping the
-    /// current AniList account fields. Keys absent from the backup are left as they are.
+    /// Restores every backed-up key from `file_name` (current state is snapshotted first). The signed-in
+    /// account is untouched: it isn't a backed-up key, and the account fields of backups made before it
+    /// left the settings are dropped when `main` is re-serialized. Keys absent from the backup are left as
+    /// they are.
     pub fn restore_settings_backup(&self, file_name: &str) -> Result<AppSettings, String> {
         let dir = self.backup_dir.clone().ok_or("Backups are unavailable")?;
         if file_name.contains(['/', '\\']) || file_name.contains("..") {
             return Err("Invalid backup name".into());
         }
         let snapshot = read_snapshot(&dir.join(file_name)).ok_or("Backup is missing or unreadable")?;
-        let current = self.get_settings()?;
         self.backup_settings_now()?;
 
         let mut values = snapshot.values;
         if let Some(Value::Object(main)) = values.get_mut(MAIN_SETTINGS_KEY) {
-            let current_json = serde_json::to_value(&current).map_err(|e| e.to_string())?;
-            for field in ACCOUNT_FIELDS {
-                if let Some(v) = current_json.get(field) {
-                    main.insert(field.to_string(), v.clone());
-                }
-            }
             let restored = settings_from_json(&Value::Object(main.clone()).to_string())
                 .ok_or("Backup settings are unreadable")?;
             *main = match serde_json::to_value(&restored).map_err(|e| e.to_string())? {
@@ -425,20 +414,20 @@ mod tests {
 
     #[test]
     fn missing_fields_keep_stored_values() {
-        let json = r##"{"theme":"sakura","accent_color":"#123456","anilist_token":"tok"}"##;
+        let json = r##"{"theme":"sakura","accent_color":"#123456","date_locale":"ja-JP"}"##;
         let s = settings_from_json(json).unwrap();
         assert_eq!(s.theme, "sakura");
         assert_eq!(s.accent_color, "#123456");
-        assert_eq!(s.anilist_token, "tok");
+        assert_eq!(s.date_locale, "ja-JP");
         assert_eq!(s.view_mode, AppSettings::default().view_mode);
     }
 
     #[test]
     fn one_bad_field_defaults_alone() {
-        let json = r#"{"theme":"sakura","recognition_delay_seconds":"soon","anilist_token":"tok"}"#;
+        let json = r#"{"theme":"sakura","recognition_delay_seconds":"soon","date_locale":"ja-JP"}"#;
         let s = settings_from_json(json).unwrap();
         assert_eq!(s.theme, "sakura");
-        assert_eq!(s.anilist_token, "tok");
+        assert_eq!(s.date_locale, "ja-JP");
         assert_eq!(
             s.recognition_delay_seconds,
             AppSettings::default().recognition_delay_seconds
@@ -476,25 +465,37 @@ mod tests {
         let dir = temp_dir("restore");
         let mut db = Database::open_in_memory().unwrap();
         db.set_backup_dir(dir.clone());
+        let account = |token: &str| crate::db::TrackerAccount {
+            tracker: "anilist".into(),
+            user_id: 1,
+            username: "neko".into(),
+            avatar_url: None,
+            access_token: token.into(),
+            refresh_token: None,
+            expires_at: None,
+        };
 
         let mut s = db.get_settings().unwrap();
         s.theme = "first".into();
-        s.anilist_token = "old-token".into();
         db.save_settings(&s).unwrap();
+        db.set_tracker_account(&account("old-token")).unwrap();
         db.set_config_json(TORRENT_FEEDS_KEY, &vec!["a"]).unwrap();
         let first = db.backup_settings_now().unwrap();
+        // A backup never holds the account
+        let text = std::fs::read_to_string(dir.join(&first)).unwrap();
+        assert!(!text.contains("old-token"));
 
         // Unchanged config writes nothing.
         assert!(db.backup_settings_if_changed(None).unwrap().is_none());
 
         s.theme = "second".into();
-        s.anilist_token = "new-token".into();
         db.save_settings(&s).unwrap();
+        db.set_tracker_account(&account("new-token")).unwrap();
         db.set_config_json(TORRENT_FEEDS_KEY, &vec!["a", "b"]).unwrap();
 
         let restored = db.restore_settings_backup(&first).unwrap();
         assert_eq!(restored.theme, "first");
-        assert_eq!(restored.anilist_token, "new-token");
+        assert_eq!(db.tracker_account().unwrap().unwrap().access_token, "new-token");
         let feeds: Vec<String> = db.get_config_json(TORRENT_FEEDS_KEY).unwrap().unwrap();
         assert_eq!(feeds, vec!["a"]);
         // The pre-restore state was snapshotted too.
@@ -504,6 +505,30 @@ mod tests {
             db.backup_settings_now().unwrap();
         }
         assert_eq!(backup_files(&dir).len(), MAX_BACKUPS);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restoring_an_old_backup_drops_its_account_fields() {
+        let dir = temp_dir("legacy-account");
+        let mut db = Database::open_in_memory().unwrap();
+        db.set_backup_dir(dir.clone());
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut values = Map::new();
+        values.insert(
+            MAIN_SETTINGS_KEY.into(),
+            serde_json::json!({ "theme": "old", "anilist_token": "stale", "anilist_user_id": 3 }),
+        );
+        let name = "settings-20200101-000000-000.json";
+        let snapshot = SettingsSnapshot { version: 1, created_at: 1, values };
+        std::fs::write(dir.join(name), serde_json::to_string(&snapshot).unwrap()).unwrap();
+
+        assert_eq!(db.restore_settings_backup(name).unwrap().theme, "old");
+        let conn = db.conn.lock().unwrap();
+        let raw = read_key(&conn, MAIN_SETTINGS_KEY).unwrap().unwrap();
+        drop(conn);
+        assert!(!raw.contains("stale"), "the backup's token came back: {}", raw);
+        assert!(db.tracker_account().unwrap().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

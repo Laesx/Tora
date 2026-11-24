@@ -37,6 +37,7 @@ import { AnimePosterCard, POSTER_CARD_FOOTER_HEIGHT } from "@/components/AnimePo
 import { SeasonAnimeMenu } from "@/components/SeasonAnimeMenu";
 import { useAnimeTitle } from "@/contexts/titles";
 import { useToast } from "@/contexts/toast";
+import { useTracker } from "@/contexts/tracker";
 import { useAnimeActions } from "@/contexts/animeActions";
 import { usePrefs } from "@/hooks/usePrefs";
 import { useScrollViewport, visibleRange } from "@/hooks/virtual";
@@ -194,6 +195,7 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
   showKeyHints,
 }) => {
   const showToast = useToast();
+  const tracker = useTracker();
   const { openAnime, openAnimeAlternate, openAnimePage, openQuickEdit, addAnime, addAnimeBatch } = useAnimeActions();
   const titleOf = useAnimeTitle();
   const nowSeason = useMemo(() => currentSeason(), []);
@@ -760,7 +762,7 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
             <button
               onClick={() => loadSeason(selected, true)}
               disabled={busy}
-              title="Refetch this season from AniList"
+              title={`Refetch this season from ${tracker.name}`}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-bg-primary border border-border-subtle hover:border-accent/60 text-xs font-medium text-text-primary transition disabled:opacity-60"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${busy ? "animate-spin" : ""}`} />
@@ -922,7 +924,7 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
             onClick={() => onGlobalSearch(trimmedFilter)}
             className="w-full text-left px-3 py-2 rounded-lg bg-bg-primary/60 border border-dashed border-border-subtle text-[11px] text-text-muted hover:text-text-primary hover:border-accent/60 transition"
           >
-            Press <kbd className="px-1 py-0.5 rounded bg-bg-tertiary font-mono text-[10px]">Enter</kbd> to search all of AniList for "{trimmedFilter}"
+            Press <kbd className="px-1 py-0.5 rounded bg-bg-tertiary font-mono text-[10px]">Enter</kbd> to search all of {tracker.name} for "{trimmedFilter}"
           </button>
         )}
 

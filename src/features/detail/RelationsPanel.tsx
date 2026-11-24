@@ -4,6 +4,7 @@ import { AnimeEntry, MediaRelation } from "@/lib/types";
 import { formatEnum, openExternal } from "@/lib/anime";
 import { useAnimeTitle } from "@/contexts/titles";
 import { useToast } from "@/contexts/toast";
+import { useTracker } from "@/contexts/tracker";
 import { MediaCardGrid } from "@/components/MediaCardGrid";
 
 /** Card order; relation types not listed here come last. */
@@ -56,9 +57,10 @@ export const hasVisibleRelations = (relations: MediaRelation[], bare = false) =>
 /** The manga / novel the anime was adapted from (the anime page shows them under Information). */
 export const sourceRelations = (relations: MediaRelation[]) => relations.filter(isShownSource);
 
-/** "Manga: Title" links to AniList for an anime's sources. */
+/** "Manga: Title" links to the tracker for an anime's sources. */
 export const SourceLinks: React.FC<{ sources: MediaRelation[] }> = ({ sources }) => {
   const showToast = useToast();
+  const tracker = useTracker();
   const titleOf = useAnimeTitle();
   return (
     <span className="flex flex-col gap-0.5 min-w-0">
@@ -66,8 +68,8 @@ export const SourceLinks: React.FC<{ sources: MediaRelation[] }> = ({ sources })
         <button
           key={`${r.relation_type}-${r.id}`}
           type="button"
-          onClick={() => openExternal(`https://anilist.co/manga/${r.id}`, showToast)}
-          title={`${relationLabel(r.relation_type)}: ${titleOf(r)} (open on AniList)`}
+          onClick={() => openExternal(tracker.link("manga", r.id), showToast)}
+          title={`${relationLabel(r.relation_type)}: ${titleOf(r)} (open on ${tracker.name})`}
           className="flex items-center gap-1.5 min-w-0 text-left text-accent hover:underline"
         >
           <BookOpen className="w-3 h-3 shrink-0" />
@@ -93,6 +95,7 @@ export const RelationsPanel: React.FC<{
   bare?: boolean;
 }> = ({ relations, listById, maxRows, bare = false }) => {
   const showToast = useToast();
+  const tracker = useTracker();
   const titleOf = useAnimeTitle();
 
   const anime = relations
@@ -124,8 +127,8 @@ export const RelationsPanel: React.FC<{
             <button
               key={`${r.relation_type}-${r.id}`}
               type="button"
-              onClick={() => openExternal(`https://anilist.co/manga/${r.id}`, showToast)}
-              title={`${titleOf(r)}: open on AniList`}
+              onClick={() => openExternal(tracker.link("manga", r.id), showToast)}
+              title={`${titleOf(r)}: open on ${tracker.name}`}
               className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] bg-bg-tertiary text-text-secondary border border-border-subtle hover:border-accent hover:text-text-primary transition max-w-full"
             >
               <BookOpen className="w-3 h-3 shrink-0 text-accent" />

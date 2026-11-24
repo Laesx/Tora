@@ -3,7 +3,7 @@ import { Clock, ExternalLink, Eye, EyeOff, FolderOpen, Magnet, Network, Play, Pl
 import { AnimeEntry, MediaMetadata } from "@/lib/types";
 import { formatCountdown } from "@/lib/format";
 import { getOptimizedCoverUrl } from "@/lib/covers";
-import { anilistAnimeUrl, anilistGenreUrl, anilistTagUrl, formatEnum, openAnimeFolder, openExternal } from "@/lib/anime";
+import { formatEnum, openAnimeFolder, openExternal } from "@/lib/anime";
 import { STATUS_INFO } from "@/lib/status";
 import { altTitles, useAnimeTitle, useTitleLanguage } from "@/contexts/titles";
 import { torrentSearchFor } from "@/lib/torrents";
@@ -14,6 +14,7 @@ import { formatScore, SCORE_SCALES } from "@/lib/scores";
 import { AiringDot } from "@/components/AiringDot";
 import { useToast } from "@/contexts/toast";
 import { useAnimeActions } from "@/contexts/animeActions";
+import { useTracker } from "@/contexts/tracker";
 
 const MAX_TAGS = 12;
 
@@ -35,7 +36,7 @@ export interface AnimeHeroSlots {
 
 /**
  * The anime page's header: a full-width band fading into the page (banner, else the cover blurred), the
- * cover overlapping it, titles (→ AniList), badges, progress, actions, genres and tags (spoilers hidden
+ * cover overlapping it, titles (→ the tracker), badges, progress, actions, genres and tags (spoilers hidden
  * until asked). Now Playing fills the slots with its playback state.
  */
 export const AnimeHero: React.FC<
@@ -50,6 +51,7 @@ export const AnimeHero: React.FC<
   const { searchTorrents, addAnime, openSaga } = useAnimeActions();
   const hasSaga = metadata?.relations?.some((r) => r.media_type === "ANIME") ?? false;
   const showToast = useToast();
+  const tracker = useTracker();
   const titleOf = useAnimeTitle();
   const titleLanguage = useTitleLanguage();
   const scoreFormat = useScoreFormat();
@@ -71,7 +73,7 @@ export const AnimeHero: React.FC<
   const bar = inList ? episodeBar(anime) : null;
   const totalLabel = episodeTotalLabel(anime);
   const finished = anime.episodes !== null && anime.user_progress >= anime.episodes;
-  const openOnAnilist = () => openExternal(anilistAnimeUrl(anime), showToast);
+  const openOnTracker = () => openExternal(tracker.animeUrl(anime), showToast);
 
   const add = async (nextStatus: "CURRENT" | "PLANNING") => {
     setAdding(true);
@@ -104,8 +106,8 @@ export const AnimeHero: React.FC<
 
       <div className="relative flex flex-col sm:flex-row gap-6 px-6 pt-28">
         <button
-          onClick={openOnAnilist}
-          title="Open on AniList"
+          onClick={openOnTracker}
+          title={`Open on ${tracker.name}`}
           className="group relative w-40 shrink-0 self-start rounded-xl overflow-hidden border border-border-subtle shadow-2xl"
         >
           <img
@@ -117,7 +119,7 @@ export const AnimeHero: React.FC<
           <AiringDot anime={anime} onCover className="absolute top-2 left-2" />
           <span className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition flex items-center justify-center text-white text-xs font-semibold gap-1.5">
             <ExternalLink className="w-4 h-4" />
-            AniList
+            {tracker.name}
           </span>
         </button>
 
@@ -140,7 +142,7 @@ export const AnimeHero: React.FC<
 
           <div>
             <h2 className="text-2xl font-extrabold text-text-primary leading-tight">
-              <button onClick={openOnAnilist} title="Open on AniList" className="text-left hover:text-accent transition">
+              <button onClick={openOnTracker} title={`Open on ${tracker.name}`} className="text-left hover:text-accent transition">
                 {title}
               </button>
             </h2>
@@ -225,7 +227,7 @@ export const AnimeHero: React.FC<
               {anime.genres.map((g) => (
                 <button
                   key={`g-${g}`}
-                  onClick={() => openExternal(anilistGenreUrl(g), showToast)}
+                  onClick={() => openExternal(tracker.link("genre", g), showToast)}
                   className="px-2 py-0.5 rounded-md bg-accent/15 text-accent hover:bg-accent/25 text-[11px] font-semibold transition cursor-pointer"
                 >
                   {g}
@@ -234,7 +236,7 @@ export const AnimeHero: React.FC<
               {tags.map((t) => (
                 <button
                   key={`t-${t.name}`}
-                  onClick={() => openExternal(anilistTagUrl(t.name), showToast)}
+                  onClick={() => openExternal(tracker.link("tag", t.name), showToast)}
                   title={t.rank !== null ? `${t.rank}% relevance` : undefined}
                   className={`${chipClass} ${t.is_spoiler ? "text-rose-300" : ""}`}
                 >

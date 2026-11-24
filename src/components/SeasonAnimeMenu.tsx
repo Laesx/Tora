@@ -17,12 +17,12 @@ import {
   Pencil,
 } from "lucide-react";
 import { AnimeEntry } from "@/lib/types";
-import { toraApi } from "@/lib/api";
 import { openExternal } from "@/lib/anime";
 import { LIST_STATUSES } from "@/lib/status";
 import { STATUS_INFO } from "@/lib/status";
 import { useAnimeTitle } from "@/contexts/titles";
 import { useToast } from "@/contexts/toast";
+import { useTracker } from "@/contexts/tracker";
 import { useAnimeActions } from "@/contexts/animeActions";
 
 interface SeasonAnimeMenuProps {
@@ -65,6 +65,7 @@ export const SeasonAnimeMenu: React.FC<SeasonAnimeMenuProps> = ({
 }) => {
   const { addAnimeBatch, batchDelete, batchUpdate, changeStatus, deleteAnime } = useAnimeActions();
   const showToast = useToast();
+  const tracker = useTracker();
   const titleOf = useAnimeTitle();
   const ref = useRef<HTMLDivElement | null>(null);
   const [position, setPosition] = useState({ top: anchor.y, left: anchor.x });
@@ -131,13 +132,9 @@ export const SeasonAnimeMenu: React.FC<SeasonAnimeMenuProps> = ({
     }
   };
 
-  const handleOpenAniList = async () => {
+  const handleOpenOnTracker = async () => {
     onClose();
-    try {
-      await toraApi.openExternalUrl(anime.site_url || `https://anilist.co/anime/${anime.id}`);
-    } catch (e: any) {
-      showToast(String(e), "error");
-    }
+    await openExternal(tracker.animeUrl(anime), showToast);
   };
 
   const status = listEntry ? STATUS_INFO[listEntry.user_status] : null;
@@ -355,7 +352,7 @@ export const SeasonAnimeMenu: React.FC<SeasonAnimeMenuProps> = ({
 
       <div className="border-t border-border-subtle my-0.5" />
 
-      {/* Details, AniList, Copy & Remove */}
+      {/* Details, the tracker's page, Copy & Remove */}
       <div className="py-1">
         <button onClick={run(() => onOpen(anime, "page"))} className={itemClass}>
           <span className="flex items-center gap-2">
@@ -370,10 +367,10 @@ export const SeasonAnimeMenu: React.FC<SeasonAnimeMenuProps> = ({
           </span>
         </button>
 
-        <button onClick={handleOpenAniList} className={itemClass}>
+        <button onClick={handleOpenOnTracker} className={itemClass}>
           <span className="flex items-center gap-2">
             <ExternalLink className="w-3.5 h-3.5 text-text-muted" />
-            <span>Open on AniList</span>
+            <span>Open on {tracker.name}</span>
           </span>
         </button>
 

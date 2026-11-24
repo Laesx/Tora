@@ -3,6 +3,7 @@ import { Download, History, RefreshCw, Trash2 } from "lucide-react";
 import { AppSettings } from "@/lib/types";
 import { importProgress, useAniListHistory } from "@/contexts/anilistHistory";
 import { formatLastSynced } from "@/lib/format";
+import { useTracker } from "@/contexts/tracker";
 
 /** Settings → Tracker: the AniList activity history import (off until the user imports). */
 export const AniListHistorySettings: React.FC<{ settings: AppSettings }> = ({ settings }) => {
@@ -11,7 +12,7 @@ export const AniListHistorySettings: React.FC<{ settings: AppSettings }> = ({ se
   const [refreshing, setRefreshing] = useState(false);
   const s = history.status;
   const phase = s?.status ?? "idle";
-  const signedIn = Boolean(settings.anilist_token?.trim());
+  const { signedIn } = useTracker();
 
   const statusLine =
     phase === "idle"

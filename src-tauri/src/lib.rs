@@ -5,14 +5,14 @@ pub mod discord;
 pub mod library;
 pub mod logging;
 pub mod memory;
-pub mod plugins;
+pub mod trackers;
 pub mod sync;
 pub mod torrents;
 pub mod tray;
 pub mod updates;
 
 use crate::db::{
-    AniListHistoryStatus, AnimeEntry, AppSettings, BatchAnimeUpdatePatch, CachedSeason,
+    AccountInfo, AniListHistoryStatus, AnimeEntry, AppSettings, BatchAnimeUpdatePatch, CachedSeason,
     CustomListChange, CustomListsState, Database, HistoryQuery, HistoryRow, HistorySource, HistoryTitleFilter,
     HistoryTitles, LibraryFolder,
     ListStats, LocalEpisodeFile, MonthCount, SettingsBackupInfo, TimelineEpisode, WatchHistoryEntry,
@@ -23,7 +23,9 @@ use crate::detection::anisthesia::{
 use crate::detection::anitomy::{parse_filename, AnitomyElements};
 use crate::discord::{DiscordPresence, PresenceAnime, PresenceInfo};
 use crate::library::scanner::{DriveStorageSummary, LibraryMonitorHandle, ScanSummary};
-use crate::plugins::{PluginManager, SeasonalAnime, TrackerPluginDescriptor, TrackerUserProfile};
+use crate::trackers::{
+    AccessTokens, AuthMethod, SeasonalAnime, TrackerDescriptor, TrackerRegistry, TrackerUserProfile,
+};
 use crate::sync::{
     AiringScheduleResult, ChangeSource, SeasonResult, SignOutOutcome, SyncEmitter, SyncStatus, SyncSummary,
     TrackerSyncService, UserStateChange,
@@ -47,9 +49,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// HTTP user agent for every request Tora makes (AniList, feeds, .torrent downloads, GitHub).
 pub const USER_AGENT: &str = concat!("Tora/", env!("CARGO_PKG_VERSION"), " (Anime Library Manager)");
 
+/// App identifier of debug builds (`pnpm tauri dev`): their data lives apart from the release build's.
+#[cfg(debug_assertions)]
+const DEV_IDENTIFIER: &str = "ToraDev";
+
 pub struct AppState {
     pub db: Arc<Database>,
-    pub plugins: Arc<PluginManager>,
+    pub trackers: Arc<TrackerRegistry>,
     pub monitor: LibraryMonitorHandle,
     pub active_session: Arc<Mutex<Option<DetectedMediaSession>>>,
     pub oauth_listener_active: Arc<AtomicBool>,
@@ -249,37 +255,43 @@ async fn delete_anime_entry(
     state.sync.delete_entries(vec![anime_id]).await
 }
 
+/// Every tracker Tora can sync with (name, sign-in method, link templates).
 #[tauri::command]
-async fn get_tracker_plugins(state: State<'_, AppState>) -> Result<Vec<TrackerPluginDescriptor>, String> {
-    Ok(state.plugins.list_descriptors())
+async fn get_trackers(state: State<'_, AppState>) -> Result<Vec<TrackerDescriptor>, String> {
+    Ok(state.trackers.descriptors())
+}
+
+/// What the app shows about tracking: the active tracker (the signed-in account's, else the list owner's)
+/// and the signed-in account, if any. Never a token.
+#[derive(Debug, Clone, Serialize)]
+pub struct TrackerState {
+    pub tracker: TrackerDescriptor,
+    pub account: Option<AccountInfo>,
 }
 
 #[tauri::command]
-async fn verify_tracker_account(
-    state: State<'_, AppState>,
-    plugin_id: String,
-    username: String,
-    token: Option<String>,
-) -> Result<TrackerUserProfile, String> {
-    let plugin = state
-        .plugins
-        .get(&plugin_id)
-        .ok_or_else(|| "Tracker plugin not found".to_string())?;
-    let token = token
-        .filter(|t| !t.trim().is_empty())
-        .ok_or_else(|| "AniList sign-in requires an OAuth access token".to_string())?;
-    let profile = plugin.verify_account(&username, Some(&token)).await?;
+async fn get_tracker_state(state: State<'_, AppState>) -> Result<TrackerState, String> {
+    let db = state.db.clone();
+    let (tracker_id, account) = tokio::task::spawn_blocking(move || {
+        Ok::<_, String>((db.active_tracker_id()?, db.tracker_account()?))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let tracker = state
+        .trackers
+        .get(&tracker_id)
+        .ok_or_else(|| format!("Unknown tracker `{}`", tracker_id))?
+        .descriptor();
+    Ok(TrackerState {
+        tracker,
+        account: account.map(|a| a.info()),
+    })
+}
 
-    // Same owner: just refreshes the stored profile. A different account wipes the previous one's list.
-    let outcome = state.sync.sign_in(&token, &profile).await?;
-    if outcome.account_switched {
-        let sync = state.sync.clone();
-        tauri::async_runtime::spawn(async move {
-            let _ = sync.pull("post_auth").await;
-        });
-    }
-
-    Ok(profile)
+/// Fetch the signed-in account's name and avatar again (the list and tokens stay as they are).
+#[tauri::command]
+async fn refresh_tracker_profile(state: State<'_, AppState>) -> Result<Option<AccountInfo>, String> {
+    state.sync.refresh_profile().await
 }
 
 #[tauri::command]
@@ -302,17 +314,7 @@ async fn search_remote_anime(
     season: Option<String>,
     year: Option<u32>,
 ) -> Result<Vec<AnimeEntry>, String> {
-    let db = state.db.clone();
-    let settings = tokio::task::spawn_blocking(move || db.get_settings())
-        .await
-        .map_err(|e| e.to_string())??;
-    let plugin = state
-        .plugins
-        .get(&settings.active_tracker_plugin)
-        .ok_or_else(|| "Tracker plugin not found".to_string())?;
-    plugin
-        .search_anime(&query, season.as_deref(), year)
-        .await
+    state.sync.search_anime(&query, season.as_deref(), year).await
 }
 
 #[tauri::command]
@@ -1421,7 +1423,7 @@ async fn get_saga(
 async fn load_more_characters(
     state: State<'_, AppState>,
     anilist_id: i64,
-) -> Result<crate::plugins::MediaDetails, String> {
+) -> Result<crate::trackers::MediaDetails, String> {
     state.sync.load_more_characters(anilist_id).await
 }
 
@@ -1851,8 +1853,7 @@ fn extract_query_param(query: &str, key: &str) -> Option<String> {
 async fn handle_oauth_http_stream(
     mut stream: tokio::net::TcpStream,
     app_handle: tauri::AppHandle,
-    db: Arc<Database>,
-    plugins: Arc<PluginManager>,
+    trackers: Arc<TrackerRegistry>,
     sync: Arc<TrackerSyncService>,
 ) {
     let mut buf = vec![0u8; 8192];
@@ -1884,26 +1885,25 @@ async fn handle_oauth_http_stream(
         None => (full_path, ""),
     };
 
+    // AniList's browser-token flow: the callback page below reads the token from the URL fragment and
+    // sends it here
     if path.starts_with("/AniSync/token") || query.contains("access_token=") {
         if let Some(token) = extract_query_param(query, "access_token") {
-            let result: Result<(AppSettings, TrackerUserProfile), String> = async {
-                let plugin = plugins
+            let result: Result<(AccountInfo, TrackerUserProfile), String> = async {
+                let tracker = trackers
                     .get("anilist")
-                    .ok_or_else(|| "AniList plugin not found".to_string())?;
-                let profile = plugin.verify_account("", Some(&token)).await?;
+                    .ok_or_else(|| "AniList is not available".to_string())?;
+                let profile = tracker.auth().profile(&token).await?;
 
                 // Keeps the list for the same account; a different account wipes the previous one's list.
-                sync.sign_in(&token, &profile).await?;
-                let db = db.clone();
-                let settings = tokio::task::spawn_blocking(move || db.get_settings())
-                    .await
-                    .map_err(|e| e.to_string())??;
-                Ok((settings, profile))
+                let outcome = sync.sign_in("anilist", AccessTokens::access_only(&token), &profile).await?;
+                let account = outcome.account.ok_or_else(|| "Sign-in stored no account".to_string())?;
+                Ok((account, profile))
             }
             .await;
 
             match result {
-                Ok((saved_settings, profile)) => {
+                Ok((account, profile)) => {
                     let body = serde_json::json!({
                         "ok": true,
                         "username": profile.username,
@@ -1918,7 +1918,7 @@ async fn handle_oauth_http_stream(
                     let _ = stream.write_all(resp.as_bytes()).await;
                     let _ = stream.shutdown().await;
 
-                    let _ = app_handle.emit("tracker-auth-updated", &saved_settings);
+                    let _ = app_handle.emit("tracker-auth-updated", &account);
                     if let Some(win) = app_handle.get_webview_window("main") {
                         let _ = win.unminimize();
                         let _ = win.set_focus();
@@ -1963,8 +1963,7 @@ async fn handle_oauth_http_stream(
 
 fn ensure_oauth_callback_listener(
     app_handle: tauri::AppHandle,
-    db: Arc<Database>,
-    plugins: Arc<PluginManager>,
+    trackers: Arc<TrackerRegistry>,
     sync: Arc<TrackerSyncService>,
     active_flag: Arc<AtomicBool>,
 ) {
@@ -1980,11 +1979,10 @@ fn ensure_oauth_callback_listener(
             Ok(listener) => {
                 while let Ok((stream, _addr)) = listener.accept().await {
                     let app_c = app_handle.clone();
-                    let db_c = db.clone();
-                    let plugins_c = plugins.clone();
+                    let trackers_c = trackers.clone();
                     let sync_c = sync.clone();
                     tokio::spawn(async move {
-                        handle_oauth_http_stream(stream, app_c, db_c, plugins_c, sync_c).await;
+                        handle_oauth_http_stream(stream, app_c, trackers_c, sync_c).await;
                     });
                 }
                 active_flag.store(false, Ordering::SeqCst);
@@ -1996,23 +1994,30 @@ fn ensure_oauth_callback_listener(
     });
 }
 
+/// Start signing in to `tracker` the way its descriptor says. Browser flows open the tracker's page and
+/// finish on the local listener (`tracker-auth-updated` once the account is stored).
 #[tauri::command]
-async fn start_anilist_oauth(
+async fn start_tracker_sign_in(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
-) -> Result<String, String> {
-    ensure_oauth_callback_listener(
-        app.clone(),
-        state.db.clone(),
-        state.plugins.clone(),
-        state.sync.clone(),
-        state.oauth_listener_active.clone(),
-    );
-
-    let authorize_url =
-        "https://anilist.co/api/v2/oauth/authorize?client_id=14954&response_type=token";
-    open_external_url(authorize_url.to_string()).await?;
-    Ok(authorize_url.to_string())
+    tracker: String,
+) -> Result<(), String> {
+    let descriptor = state
+        .trackers
+        .get(&tracker)
+        .ok_or_else(|| format!("Unknown tracker `{}`", tracker))?
+        .descriptor();
+    match descriptor.auth {
+        AuthMethod::BrowserToken { authorize_url } => {
+            ensure_oauth_callback_listener(
+                app.clone(),
+                state.trackers.clone(),
+                state.sync.clone(),
+                state.oauth_listener_active.clone(),
+            );
+            open_external_url(authorize_url).await
+        }
+    }
 }
 
 fn start_library_monitor(
@@ -2054,11 +2059,26 @@ fn disable_browser_accelerator_keys(app: &tauri::App) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let context = tauri::generate_context!();
+    #[allow(unused_mut)]
+    let mut context = tauri::generate_context!();
+    // Debug builds keep their own data (`%APPDATA%\ToraDev`, `%LOCALAPPDATA%\ToraDev`): Tauri derives
+    // every data folder, the WebView2 profile and the single-instance lock from the identifier, so a dev
+    // build never migrates or rewrites the release build's library and both can run side by side
+    #[cfg(debug_assertions)]
+    {
+        let config = context.config_mut();
+        config.identifier = DEV_IDENTIFIER.to_string();
+        for window in &mut config.app.windows {
+            window.title = format!("{} (dev)", window.title);
+        }
+    }
     let log_dir = logging::log_dir(&context.config().identifier);
     logging::install_panic_hook();
-    // Before the builder: Tauri creates the main window (and its WebView2 profile) before `setup`
-    data_migration::migrate_legacy_data_dirs(&context.config().identifier);
+    // Before the builder: Tauri creates the main window (and its WebView2 profile) before `setup`.
+    // Release builds only: the legacy folders belong to the installed app
+    if !cfg!(debug_assertions) {
+        data_migration::migrate_legacy_data_dirs(&context.config().identifier);
+    }
 
     tauri::Builder::default()
         // First (the plugin requires it): a second launch focuses this instance and exits, so a window
@@ -2106,7 +2126,7 @@ pub fn run() {
             let startup_settings = db.get_settings().unwrap_or_default();
             let check_updates = startup_settings.check_updates_on_startup;
             let torrent_cache = Arc::new(TorrentCache::new(app_data.join("torrents")));
-            let plugins = Arc::new(PluginManager::new());
+            let trackers = Arc::new(TrackerRegistry::new());
 
             let monitor = start_library_monitor(app.handle().clone(), db.clone());
             let oauth_listener_active = Arc::new(AtomicBool::new(false));
@@ -2121,15 +2141,14 @@ pub fn run() {
             });
             let sync = Arc::new(TrackerSyncService::new(
                 db.clone(),
-                plugins.clone(),
+                trackers.clone(),
                 emit,
                 active_session.clone(),
             ));
 
             ensure_oauth_callback_listener(
                 app.handle().clone(),
-                db.clone(),
-                plugins.clone(),
+                trackers.clone(),
                 sync.clone(),
                 oauth_listener_active.clone(),
             );
@@ -2156,7 +2175,7 @@ pub fn run() {
 
             app.manage(AppState {
                 db,
-                plugins,
+                trackers,
                 monitor,
                 active_session,
                 oauth_listener_active,
@@ -2243,8 +2262,9 @@ pub fn run() {
             batch_delete_anime_entries,
             add_or_upsert_anime,
             delete_anime_entry,
-            get_tracker_plugins,
-            verify_tracker_account,
+            get_trackers,
+            get_tracker_state,
+            refresh_tracker_profile,
             sync_tracker_list,
             get_sync_status,
             search_remote_anime,
@@ -2310,7 +2330,7 @@ pub fn run() {
             save_app_settings,
             open_external_url,
             sign_out_tracker,
-            start_anilist_oauth,
+            start_tracker_sign_in,
         ])
         .run(context)
         .expect("error while running Tora application");

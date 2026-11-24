@@ -1,13 +1,15 @@
 import React from "react";
 import { LogOut } from "lucide-react";
+import { useTracker } from "@/contexts/tracker";
 
 interface SignOutModalProps {
-  username: string | null | undefined;
   onCancel: () => void;
   onConfirm: () => void;
 }
 
-export const SignOutModal: React.FC<SignOutModalProps> = ({ username, onCancel, onConfirm }) => (
+export const SignOutModal: React.FC<SignOutModalProps> = ({ onCancel, onConfirm }) => {
+  const { name, account } = useTracker();
+  return (
   <div
     className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4"
     onClick={onCancel}
@@ -21,13 +23,13 @@ export const SignOutModal: React.FC<SignOutModalProps> = ({ username, onCancel, 
           <LogOut className="w-5 h-5" />
         </div>
         <div>
-          <h3 className="text-sm font-bold text-text-primary">Sign out of AniList?</h3>
-          <p className="text-[11px] text-text-muted">@{username || "AniList Account"}</p>
+          <h3 className="text-sm font-bold text-text-primary">Sign out of {name}?</h3>
+          <p className="text-[11px] text-text-muted">@{account?.username || `${name} account`}</p>
         </div>
       </div>
 
       <p className="text-xs text-text-secondary leading-relaxed">
-        Are you sure you want to sign out? Your local anime library and settings will remain intact, but automatic AniList synchronization will stop until you sign in again.
+        Are you sure you want to sign out? Your local anime library and settings will remain intact, but automatic {name} synchronization will stop until you sign in again.
       </p>
 
       <div className="flex items-center justify-end gap-2.5 pt-1">
@@ -46,4 +48,5 @@ export const SignOutModal: React.FC<SignOutModalProps> = ({ username, onCancel, 
       </div>
     </div>
   </div>
-);
+  );
+};

@@ -1,7 +1,7 @@
 use crate::detection::anisthesia::{default_players, PlayerDefinition};
 use crate::detection::anitomy::{extract_effective_season, normalize_anime_title, AnitomyElements};
 use crate::detection::relations::{relations_db, EpisodeRedirection};
-use crate::plugins::{AiringScheduleItem, MediaDetails, RemoteListMembership, SeasonalAnime};
+use crate::trackers::{AiringScheduleItem, MediaDetails, RemoteListMembership, SeasonalAnime};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use once_cell::sync::Lazy;
@@ -11,9 +11,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::Duration;
 
+mod accounts;
 mod activity;
 mod settings;
 
+pub use accounts::{AccountInfo, ListOwner, TrackerAccount};
 pub use activity::{
     AniListHistoryState, AniListHistoryStatus, HistoryCursor, HistoryQuery, HistoryRow, HistorySource,
     HistoryTitleFilter, HistoryTitles, ImportStatus, MonthCount, TimelineEpisode,
@@ -78,9 +80,10 @@ pub struct AnimeEntry {
     /// `true` while a local change has not been confirmed by the tracker yet.
     #[serde(default)]
     pub sync_pending: bool,
-    /// AniList `MediaList.id` of this entry (needed for deletes).
-    #[serde(default)]
-    pub anilist_list_entry_id: Option<i64>,
+    /// The tracker's id of this list entry (AniList `MediaList.id`), needed for deletes. Stored in the
+    /// `anilist_list_entry_id` column; cached payloads written before the rename use that name too.
+    #[serde(default, alias = "anilist_list_entry_id")]
+    pub remote_entry_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -309,11 +312,7 @@ pub struct AppSettings {
     pub theme: String,
     pub accent_color: String,
     pub view_mode: String, // "grid" | "compact" | "table"
-    pub active_tracker_plugin: String,
-    pub anilist_username: String,
-    pub anilist_token: String,
-    pub anilist_user_id: Option<i64>,
-    pub anilist_avatar: Option<String>,
+    // The tracker account is not a setting: see `db::accounts` (`TrackerAccount`)
     pub recognition_enabled: bool,
     /// Only files in the library (under an enabled library folder, or an indexed file's name when the
     /// player gives no path) start a playback session; anything else counts as nothing playing.
@@ -437,11 +436,6 @@ impl Default for AppSettings {
             theme: "tora-midnight".into(),
             accent_color: "#f59e0b".into(),
             view_mode: "grid".into(),
-            active_tracker_plugin: "anilist".into(),
-            anilist_username: String::new(),
-            anilist_token: String::new(),
-            anilist_user_id: None,
-            anilist_avatar: None,
             recognition_enabled: true,
             recognition_library_only: false,
             now_playing_focus_matched: true,
@@ -1561,11 +1555,8 @@ const SEED_MARKER_KEY: &str = "seeded_kusuriya_s3";
 /// Flat torrent rules from before filters / priority tiers; converted once by
 /// `migrate_legacy_torrent_rules`, then dropped.
 const LEGACY_TORRENT_RULES_TABLE: &str = "torrent_rules";
-/// `app_settings` key holding the AniList user id the local list belongs to. Deliberately not part of
-/// `AppSettings`, so a frontend settings save can never overwrite it.
-const LIST_OWNER_KEY: &str = "list_owner_user_id";
-/// `app_settings` key holding the list owner's AniList score format, kept out of `AppSettings` for the
-/// same reason. Written by pulls only.
+/// `app_settings` key holding the list owner's score format (`accounts` holds the owner itself), kept out
+/// of `AppSettings` so a frontend settings save can never overwrite it. Written by pulls only.
 const SCORE_FORMAT_KEY: &str = "tracker_score_format";
 /// Shown until the first pull tells otherwise (scores are stored on this scale anyway).
 pub const DEFAULT_SCORE_FORMAT: &str = "POINT_100";
@@ -1694,7 +1685,7 @@ fn row_to_entry(row: &rusqlite::Row<'_>, avail: Vec<u32>) -> rusqlite::Result<An
         user_started_at: row.get(32)?,
         user_completed_at: row.get(33)?,
         sync_pending: row.get::<_, i64>(34)? != 0,
-        anilist_list_entry_id: row.get(35)?,
+        remote_entry_id: row.get(35)?,
         start_date: row.get(36)?,
         end_date: row.get(37)?,
         // NULL = legacy row not split from AniList's synonyms yet (backfilled by the next pull)
@@ -1790,7 +1781,7 @@ fn write_entry_tx(conn: &Connection, entry: &AnimeEntry, mode: UserFieldsMode) -
         entry.custom_folder,
         entry.updated_at,
         entry.sync_pending as i64,
-        entry.anilist_list_entry_id,
+        entry.remote_entry_id,
         entry.start_date,
         entry.end_date,
         serde_json::to_string(&entry.custom_synonyms).unwrap_or_else(|_| "[]".into()),
@@ -2264,7 +2255,7 @@ fn run_data_migrations(conn: &mut Connection) -> Result<(), String> {
     let has_owner: bool = tx
         .query_row(
             "SELECT 1 FROM app_settings WHERE key = ?1",
-            params![LIST_OWNER_KEY],
+            params![accounts::LIST_OWNER_KEY],
             |_| Ok(()),
         )
         .optional()
@@ -2287,11 +2278,13 @@ fn run_data_migrations(conn: &mut Connection) -> Result<(), String> {
         if let (Some(user_id), true) = (signed_in_user, has_entries) {
             tx.execute(
                 "INSERT INTO app_settings (key, value_json) VALUES (?1, ?2)",
-                params![LIST_OWNER_KEY, user_id.to_string()],
+                params![accounts::LIST_OWNER_KEY, user_id.to_string()],
             )
             .map_err(|e| e.to_string())?;
         }
     }
+    // After the owner migration above, which reads `anilist_user_id` from the settings
+    accounts::migrate_account_out_of_settings(&tx)?;
 
     tx.commit().map_err(|e| e.to_string())
 }
@@ -2368,7 +2361,7 @@ struct LocalMergeRow {
     cover_color: Option<String>,
     next_airing_episode: Option<u32>,
     next_airing_at: Option<i64>,
-    anilist_list_entry_id: Option<i64>,
+    remote_entry_id: Option<i64>,
     start_date: Option<String>,
     end_date: Option<String>,
     /// NULL until the legacy synonyms were split (see [`backfill_custom_synonyms`]).
@@ -2941,7 +2934,7 @@ impl Database {
                             cover_color: r.get(23)?,
                             next_airing_episode: r.get(24)?,
                             next_airing_at: r.get(25)?,
-                            anilist_list_entry_id: r.get(26)?,
+                            remote_entry_id: r.get(26)?,
                             start_date: r.get(27)?,
                             end_date: r.get(28)?,
                             custom_synonyms_json: r.get(29)?,
@@ -3034,7 +3027,7 @@ impl Database {
                 remote.cover_image.as_str()
             };
             let cover_color = remote.cover_color.as_ref().or(local.cover_color.as_ref());
-            let list_entry_id = remote.anilist_list_entry_id.or(local.anilist_list_entry_id);
+            let list_entry_id = remote.remote_entry_id.or(local.remote_entry_id);
             let meta_changed = titles_changed
                 || local.format != remote.format
                 || local.airing_status != remote.airing_status
@@ -3046,7 +3039,7 @@ impl Database {
                 || local.cover_color.as_ref() != cover_color
                 || local.next_airing_episode != remote.next_airing_episode
                 || local.next_airing_at != remote.next_airing_at
-                || local.anilist_list_entry_id != list_entry_id
+                || local.remote_entry_id != list_entry_id
                 || local.start_date != remote.start_date
                 || local.end_date != remote.end_date;
 
@@ -4106,20 +4099,6 @@ impl Database {
         Ok(changed > 0)
     }
 
-    /// AniList user id the local list belongs to (`None` before the first sign-in).
-    pub fn list_owner(&self) -> Result<Option<i64>, String> {
-        let conn = self.reader()?;
-        let raw: Option<String> = conn
-            .query_row(
-                "SELECT value_json FROM app_settings WHERE key = ?1",
-                params![LIST_OWNER_KEY],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(|e| e.to_string())?;
-        Ok(raw.and_then(|v| v.trim().parse::<i64>().ok()))
-    }
-
     /// The list owner's score format (`POINT_100` until a pull stored one).
     pub fn score_format(&self) -> Result<String, String> {
         let conn = self.reader()?;
@@ -4205,23 +4184,13 @@ impl Database {
         tx.commit().map_err(|e| e.to_string())
     }
 
-    pub fn set_list_owner(&self, user_id: i64) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "INSERT OR REPLACE INTO app_settings (key, value_json) VALUES (?1, ?2)",
-            params![LIST_OWNER_KEY, user_id.to_string()],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
-    /// A different AniList account signed in: drop everything that belonged to the previous one in one
+    /// A different account signed in: drop everything that belonged to the previous one in one
     /// transaction (list entries with their custom folders, queued pushes and deletions, watch history,
     /// title aliases) and make `new_owner` the owner. Machine data stays: library folders and the indexed
     /// files (only unmatched), settings, torrent config (feeds, filters, priority, fansub overrides) and the public
     /// metadata caches. Imported AniList activity and its import state go with the account.
     /// Returns how many unsent changes of the previous account were discarded.
-    pub fn reset_for_account_switch(&self, new_owner: i64) -> Result<usize, String> {
+    pub fn reset_for_account_switch(&self, new_owner: &ListOwner) -> Result<usize, String> {
         let discarded = {
             let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
             let tx = conn.transaction().map_err(|e| e.to_string())?;
@@ -4245,11 +4214,7 @@ impl Database {
             )
             .map_err(|e| e.to_string())?;
             activity::clear_tx(&tx)?;
-            tx.execute(
-                "INSERT OR REPLACE INTO app_settings (key, value_json) VALUES (?1, ?2)",
-                params![LIST_OWNER_KEY, new_owner.to_string()],
-            )
-            .map_err(|e| e.to_string())?;
+            accounts::write_owner(&tx, new_owner)?;
             // The new account's format arrives with its first pull
             tx.execute("DELETE FROM app_settings WHERE key = ?1", params![SCORE_FORMAT_KEY])
                 .map_err(|e| e.to_string())?;
@@ -4845,7 +4810,7 @@ pub(crate) fn test_entry(id: i64, title: &str) -> AnimeEntry {
         local_episode_count: 0,
         available_episodes: vec![],
         sync_pending: false,
-        anilist_list_entry_id: None,
+        remote_entry_id: None,
         custom_synonyms: vec![],
         start_date: None,
         end_date: None,
@@ -4894,7 +4859,7 @@ pub(crate) fn test_fixture_entries() -> Vec<AnimeEntry> {
         local_episode_count: 0,
         available_episodes: vec![],
         sync_pending: false,
-        anilist_list_entry_id: None,
+        remote_entry_id: None,
         custom_synonyms: vec![],
         start_date: None,
         end_date: None,
@@ -4938,7 +4903,7 @@ pub(crate) fn test_fixture_entries() -> Vec<AnimeEntry> {
             local_episode_count: 0,
             available_episodes: vec![],
         sync_pending: false,
-        anilist_list_entry_id: None,
+        remote_entry_id: None,
         custom_synonyms: vec![],
         start_date: None,
         end_date: None,
@@ -4981,7 +4946,7 @@ pub(crate) fn test_fixture_entries() -> Vec<AnimeEntry> {
             local_episode_count: 0,
             available_episodes: vec![],
         sync_pending: false,
-        anilist_list_entry_id: None,
+        remote_entry_id: None,
         custom_synonyms: vec![],
         start_date: None,
         end_date: None,
@@ -5024,7 +4989,7 @@ pub(crate) fn test_fixture_entries() -> Vec<AnimeEntry> {
             local_episode_count: 0,
             available_episodes: vec![],
         sync_pending: false,
-        anilist_list_entry_id: None,
+        remote_entry_id: None,
         custom_synonyms: vec![],
         start_date: None,
         end_date: None,
@@ -5067,7 +5032,7 @@ pub(crate) fn test_fixture_entries() -> Vec<AnimeEntry> {
             local_episode_count: 0,
             available_episodes: vec![],
         sync_pending: false,
-        anilist_list_entry_id: None,
+        remote_entry_id: None,
         custom_synonyms: vec![],
         start_date: None,
         end_date: None,
@@ -5110,7 +5075,7 @@ pub(crate) fn test_fixture_entries() -> Vec<AnimeEntry> {
             local_episode_count: 0,
             available_episodes: vec![],
         sync_pending: false,
-        anilist_list_entry_id: None,
+        remote_entry_id: None,
         custom_synonyms: vec![],
         start_date: None,
         end_date: None,
@@ -5153,7 +5118,7 @@ pub(crate) fn test_fixture_entries() -> Vec<AnimeEntry> {
             local_episode_count: 0,
             available_episodes: vec![],
         sync_pending: false,
-        anilist_list_entry_id: None,
+        remote_entry_id: None,
         custom_synonyms: vec![],
         start_date: None,
         end_date: None,
@@ -5196,7 +5161,7 @@ pub(crate) fn test_fixture_entries() -> Vec<AnimeEntry> {
             local_episode_count: 0,
             available_episodes: vec![],
         sync_pending: false,
-        anilist_list_entry_id: None,
+        remote_entry_id: None,
         custom_synonyms: vec![],
         start_date: None,
         end_date: None,
@@ -5529,7 +5494,7 @@ mod tests {
         ra.user_status = "CURRENT".into();
         ra.user_progress = 7;
         ra.updated_at = 200;
-        ra.anilist_list_entry_id = Some(9001);
+        ra.remote_entry_id = Some(9001);
         ra.synonyms = vec!["Remote Alpha".into()];
         let mut rb = test_entry(2, "Beta");
         rb.user_status = "CURRENT".into();
@@ -5573,7 +5538,7 @@ mod tests {
         assert_eq!(a.custom_folder.as_deref(), Some("D:/Anime/Alpha"));
         assert!(a.synonyms.iter().any(|s| s == "Local Alpha"));
         assert!(a.synonyms.iter().any(|s| s == "Remote Alpha"));
-        assert_eq!(a.anilist_list_entry_id, Some(9001));
+        assert_eq!(a.remote_entry_id, Some(9001));
         // Local newer -> local kept
         let b = db.get_anime_entry_by_id(2).unwrap();
         assert_eq!(b.user_progress, 5);
@@ -5734,10 +5699,10 @@ mod tests {
     fn settings_saved_before_title_language_still_load() {
         let mut json = serde_json::to_value(AppSettings::default()).unwrap();
         json.as_object_mut().unwrap().remove("title_language");
-        json["anilist_token"] = "tok".into();
+        json["theme"] = "sakura".into();
         let s: AppSettings = serde_json::from_value(json).unwrap();
         assert_eq!(s.title_language, "romaji");
-        assert_eq!(s.anilist_token, "tok");
+        assert_eq!(s.theme, "sakura");
     }
 
     #[test]
@@ -5798,7 +5763,7 @@ mod tests {
         a.synonyms = vec!["Alpha Syn".into()];
         a.cover_image = "https://img/a.jpg".into();
         a.cover_color = Some("#fff".into());
-        a.anilist_list_entry_id = Some(11);
+        a.remote_entry_id = Some(11);
         a.custom_folder = Some("D:/Anime/Alpha".into());
         let mut b = test_entry(2, "Beta");
         b.next_airing_episode = Some(5);
@@ -6100,7 +6065,7 @@ mod tests {
         );
         db.merge_remote_custom_lists(&names, &remote).unwrap();
         assert_eq!(db.get_custom_lists().unwrap().members.len(), 1);
-        db.reset_for_account_switch(7).unwrap();
+        db.reset_for_account_switch(&crate::db::ListOwner::new("anilist", 7)).unwrap();
         assert_eq!(db.get_custom_lists().unwrap(), CustomListsState::default());
     }
 
@@ -6114,7 +6079,7 @@ mod tests {
         };
         let details = MediaDetails {
             characters_page: 1,
-            staff: vec![crate::plugins::StaffRole {
+            staff: vec![crate::trackers::StaffRole {
                 id: 1,
                 name: "Director".into(),
                 ..Default::default()
@@ -6141,7 +6106,7 @@ mod tests {
         let prefs = db.release_preferences().unwrap();
         assert_eq!(prefs.len(), 1);
         assert_eq!(prefs[&5], "d:/anime/show|*");
-        db.reset_for_account_switch(7).unwrap();
+        db.reset_for_account_switch(&crate::db::ListOwner::new("anilist", 7)).unwrap();
         assert_eq!(db.release_preferences().unwrap().len(), 1);
     }
 
@@ -6155,7 +6120,7 @@ mod tests {
         db.set_not_interested(&[5, 42], false).unwrap();
         assert_eq!(db.not_interested_ids().unwrap(), vec![3, 9]);
 
-        db.reset_for_account_switch(7).unwrap();
+        db.reset_for_account_switch(&crate::db::ListOwner::new("anilist", 7)).unwrap();
         assert!(db.not_interested_ids().unwrap().is_empty());
     }
 
@@ -6163,7 +6128,7 @@ mod tests {
     fn test_tombstones_and_finish_push_guard() {
         let db = Database::open_in_memory().expect("db");
         let mut a = test_entry(1, "Alpha");
-        a.anilist_list_entry_id = Some(77);
+        a.remote_entry_id = Some(77);
         db.upsert_anime_entries_batch(&[a, test_entry(2, "Beta")])
             .unwrap();
         {
@@ -6185,7 +6150,7 @@ mod tests {
         assert!(!db.finish_push(&pushed, 12345, 555, None).unwrap());
         let b = db.get_anime_entry_by_id(2).unwrap();
         assert!(b.sync_pending);
-        assert_eq!(b.anilist_list_entry_id, Some(555));
+        assert_eq!(b.remote_entry_id, Some(555));
         assert!(db.finish_push(&b, 12345, 555, None).unwrap());
         let b = db.get_anime_entry_by_id(2).unwrap();
         assert!(!b.sync_pending);
@@ -6367,10 +6332,17 @@ mod tests {
     fn test_list_owner_migration_adopts_the_signed_in_account() {
         let db = Database::open_in_memory().unwrap();
         assert_eq!(db.list_owner().unwrap(), None);
-        let mut s = db.get_settings().unwrap();
-        s.anilist_user_id = Some(42);
-        db.save_settings(&s).unwrap();
-        let migrate = |db: &Database| run_data_migrations(&mut db.conn.lock().unwrap()).unwrap();
+        // Settings as stored before the account left them (each run moves the old fields out, so they are
+        // stored again before every run)
+        let migrate = |db: &Database| {
+            let mut conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO app_settings (key, value_json) VALUES ('main', ?1)",
+                params![r#"{"anilist_user_id":42}"#],
+            )
+            .unwrap();
+            run_data_migrations(&mut conn).unwrap();
+        };
 
         // An empty list has no owner yet
         migrate(&db);
@@ -6378,12 +6350,12 @@ mod tests {
 
         db.upsert_anime_entry(&test_entry(1, "Alpha")).unwrap();
         migrate(&db);
-        assert_eq!(db.list_owner().unwrap(), Some(42));
+        assert_eq!(db.list_owner().unwrap(), Some(crate::db::ListOwner::new("anilist", 42)));
 
         // An existing owner is never overwritten
-        db.set_list_owner(7).unwrap();
+        db.set_list_owner(&crate::db::ListOwner::new("anilist", 7)).unwrap();
         migrate(&db);
-        assert_eq!(db.list_owner().unwrap(), Some(7));
+        assert_eq!(db.list_owner().unwrap(), Some(crate::db::ListOwner::new("anilist", 7)));
     }
 
     #[test]

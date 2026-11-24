@@ -1,5 +1,6 @@
 import { invoke as tauriInvoke, InvokeArgs } from "@tauri-apps/api/core";
 import {
+  AccountInfo,
   AiringScheduleResult,
   AnimeEntry,
   AnimePageData,
@@ -38,8 +39,8 @@ import {
   TorrentBoard,
   TorrentFeed,
   TorrentFilter,
-  TrackerPluginDescriptor,
-  TrackerUserProfile,
+  TrackerDescriptor,
+  TrackerState,
   WatchHistoryEntry,
   WatchStats,
   AniListHistoryStatus,
@@ -144,21 +145,18 @@ export const toraApi = {
   deleteAnimeEntry: (animeId: number) =>
     invoke<void>("delete_anime_entry", { animeId }),
 
-  getTrackerPlugins: () =>
-    invoke<TrackerPluginDescriptor[]>("get_tracker_plugins"),
+  getTrackers: () => invoke<TrackerDescriptor[]>("get_trackers"),
 
-  verifyTrackerAccount: (
-    pluginId: string,
-    username: string,
-    token?: string | null
-  ) =>
-    invoke<TrackerUserProfile>("verify_tracker_account", {
-      pluginId,
-      username,
-      token: token || null,
-    }),
+  /** The active tracker and the signed-in account (never a token) */
+  getTrackerState: () => invoke<TrackerState>("get_tracker_state"),
 
-  // Flushes queued pushes/deletes, then pulls the signed-in user's AniList list
+  /** Fetches the signed-in account's name and avatar again */
+  refreshTrackerProfile: () => invoke<AccountInfo | null>("refresh_tracker_profile"),
+
+  /** Starts signing in to `tracker`; browser flows finish with `tracker-auth-updated` */
+  startTrackerSignIn: (tracker: string) => invoke<void>("start_tracker_sign_in", { tracker }),
+
+  // Flushes queued pushes/deletes, then pulls the signed-in user's list from the tracker
   syncTrackerList: () => invoke<SyncSummary>("sync_tracker_list"),
 
   getSyncStatus: () => invoke<SyncStatus>("get_sync_status"),
@@ -346,7 +344,6 @@ export const toraApi = {
   saveAppSettings: (settings: AppSettings) =>
     invoke<AppSettings>("save_app_settings", { settings }),
 
-  startAnilistOauth: () => invoke<string>("start_anilist_oauth"),
 
   signOutTracker: () => invoke<SignOutOutcome>("sign_out_tracker"),
 

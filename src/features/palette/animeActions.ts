@@ -20,7 +20,6 @@ import {
 import { AnimeEntry } from "@/lib/types";
 import { CustomListsApi } from "@/contexts/customLists";
 import {
-  anilistAnimeUrl,
   openAnimeFolder,
   openExternal,
   playLocalEpisode,
@@ -52,6 +51,8 @@ export interface AnimeAction {
 
 export interface AnimeActionHandlers extends AnimeActions {
   showToast: ShowToast;
+  /** The active tracker's name and anime page (`useTracker`) */
+  tracker: { name: string; animeUrl: (anime: AnimeEntry) => string | null };
   /** AniList custom lists; the submenu is left out when the user has none */
   customLists?: CustomListsApi;
 }
@@ -141,10 +142,10 @@ export function buildAnimeActions(
       run: () => void playLocalEpisode(anime, lastEp, h.showToast),
     },
     {
-      id: "open-anilist",
-      label: "Open on AniList",
+      id: "open-tracker",
+      label: `Open on ${h.tracker.name}`,
       icon: ExternalLink,
-      run: () => void openExternal(anilistAnimeUrl(anime), h.showToast),
+      run: () => void openExternal(h.tracker.animeUrl(anime), h.showToast),
     },
     {
       id: "open-folder",

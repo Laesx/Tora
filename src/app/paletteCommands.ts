@@ -12,7 +12,9 @@ interface PaletteCommandDeps {
   openSettings: () => void;
   openTorrentSettings: () => void;
   rescanLibrary: () => void;
-  syncFromAnilist: () => void;
+  syncFromTracker: () => void;
+  /** The active tracker's name ("Sync from AniList") */
+  trackerName: string;
   openRandomAnime: () => void;
   openShortcuts: () => void;
   checkForUpdates: () => void;
@@ -39,7 +41,8 @@ export function buildPaletteCommands(d: PaletteCommandDeps): PaletteCommand[] {
     { id: "settings", label: "Open Settings", keywords: ["preferences", "options"], icon: Settings, shortcut: `Ctrl+${SETTINGS_SHORTCUT_DIGIT}`, run: d.openSettings },
     { id: "torrent-settings", label: "Torrent settings", keywords: ["qbittorrent", "download folder", "refresh interval", "torrents"], icon: Settings, run: d.openTorrentSettings },
     { id: "rescan-library", label: "Rescan All Library Folders", keywords: ["scan", "refresh", "files", "disk"], icon: HardDrive, shortcut: "F5", run: d.rescanLibrary },
-    { id: "sync-anilist", label: "Sync from AniList", keywords: ["pull", "refresh", "tracker"], icon: RefreshCw, run: d.syncFromAnilist },
+    // Id kept from before other trackers: recent commands are stored by id
+    { id: "sync-anilist", label: `Sync from ${d.trackerName}`, keywords: ["pull", "refresh", "tracker", d.trackerName.toLowerCase()], icon: RefreshCw, run: d.syncFromTracker },
     { id: "shortcuts", label: "Keyboard Shortcuts", keywords: ["keys", "hotkeys", "help", "keyboard"], icon: Keyboard, shortcut: "?", run: d.openShortcuts },
     { id: "check-updates", label: "Check for Updates", keywords: ["update", "upgrade", "version", "relations", "github"], icon: Download, run: d.checkForUpdates },
     { id: "changelog", label: "What's New (Changelog)", keywords: ["release notes", "version", "updates", "changes"], icon: ScrollText, run: d.openChangelog },

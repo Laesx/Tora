@@ -37,7 +37,7 @@ export const SettingsBackupsPanel: React.FC<{
       const restored = await toraApi.restoreSettingsBackup(name);
       await onRestored(restored);
       setBackups(await toraApi.listSettingsBackups());
-      showToast("Settings restored (your AniList sign-in was kept)", "success");
+      showToast("Settings restored (your sign-in was kept)", "success");
     } catch (e) {
       showToast(String(e), "error");
     } finally {
@@ -63,7 +63,7 @@ export const SettingsBackupsPanel: React.FC<{
       </div>
       <p className="text-[11px] text-text-muted">
         Tora snapshots your settings and torrent feeds, filters, priority and fansubs at startup and at most once an
-        hour while they change, keeping the last 20. Restoring keeps your current AniList sign-in and snapshots the
+        hour while they change, keeping the last 20. Restoring keeps your current sign-in and snapshots the
         current state first, so it can be undone.
       </p>
       {backups.length === 0 ? (

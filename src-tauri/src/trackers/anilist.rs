@@ -1,18 +1,21 @@
 use crate::db::AnimeEntry;
-use crate::plugins::{
-    ActivityMedia, ActivityPage, ActivityPageQuery, AiringScheduleItem, AiringSchedulePage,
-    AnimePageFetch, AnimePageParts, BoxFuture, CharacterRole, CharactersPage, FollowingEntry, FollowingPage, MediaDetails, MediaMetadata,
-    MediaPrequel, MediaRanking, MediaRecommendation, MediaRelation, StaffRole, VoiceActor, MediaTag, RemoteListActivity, ACTIVITY_PAGE_SIZE,
-    RemoteEntryState, RemoteListMembership, RemoteListSnapshot, SeasonPage, SeasonalAnime, StudioRef,
-    TrackerEntryUpdate, TrackerError, TrackerPlugin, TrackerPluginDescriptor, TrackerUserProfile,
-    MEDIA_DETAILS_CHUNK,
+use crate::trackers::{
+    AccountExtras, ActivityMedia, ActivityPage, ActivityPageQuery, AiringScheduleItem, AiringSchedulePage,
+    AnimePageFetch, AnimePageParts, AuthMethod, BoxFuture, Catalog, CharacterRole, CharactersPage, FollowingEntry,
+    FollowingPage, ListSync, MediaDetails, MediaMetadata, MediaPrequel, MediaRanking, MediaRecommendation,
+    MediaRelation, MediaTag, RemoteEntryState, RemoteListActivity, RemoteListMembership, RemoteListSnapshot,
+    SeasonPage, SeasonalAnime, StaffRole, StudioRef, Tracker, TrackerAuth, TrackerDescriptor, TrackerEntryUpdate,
+    TrackerError, TrackerLinks, TrackerUserProfile, VoiceActor, ACTIVITY_PAGE_SIZE, MEDIA_DETAILS_CHUNK,
 };
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
+use std::time::Duration;
 
 const ANILIST_GRAPHQL_URL: &str = "https://graphql.anilist.co";
+/// AniList allows 90 requests a minute (30 while degraded); 700 ms keeps bursts under both.
+const MIN_REQUEST_INTERVAL: Duration = Duration::from_millis(700);
 
 pub struct AniListPlugin {
     client: Client,
@@ -283,7 +286,7 @@ impl AniListPlugin {
             local_episode_count: 0,
             available_episodes: vec![],
             sync_pending: false,
-            anilist_list_entry_id: list_entry_id,
+            remote_entry_id: list_entry_id,
             custom_synonyms: vec![],
         })
     }
@@ -1254,88 +1257,61 @@ fn parse_airing_schedule_node(node: &Value) -> Option<AiringScheduleItem> {
     })
 }
 
-impl TrackerPlugin for AniListPlugin {
-    fn descriptor(&self) -> TrackerPluginDescriptor {
-        TrackerPluginDescriptor {
+impl Tracker for AniListPlugin {
+    fn min_request_interval(&self) -> Duration {
+        MIN_REQUEST_INTERVAL
+    }
+
+    fn descriptor(&self) -> TrackerDescriptor {
+        TrackerDescriptor {
             id: "anilist".into(),
             name: "AniList".into(),
-            description: "Official AniList GraphQL v2 tracker plugin. Supports public username list import, OAuth token 2-way sync, seasonal browser, and airing schedules.".into(),
             website_url: "https://anilist.co".into(),
-            oauth_authorize_url: "https://anilist.co/api/v2/oauth/authorize?client_id=14954&response_type=token".into(),
-            supports_public_username_sync: true,
-            supports_oauth_token: true,
-            supports_seasonal_browse: true,
-            status: "active".into(),
+            auth: AuthMethod::BrowserToken {
+                authorize_url: "https://anilist.co/api/v2/oauth/authorize?client_id=14954&response_type=token"
+                    .into(),
+            },
+            links: TrackerLinks {
+                anime: "https://anilist.co/anime/{id}".into(),
+                manga: "https://anilist.co/manga/{id}".into(),
+                character: "https://anilist.co/character/{id}".into(),
+                staff: "https://anilist.co/staff/{id}".into(),
+                user: "https://anilist.co/user/{name}".into(),
+                anime_staff: Some("https://anilist.co/anime/{id}/staff".into()),
+                studio: Some("https://anilist.co/studio/{id}".into()),
+                genre: Some("https://anilist.co/search/anime/{name}".into()),
+                tag: Some("https://anilist.co/search/anime?genres={name}".into()),
+            },
         }
     }
 
-    fn verify_account<'a>(
-        &'a self,
-        username: &'a str,
-        token: Option<&'a str>,
-    ) -> BoxFuture<'a, Result<TrackerUserProfile, String>> {
+    fn auth(&self) -> &dyn TrackerAuth {
+        self
+    }
+
+    fn list(&self) -> &dyn ListSync {
+        self
+    }
+
+    fn catalog(&self) -> &dyn Catalog {
+        self
+    }
+
+    fn extras(&self) -> &dyn AccountExtras {
+        self
+    }
+}
+
+impl TrackerAuth for AniListPlugin {
+    fn profile<'a>(&'a self, token: &'a str) -> BoxFuture<'a, Result<TrackerUserProfile, TrackerError>> {
         Box::pin(async move {
-            if let Some(tok) = token.filter(|t| !t.trim().is_empty()) {
-                let query = r#"
-                    query {
-                        Viewer {
-                            id
-                            name
-                            avatar {
-                                large
-                            }
-                            statistics {
-                                anime {
-                                    count
-                                    episodesWatched
-                                    minutesWatched
-                                }
-                            }
-                        }
-                    }
-                "#;
-                let data = self
-                    .graphql_request(query, json!({}), Some(tok))
-                    .await
-                    .map_err(|e| e.to_string())?;
-                let viewer = data
-                    .get("Viewer")
-                    .ok_or_else(|| "Invalid Viewer response".to_string())?;
-                return Ok(TrackerUserProfile {
-                    user_id: viewer.get("id").and_then(|v| v.as_i64()).unwrap_or(0),
-                    username: viewer
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(username)
-                        .to_string(),
-                    avatar_url: viewer
-                        .get("avatar")
-                        .and_then(|a| a.get("large"))
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                    anime_count: viewer
-                        .get("statistics")
-                        .and_then(|s| s.get("anime"))
-                        .and_then(|a| a.get("count"))
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as u32,
-                    episodes_watched: viewer
-                        .get("statistics")
-                        .and_then(|s| s.get("anime"))
-                        .and_then(|a| a.get("episodesWatched"))
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as u32,
-                    authenticated: true,
-                });
+            let token = token.trim();
+            if token.is_empty() {
+                return Err(TrackerError::Unauthorized("AniList sign-in requires an OAuth access token".into()));
             }
-
-            if username.trim().is_empty() {
-                return Err("Please provide an AniList username or OAuth access token.".into());
-            }
-
             let query = r#"
-                query ($name: String) {
-                    User(name: $name) {
+                query {
+                    Viewer {
                         id
                         name
                         avatar {
@@ -1350,38 +1326,25 @@ impl TrackerPlugin for AniListPlugin {
                     }
                 }
             "#;
-            let data = self
-                .graphql_request(query, json!({ "name": username.trim() }), None)
-                .await
-                .map_err(|e| e.to_string())?;
-            let user = data
-                .get("User")
-                .ok_or_else(|| "AniList user not found".to_string())?;
+            let data = self.graphql_request(query, json!({}), Some(token)).await?;
+            let viewer = data
+                .get("Viewer")
+                .ok_or_else(|| TrackerError::Api("Invalid Viewer response".into()))?;
+            let anime_stat = |key: &str| {
+                viewer
+                    .pointer(&format!("/statistics/anime/{}", key))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32
+            };
             Ok(TrackerUserProfile {
-                user_id: user.get("id").and_then(|v| v.as_i64()).unwrap_or(0),
-                username: user
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(username)
-                    .to_string(),
-                avatar_url: user
-                    .get("avatar")
-                    .and_then(|a| a.get("large"))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                anime_count: user
-                    .get("statistics")
-                    .and_then(|s| s.get("anime"))
-                    .and_then(|a| a.get("count"))
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u32,
-                episodes_watched: user
-                    .get("statistics")
-                    .and_then(|s| s.get("anime"))
-                    .and_then(|a| a.get("episodesWatched"))
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u32,
-                authenticated: false,
+                user_id: viewer
+                    .get("id")
+                    .and_then(|v| v.as_i64())
+                    .ok_or_else(|| TrackerError::Api("Viewer response has no id".into()))?,
+                username: viewer.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                avatar_url: viewer.pointer("/avatar/large").and_then(|v| v.as_str()).map(str::to_string),
+                anime_count: anime_stat("count"),
+                episodes_watched: anime_stat("episodesWatched"),
             })
         })
     }
@@ -1389,7 +1352,9 @@ impl TrackerPlugin for AniListPlugin {
     fn viewer_id<'a>(&'a self, token: &'a str) -> BoxFuture<'a, Result<i64, TrackerError>> {
         Box::pin(async move { self.cached_viewer_id(token.trim()).await })
     }
+}
 
+impl ListSync for AniListPlugin {
     fn fetch_user_list<'a>(
         &'a self,
         token: &'a str,
@@ -1503,6 +1468,160 @@ impl TrackerPlugin for AniListPlugin {
         })
     }
 
+    fn save_list_entry<'a>(
+        &'a self,
+        token: &'a str,
+        update: &'a TrackerEntryUpdate,
+    ) -> BoxFuture<'a, Result<RemoteEntryState, TrackerError>> {
+        Box::pin(async move {
+            let token = token.trim();
+            if token.is_empty() {
+                return Err(TrackerError::Unauthorized(
+                    "AniList OAuth token is required to push updates to AniList.".into(),
+                ));
+            }
+            // Custom-list arguments only when set: an omitted argument leaves AniList's membership alone
+            let (list_params, list_args) = save_list_extra_args(update);
+            let mutation = format!(
+                r#"
+                mutation (
+                    $mediaId: Int,
+                    $status: MediaListStatus,
+                    $progress: Int,
+                    $scoreRaw: Int,
+                    $repeat: Int,
+                    $notes: String,
+                    $startedAt: FuzzyDateInput,
+                    $completedAt: FuzzyDateInput{list_params}
+                ) {{
+                    SaveMediaListEntry(
+                        mediaId: $mediaId,
+                        status: $status,
+                        progress: $progress,
+                        scoreRaw: $scoreRaw,
+                        repeat: $repeat,
+                        notes: $notes,
+                        startedAt: $startedAt,
+                        completedAt: $completedAt{list_args}
+                    ) {{
+                        id
+                        status
+                        progress
+                        updatedAt
+                    }}
+                }}
+            "#
+            );
+
+            let mut vars = json!({
+                "mediaId": update.media_id,
+                "status": update.status,
+                "progress": update.progress,
+                "scoreRaw": update.score.clamp(0.0, 100.0).round() as i32,
+                "repeat": update.repeat,
+                "notes": update.notes,
+                "startedAt": fuzzy_date_input(update.started_at.as_deref()),
+                "completedAt": fuzzy_date_input(update.completed_at.as_deref()),
+            });
+            if let Some(lists) = &update.custom_lists {
+                vars["customLists"] = json!(lists);
+            }
+            if let Some(hidden) = update.hidden_from_status_lists {
+                vars["hiddenFromStatusLists"] = json!(hidden);
+            }
+
+            let data = self.graphql_request(&mutation, vars, Some(token)).await?;
+            let saved = data
+                .get("SaveMediaListEntry")
+                .filter(|v| !v.is_null())
+                .ok_or_else(|| {
+                    TrackerError::Api("AniList did not return the saved list entry".into())
+                })?;
+            Ok(RemoteEntryState {
+                list_entry_id: saved
+                    .get("id")
+                    .and_then(|v| v.as_i64())
+                    .ok_or_else(|| TrackerError::Api("AniList saved entry has no id".into()))?,
+                status: saved
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&update.status)
+                    .to_string(),
+                progress: saved
+                    .get("progress")
+                    .and_then(|v| v.as_u64())
+                    .map(|p| p as u32)
+                    .unwrap_or(update.progress),
+                updated_at: saved
+                    .get("updatedAt")
+                    .and_then(|v| v.as_i64())
+                    .filter(|&t| t > 0)
+                    .unwrap_or_else(|| chrono::Utc::now().timestamp()),
+            })
+        })
+    }
+
+    fn delete_list_entry<'a>(
+        &'a self,
+        token: &'a str,
+        media_id: i64,
+        list_entry_id: Option<i64>,
+    ) -> BoxFuture<'a, Result<(), TrackerError>> {
+        Box::pin(async move {
+            let token = token.trim();
+            if token.is_empty() {
+                return Err(TrackerError::Unauthorized(
+                    "AniList OAuth token is required to delete AniList entries.".into(),
+                ));
+            }
+
+            let entry_id = match list_entry_id {
+                Some(id) => id,
+                None => {
+                    let viewer_id = self.cached_viewer_id(token).await?;
+                    let lookup = self
+                        .graphql_request(
+                            "query ($userId: Int, $mediaId: Int) { MediaList(userId: $userId, mediaId: $mediaId) { id } }",
+                            json!({ "userId": viewer_id, "mediaId": media_id }),
+                            Some(token),
+                        )
+                        .await;
+                    match lookup {
+                        Ok(data) => match data
+                            .get("MediaList")
+                            .and_then(|m| m.get("id"))
+                            .and_then(|v| v.as_i64())
+                        {
+                            Some(id) => id,
+                            // Nothing on the list for this media: already deleted.
+                            None => return Ok(()),
+                        },
+                        Err(TrackerError::NotFound(_)) => return Ok(()),
+                        Err(e) => return Err(e),
+                    }
+                }
+            };
+
+            let result = self
+                .graphql_request(
+                    "mutation ($id: Int) { DeleteMediaListEntry(id: $id) { deleted } }",
+                    json!({ "id": entry_id }),
+                    Some(token),
+                )
+                .await;
+            match result {
+                Ok(_) | Err(TrackerError::NotFound(_)) => Ok(()),
+                Err(e) => Err(e),
+            }
+        })
+    }
+}
+
+impl Catalog for AniListPlugin {
+    fn tracker_name(&self) -> &str {
+        "AniList"
+    }
+
     fn fetch_media_details<'a>(
         &'a self,
         ids: &'a [i64],
@@ -1545,7 +1664,7 @@ impl TrackerPlugin for AniListPlugin {
         query_str: &'a str,
         season: Option<&'a str>,
         year: Option<u32>,
-    ) -> BoxFuture<'a, Result<Vec<AnimeEntry>, String>> {
+    ) -> BoxFuture<'a, Result<Vec<AnimeEntry>, TrackerError>> {
         Box::pin(async move {
             let gql = format!(
                 r#"
@@ -1577,10 +1696,7 @@ impl TrackerPlugin for AniListPlugin {
                 vars.insert("seasonYear".into(), json!(y));
             }
 
-            let data = self
-                .graphql_request(&gql, Value::Object(vars), None)
-                .await
-                .map_err(|e| e.to_string())?;
+            let data = self.graphql_request(&gql, Value::Object(vars), None).await?;
             let mut list = Vec::new();
             if let Some(media_arr) = data
                 .get("Page")
@@ -1796,153 +1912,11 @@ impl TrackerPlugin for AniListPlugin {
             Ok(data.get("Media").map(parse_characters_page).unwrap_or_default())
         })
     }
+}
 
-    fn save_list_entry<'a>(
-        &'a self,
-        token: &'a str,
-        update: &'a TrackerEntryUpdate,
-    ) -> BoxFuture<'a, Result<RemoteEntryState, TrackerError>> {
-        Box::pin(async move {
-            let token = token.trim();
-            if token.is_empty() {
-                return Err(TrackerError::Unauthorized(
-                    "AniList OAuth token is required to push updates to AniList.".into(),
-                ));
-            }
-            // Custom-list arguments only when set: an omitted argument leaves AniList's membership alone
-            let (list_params, list_args) = save_list_extra_args(update);
-            let mutation = format!(
-                r#"
-                mutation (
-                    $mediaId: Int,
-                    $status: MediaListStatus,
-                    $progress: Int,
-                    $scoreRaw: Int,
-                    $repeat: Int,
-                    $notes: String,
-                    $startedAt: FuzzyDateInput,
-                    $completedAt: FuzzyDateInput{list_params}
-                ) {{
-                    SaveMediaListEntry(
-                        mediaId: $mediaId,
-                        status: $status,
-                        progress: $progress,
-                        scoreRaw: $scoreRaw,
-                        repeat: $repeat,
-                        notes: $notes,
-                        startedAt: $startedAt,
-                        completedAt: $completedAt{list_args}
-                    ) {{
-                        id
-                        status
-                        progress
-                        updatedAt
-                    }}
-                }}
-            "#
-            );
-
-            let mut vars = json!({
-                "mediaId": update.media_id,
-                "status": update.status,
-                "progress": update.progress,
-                "scoreRaw": update.score.clamp(0.0, 100.0).round() as i32,
-                "repeat": update.repeat,
-                "notes": update.notes,
-                "startedAt": fuzzy_date_input(update.started_at.as_deref()),
-                "completedAt": fuzzy_date_input(update.completed_at.as_deref()),
-            });
-            if let Some(lists) = &update.custom_lists {
-                vars["customLists"] = json!(lists);
-            }
-            if let Some(hidden) = update.hidden_from_status_lists {
-                vars["hiddenFromStatusLists"] = json!(hidden);
-            }
-
-            let data = self.graphql_request(&mutation, vars, Some(token)).await?;
-            let saved = data
-                .get("SaveMediaListEntry")
-                .filter(|v| !v.is_null())
-                .ok_or_else(|| {
-                    TrackerError::Api("AniList did not return the saved list entry".into())
-                })?;
-            Ok(RemoteEntryState {
-                list_entry_id: saved
-                    .get("id")
-                    .and_then(|v| v.as_i64())
-                    .ok_or_else(|| TrackerError::Api("AniList saved entry has no id".into()))?,
-                status: saved
-                    .get("status")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(&update.status)
-                    .to_string(),
-                progress: saved
-                    .get("progress")
-                    .and_then(|v| v.as_u64())
-                    .map(|p| p as u32)
-                    .unwrap_or(update.progress),
-                updated_at: saved
-                    .get("updatedAt")
-                    .and_then(|v| v.as_i64())
-                    .filter(|&t| t > 0)
-                    .unwrap_or_else(|| chrono::Utc::now().timestamp()),
-            })
-        })
-    }
-
-    fn delete_list_entry<'a>(
-        &'a self,
-        token: &'a str,
-        media_id: i64,
-        list_entry_id: Option<i64>,
-    ) -> BoxFuture<'a, Result<(), TrackerError>> {
-        Box::pin(async move {
-            let token = token.trim();
-            if token.is_empty() {
-                return Err(TrackerError::Unauthorized(
-                    "AniList OAuth token is required to delete AniList entries.".into(),
-                ));
-            }
-
-            let entry_id = match list_entry_id {
-                Some(id) => id,
-                None => {
-                    let viewer_id = self.cached_viewer_id(token).await?;
-                    let lookup = self
-                        .graphql_request(
-                            "query ($userId: Int, $mediaId: Int) { MediaList(userId: $userId, mediaId: $mediaId) { id } }",
-                            json!({ "userId": viewer_id, "mediaId": media_id }),
-                            Some(token),
-                        )
-                        .await;
-                    match lookup {
-                        Ok(data) => match data
-                            .get("MediaList")
-                            .and_then(|m| m.get("id"))
-                            .and_then(|v| v.as_i64())
-                        {
-                            Some(id) => id,
-                            // Nothing on the list for this media: already deleted.
-                            None => return Ok(()),
-                        },
-                        Err(TrackerError::NotFound(_)) => return Ok(()),
-                        Err(e) => return Err(e),
-                    }
-                }
-            };
-
-            let result = self
-                .graphql_request(
-                    "mutation ($id: Int) { DeleteMediaListEntry(id: $id) { deleted } }",
-                    json!({ "id": entry_id }),
-                    Some(token),
-                )
-                .await;
-            match result {
-                Ok(_) | Err(TrackerError::NotFound(_)) => Ok(()),
-                Err(e) => Err(e),
-            }
-        })
+impl AccountExtras for AniListPlugin {
+    fn tracker_name(&self) -> &str {
+        "AniList"
     }
 
     fn fetch_list_activities<'a>(
@@ -2368,7 +2342,7 @@ mod tests {
         assert_eq!(e.user_progress, 1099);
         assert_eq!(e.user_started_at.as_deref(), Some("2020-01-02"));
         assert_eq!(e.user_completed_at, None);
-        assert_eq!(e.anilist_list_entry_id, Some(900));
+        assert_eq!(e.remote_entry_id, Some(900));
         assert_eq!(e.updated_at, 1_800_000_000);
 
         // updatedAt 0 (old entries) falls back to createdAt, then to 0; never to the import time

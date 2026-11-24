@@ -1,25 +1,95 @@
+//! Trackers: the list services Tora syncs with (AniList today; MyAnimeList and Kitsu next).
+//!
+//! A tracker is one [`Tracker`] object made of parts, so callers ask only for what they use:
+//! - [`TrackerAuth`]: who a token belongs to;
+//! - [`ListSync`]: the user's list (pull, save, delete);
+//! - [`Catalog`]: public anime data (search, seasons, metadata, the anime page);
+//! - [`AccountExtras`]: account features only some trackers have (custom lists, activity history).
+//!
+//! Optional methods default to [`TrackerError::Unsupported`]. Everything a tracker returns uses the neutral
+//! types below, in AniList's vocabulary (statuses, formats, relation types, 0–100 scores): an adapter
+//! translates its tracker's values. `docs/trackers.md` lists what each tracker supports.
+
 pub mod anilist;
 
 use crate::db::AnimeEntry;
-use crate::plugins::anilist::AniListPlugin;
+use crate::trackers::anilist::AniListPlugin;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TrackerPluginDescriptor {
+/// The tracker a list without an owner belongs to (and the only one registered today).
+pub const DEFAULT_TRACKER: &str = "anilist";
+
+/// Request spacing of a tracker that doesn't say otherwise ([`Tracker::min_request_interval`]).
+pub const DEFAULT_MIN_REQUEST_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How a tracker signs a user in.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AuthMethod {
+    /// The browser opens `authorize_url`; the tracker redirects to Tora's local listener with the access
+    /// token in the URL fragment (OAuth implicit grant: AniList).
+    BrowserToken { authorize_url: String },
+}
+
+/// URL templates of a tracker's public pages: `{id}` is replaced by the id, `{name}` by the URL-encoded
+/// name (user, genre, tag). The frontend builds every external link from these (`trackerLink`); a page the
+/// tracker doesn't have is `None`, and the UI shows plain text instead of a link.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrackerLinks {
+    pub anime: String,
+    pub manga: String,
+    pub character: String,
+    pub staff: String,
+    pub user: String,
+    /// An anime's full staff list.
+    #[serde(default)]
+    pub anime_staff: Option<String>,
+    #[serde(default)]
+    pub studio: Option<String>,
+    /// Anime of one genre.
+    #[serde(default)]
+    pub genre: Option<String>,
+    /// Anime with one tag.
+    #[serde(default)]
+    pub tag: Option<String>,
+}
+
+/// What the app shows about a tracker and how it signs in.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrackerDescriptor {
+    /// Stable id stored with the account and the list owner (`anilist`).
     pub id: String,
+    /// Display name ("AniList").
     pub name: String,
-    pub description: String,
     pub website_url: String,
-    pub oauth_authorize_url: String,
-    pub supports_public_username_sync: bool,
-    pub supports_oauth_token: bool,
-    pub supports_seasonal_browse: bool,
-    pub status: String, // "active" | "planned"
+    pub auth: AuthMethod,
+    pub links: TrackerLinks,
+}
+
+/// The tokens a sign-in produced (stored with the account, never sent to the frontend).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccessTokens {
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    /// Unix second the access token expires; `None` when the tracker doesn't say.
+    pub expires_at: Option<i64>,
+}
+
+impl AccessTokens {
+    /// A token that can't be refreshed (AniList's implicit grant: valid for a year).
+    pub fn access_only(token: &str) -> Self {
+        Self {
+            access_token: token.trim().to_string(),
+            refresh_token: None,
+            expires_at: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,13 +99,12 @@ pub struct TrackerUserProfile {
     pub avatar_url: Option<String>,
     pub anime_count: u32,
     pub episodes_watched: u32,
-    pub authenticated: bool,
 }
 
-/// Max media ids per [`TrackerPlugin::fetch_media_details`] request (AniList `Page.perPage` limit).
+/// Max media ids per [`Catalog::fetch_media_details`] request (AniList `Page.perPage` limit).
 pub const MEDIA_DETAILS_CHUNK: usize = 50;
 
-/// Boxed, `Send` future used by the object-safe [`TrackerPlugin`] trait.
+/// Boxed, `Send` future used by the object-safe tracker traits.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Typed tracker failure so the sync service can decide between retrying, re-authenticating
@@ -52,6 +121,8 @@ pub enum TrackerError {
     NotFound(String),
     /// Any other tracker-side or protocol error.
     Api(String),
+    /// The tracker has no such feature (the message names the tracker and the feature).
+    Unsupported(String),
 }
 
 impl TrackerError {
@@ -63,8 +134,15 @@ impl TrackerError {
             TrackerError::Unauthorized(_) => "unauthorized",
             TrackerError::NotFound(_) => "not_found",
             TrackerError::Api(_) => "api",
+            TrackerError::Unsupported(_) => "unsupported",
         }
     }
+}
+
+/// `<tracker> doesn't support <what>.`
+fn unsupported<T: Send + 'static>(tracker: &str, what: &str) -> BoxFuture<'static, Result<T, TrackerError>> {
+    let message = format!("{} doesn't support {}.", tracker, what);
+    Box::pin(async move { Err(TrackerError::Unsupported(message)) })
 }
 
 impl fmt::Display for TrackerError {
@@ -79,6 +157,7 @@ impl fmt::Display for TrackerError {
             TrackerError::Unauthorized(m) => write!(f, "{}", m),
             TrackerError::NotFound(m) => write!(f, "{}", m),
             TrackerError::Api(m) => write!(f, "{}", m),
+            TrackerError::Unsupported(m) => write!(f, "{}", m),
         }
     }
 }
@@ -127,7 +206,7 @@ pub struct RemoteEntryState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteListSnapshot {
     pub viewer_id: i64,
-    /// Deduplicated by media id. Each entry carries `anilist_list_entry_id` and the remote `updated_at`.
+    /// Deduplicated by media id. Each entry carries `remote_entry_id` and the remote `updated_at`.
     pub entries: Vec<AnimeEntry>,
     /// The viewer's custom list names in their own order (empty lists included).
     #[serde(default)]
@@ -358,7 +437,7 @@ pub struct SeasonalAnime {
     pub metadata: MediaMetadata,
 }
 
-/// One page of [`TrackerPlugin::fetch_season_page`].
+/// One page of [`Catalog::fetch_season_page`].
 #[derive(Debug, Clone)]
 pub struct SeasonPage {
     pub items: Vec<SeasonalAnime>,
@@ -378,7 +457,7 @@ pub struct AiringScheduleItem {
     pub country: Option<String>,
 }
 
-/// One page of [`TrackerPlugin::fetch_airing_schedule_page`].
+/// One page of [`Catalog::fetch_airing_schedule_page`].
 #[derive(Debug, Clone)]
 pub struct AiringSchedulePage {
     pub items: Vec<AiringScheduleItem>,
@@ -411,7 +490,7 @@ pub struct RemoteListActivity {
     pub media: ActivityMedia,
 }
 
-/// Bounds of one [`TrackerPlugin::fetch_list_activities`] request.
+/// Bounds of one [`AccountExtras::fetch_list_activities`] request.
 #[derive(Debug, Clone, Default)]
 pub struct ActivityPageQuery {
     pub user_id: i64,
@@ -424,52 +503,79 @@ pub struct ActivityPageQuery {
     pub per_page: u32,
 }
 
-/// One page of [`TrackerPlugin::fetch_list_activities`].
+/// One page of [`AccountExtras::fetch_list_activities`].
 #[derive(Debug, Clone, Default)]
 pub struct ActivityPage {
     pub items: Vec<RemoteListActivity>,
     pub has_next_page: bool,
 }
 
-/// Max activities per [`TrackerPlugin::fetch_list_activities`] request (AniList `Page.perPage` limit).
+/// Max activities per [`AccountExtras::fetch_list_activities`] request (AniList `Page.perPage` limit).
 pub const ACTIVITY_PAGE_SIZE: u32 = 50;
 
-/// Core internal trait for all anime tracker plugins (AniList, MyAnimeList, Kitsu, Shikimori, etc.)
-pub trait TrackerPlugin: Send + Sync {
-    fn descriptor(&self) -> TrackerPluginDescriptor;
+/// A tracker: its descriptor and its parts. One object implements every part (see the module docs).
+pub trait Tracker: Send + Sync {
+    fn descriptor(&self) -> TrackerDescriptor;
+    /// Minimum spacing between two requests to this tracker. Each tracker gets its own rate limiter
+    /// (`TrackerSyncService::limiter`), so one tracker's pace never slows another's.
+    fn min_request_interval(&self) -> Duration {
+        DEFAULT_MIN_REQUEST_INTERVAL
+    }
+    fn auth(&self) -> &dyn TrackerAuth;
+    fn list(&self) -> &dyn ListSync;
+    fn catalog(&self) -> &dyn Catalog;
+    fn extras(&self) -> &dyn AccountExtras;
+}
 
-    fn verify_account<'a>(
-        &'a self,
-        username: &'a str,
-        token: Option<&'a str>,
-    ) -> BoxFuture<'a, Result<TrackerUserProfile, String>>;
-
-    /// Fetch the authenticated viewer's full anime list. Media carry only the "light" fields
-    /// (titles, synonyms, format, status, episodes, season, score, cover, next airing); heavy metadata
-    /// (synopsis, genres, studios, banner, trailer, source, duration, site url, MAL id) is left at its
-    /// defaults and must be fetched with [`fetch_media_details`](Self::fetch_media_details).
-    fn fetch_user_list<'a>(
-        &'a self,
-        token: &'a str,
-    ) -> BoxFuture<'a, Result<RemoteListSnapshot, TrackerError>>;
+/// Who an access token belongs to.
+pub trait TrackerAuth: Send + Sync {
+    /// The profile of the account `token` belongs to (name, avatar, list counts).
+    fn profile<'a>(&'a self, token: &'a str) -> BoxFuture<'a, Result<TrackerUserProfile, TrackerError>>;
 
     /// User id of the account `token` belongs to (implementations cache it per token).
     fn viewer_id<'a>(&'a self, token: &'a str) -> BoxFuture<'a, Result<i64, TrackerError>>;
+}
+
+/// The signed-in user's list.
+pub trait ListSync: Send + Sync {
+    /// Fetch the authenticated viewer's full anime list. Media carry only the "light" fields
+    /// (titles, synonyms, format, status, episodes, season, score, cover, next airing); heavy metadata
+    /// (synopsis, genres, studios, banner, trailer, source, duration, site url, MAL id) may be left at its
+    /// defaults, to be fetched with [`Catalog::fetch_media_details`].
+    fn fetch_user_list<'a>(&'a self, token: &'a str) -> BoxFuture<'a, Result<RemoteListSnapshot, TrackerError>>;
+
+    /// Create or update the viewer's list entry for `update.media_id`.
+    fn save_list_entry<'a>(
+        &'a self,
+        token: &'a str,
+        update: &'a TrackerEntryUpdate,
+    ) -> BoxFuture<'a, Result<RemoteEntryState, TrackerError>>;
+
+    /// Delete the viewer's list entry for `media_id`. Already-missing entries count as success.
+    fn delete_list_entry<'a>(
+        &'a self,
+        token: &'a str,
+        media_id: i64,
+        remote_entry_id: Option<i64>,
+    ) -> BoxFuture<'a, Result<(), TrackerError>>;
+}
+
+/// Public anime data. Needs no account (the anime page's followed users excepted).
+pub trait Catalog: Send + Sync {
+    /// Name used in "doesn't support" messages.
+    fn tracker_name(&self) -> &str;
 
     /// Fetch full media metadata for `ids` (no user-list fields). Callers should pass at most
     /// [`MEDIA_DETAILS_CHUNK`] ids per call (one request each); larger inputs are split into
     /// sequential requests. Unknown ids are simply missing from the result.
-    fn fetch_media_details<'a>(
-        &'a self,
-        ids: &'a [i64],
-    ) -> BoxFuture<'a, Result<Vec<AnimeEntry>, TrackerError>>;
+    fn fetch_media_details<'a>(&'a self, ids: &'a [i64]) -> BoxFuture<'a, Result<Vec<AnimeEntry>, TrackerError>>;
 
     fn search_anime<'a>(
         &'a self,
         query: &'a str,
         season: Option<&'a str>,
         year: Option<u32>,
-    ) -> BoxFuture<'a, Result<Vec<AnimeEntry>, String>>;
+    ) -> BoxFuture<'a, Result<Vec<AnimeEntry>, TrackerError>>;
 
     /// Fetch one page (1-based) of every anime in `season` (`WINTER`..`FALL`) of `year`, most popular first.
     fn fetch_season_page<'a>(
@@ -479,20 +585,8 @@ pub trait TrackerPlugin: Send + Sync {
         page: u32,
     ) -> BoxFuture<'a, Result<SeasonPage, TrackerError>>;
 
-    /// Fetch one page (1-based) of every episode airing in `from..to` (unix seconds), earliest first.
-    /// Adult media are left out.
-    fn fetch_airing_schedule_page<'a>(
-        &'a self,
-        from: i64,
-        to: i64,
-        page: u32,
-    ) -> BoxFuture<'a, Result<AiringSchedulePage, TrackerError>>;
-
     /// Fetch one media with the same fields as a season page item. `Ok(None)` if it doesn't exist.
-    fn fetch_media_metadata<'a>(
-        &'a self,
-        id: i64,
-    ) -> BoxFuture<'a, Result<Option<SeasonalAnime>, TrackerError>>;
+    fn fetch_media_metadata<'a>(&'a self, id: i64) -> BoxFuture<'a, Result<Option<SeasonalAnime>, TrackerError>>;
 
     /// Several media with the same fields as [`fetch_media_metadata`](Self::fetch_media_metadata), at most
     /// [`MEDIA_DETAILS_CHUNK`] per request. Unknown ids are simply missing from the result. The default
@@ -512,6 +606,17 @@ pub trait TrackerPlugin: Send + Sync {
         })
     }
 
+    /// Fetch one page (1-based) of every episode airing in `from..to` (unix seconds), earliest first.
+    /// Adult media are left out.
+    fn fetch_airing_schedule_page<'a>(
+        &'a self,
+        _from: i64,
+        _to: i64,
+        _page: u32,
+    ) -> BoxFuture<'a, Result<AiringSchedulePage, TrackerError>> {
+        unsupported(self.tracker_name(), "an airing schedule")
+    }
+
     /// Whatever the anime page still needs for one media, in one request: its metadata, details
     /// (first page of characters with every voice actor, first 25 staff), recommendations and the
     /// followed / pinned users' entries (`token` required for those). A media that doesn't exist
@@ -522,53 +627,30 @@ pub trait TrackerPlugin: Send + Sync {
         _parts: &'a AnimePageParts,
         _token: Option<&'a str>,
     ) -> BoxFuture<'a, Result<AnimePageFetch, TrackerError>> {
-        Box::pin(async { Err(TrackerError::Api("not supported by this tracker".into())) })
+        unsupported(self.tracker_name(), "anime page details")
     }
 
     /// One page (1-based, 25 per page) of a media's characters.
     fn fetch_characters_page<'a>(&'a self, _id: i64, _page: u32) -> BoxFuture<'a, Result<CharactersPage, TrackerError>> {
-        Box::pin(async { Err(TrackerError::Api("not supported by this tracker".into())) })
+        unsupported(self.tracker_name(), "characters")
     }
+}
 
-    /// Create or update the viewer's list entry for `update.media_id`.
-    fn save_list_entry<'a>(
-        &'a self,
-        token: &'a str,
-        update: &'a TrackerEntryUpdate,
-    ) -> BoxFuture<'a, Result<RemoteEntryState, TrackerError>>;
-
-    /// Delete the viewer's list entry for `media_id`. Already-missing entries count as success.
-    fn delete_list_entry<'a>(
-        &'a self,
-        token: &'a str,
-        media_id: i64,
-        list_entry_id: Option<i64>,
-    ) -> BoxFuture<'a, Result<(), TrackerError>>;
+/// Account features only some trackers have. Every method defaults to [`TrackerError::Unsupported`].
+pub trait AccountExtras: Send + Sync {
+    /// Name used in "doesn't support" messages.
+    fn tracker_name(&self) -> &str;
 
     /// Add a custom anime list named `name` to the viewer's lists (a name that already exists is
     /// left as is). Returns every custom list name in the viewer's order afterwards.
-    fn create_custom_list<'a>(
-        &'a self,
-        _token: &'a str,
-        _name: &'a str,
-    ) -> BoxFuture<'a, Result<Vec<String>, TrackerError>> {
-        let name = self.descriptor().name;
-        Box::pin(async move {
-            Err(TrackerError::Api(format!("{} doesn't support creating custom lists.", name)))
-        })
+    fn create_custom_list<'a>(&'a self, _token: &'a str, _name: &'a str) -> BoxFuture<'a, Result<Vec<String>, TrackerError>> {
+        unsupported(self.tracker_name(), "creating custom lists")
     }
 
     /// Delete the viewer's custom anime list named `name` (a missing one counts as deleted); its
     /// entries stay on the list. Returns every custom list name in the viewer's order afterwards.
-    fn delete_custom_list<'a>(
-        &'a self,
-        _token: &'a str,
-        _name: &'a str,
-    ) -> BoxFuture<'a, Result<Vec<String>, TrackerError>> {
-        let name = self.descriptor().name;
-        Box::pin(async move {
-            Err(TrackerError::Api(format!("{} doesn't support deleting custom lists.", name)))
-        })
+    fn delete_custom_list<'a>(&'a self, _token: &'a str, _name: &'a str) -> BoxFuture<'a, Result<Vec<String>, TrackerError>> {
+        unsupported(self.tracker_name(), "deleting custom lists")
     }
 
     /// Rename the viewer's custom anime list `old` to `new` in place (its entries stay in it). Returns
@@ -579,10 +661,7 @@ pub trait TrackerPlugin: Send + Sync {
         _old: &'a str,
         _new: &'a str,
     ) -> BoxFuture<'a, Result<Vec<String>, TrackerError>> {
-        let name = self.descriptor().name;
-        Box::pin(async move {
-            Err(TrackerError::Api(format!("{} doesn't support renaming custom lists.", name)))
-        })
+        unsupported(self.tracker_name(), "renaming custom lists")
     }
 
     /// One page of the user's anime list activity within `query`'s bounds (`query.per_page` items,
@@ -592,182 +671,74 @@ pub trait TrackerPlugin: Send + Sync {
         _token: &'a str,
         _query: &'a ActivityPageQuery,
     ) -> BoxFuture<'a, Result<ActivityPage, TrackerError>> {
-        let name = self.descriptor().name;
-        Box::pin(async move {
-            Err(TrackerError::Api(format!("{} doesn't support activity history.", name)))
-        })
+        unsupported(self.tracker_name(), "activity history")
     }
 }
 
-/// Stub plugin implementation for additional trackers in the plugin registry.
-struct StubTrackerPlugin {
-    desc: TrackerPluginDescriptor,
+/// Every tracker Tora knows, by id.
+pub struct TrackerRegistry {
+    trackers: HashMap<String, Arc<dyn Tracker>>,
 }
 
-impl StubTrackerPlugin {
-    fn not_configured(&self) -> TrackerError {
-        TrackerError::Api(format!("{} plugin is not yet configured.", self.desc.name))
-    }
-}
-
-impl TrackerPlugin for StubTrackerPlugin {
-    fn descriptor(&self) -> TrackerPluginDescriptor {
-        self.desc.clone()
-    }
-
-    fn verify_account<'a>(
-        &'a self,
-        _username: &'a str,
-        _token: Option<&'a str>,
-    ) -> BoxFuture<'a, Result<TrackerUserProfile, String>> {
-        let name = self.desc.name.clone();
-        Box::pin(async move {
-            Err(format!(
-                "{} plugin slot is registered in Tora's PluginManager. Switch to AniList or configure API credentials.",
-                name
-            ))
-        })
-    }
-
-    fn fetch_user_list<'a>(
-        &'a self,
-        _token: &'a str,
-    ) -> BoxFuture<'a, Result<RemoteListSnapshot, TrackerError>> {
-        let err = self.not_configured();
-        Box::pin(async move { Err(err) })
-    }
-
-    fn viewer_id<'a>(&'a self, _token: &'a str) -> BoxFuture<'a, Result<i64, TrackerError>> {
-        let err = self.not_configured();
-        Box::pin(async move { Err(err) })
-    }
-
-    fn fetch_media_details<'a>(
-        &'a self,
-        _ids: &'a [i64],
-    ) -> BoxFuture<'a, Result<Vec<AnimeEntry>, TrackerError>> {
-        let err = self.not_configured();
-        Box::pin(async move { Err(err) })
-    }
-
-    fn search_anime<'a>(
-        &'a self,
-        _query: &'a str,
-        _season: Option<&'a str>,
-        _year: Option<u32>,
-    ) -> BoxFuture<'a, Result<Vec<AnimeEntry>, String>> {
-        let name = self.desc.name.clone();
-        Box::pin(async move { Err(format!("{} plugin is not yet configured.", name)) })
-    }
-
-    fn fetch_season_page<'a>(
-        &'a self,
-        _season: &'a str,
-        _year: u32,
-        _page: u32,
-    ) -> BoxFuture<'a, Result<SeasonPage, TrackerError>> {
-        let err = self.not_configured();
-        Box::pin(async move { Err(err) })
-    }
-
-    fn fetch_airing_schedule_page<'a>(
-        &'a self,
-        _from: i64,
-        _to: i64,
-        _page: u32,
-    ) -> BoxFuture<'a, Result<AiringSchedulePage, TrackerError>> {
-        let err = self.not_configured();
-        Box::pin(async move { Err(err) })
-    }
-
-    fn fetch_media_metadata<'a>(
-        &'a self,
-        _id: i64,
-    ) -> BoxFuture<'a, Result<Option<SeasonalAnime>, TrackerError>> {
-        let err = self.not_configured();
-        Box::pin(async move { Err(err) })
-    }
-
-    fn save_list_entry<'a>(
-        &'a self,
-        _token: &'a str,
-        _update: &'a TrackerEntryUpdate,
-    ) -> BoxFuture<'a, Result<RemoteEntryState, TrackerError>> {
-        let err = self.not_configured();
-        Box::pin(async move { Err(err) })
-    }
-
-    fn delete_list_entry<'a>(
-        &'a self,
-        _token: &'a str,
-        _media_id: i64,
-        _list_entry_id: Option<i64>,
-    ) -> BoxFuture<'a, Result<(), TrackerError>> {
-        let err = self.not_configured();
-        Box::pin(async move { Err(err) })
-    }
-}
-
-pub struct PluginManager {
-    plugins: HashMap<String, Arc<dyn TrackerPlugin>>,
-}
-
-impl PluginManager {
+impl TrackerRegistry {
     pub fn new() -> Self {
-        let mut plugins: HashMap<String, Arc<dyn TrackerPlugin>> = HashMap::new();
-
-        let anilist = Arc::new(AniListPlugin::new());
-        plugins.insert("anilist".into(), anilist);
-
-        let mal = Arc::new(StubTrackerPlugin {
-            desc: TrackerPluginDescriptor {
-                id: "myanimelist".into(),
-                name: "MyAnimeList (MAL)".into(),
-                description: "Internal plugin slot for MyAnimeList REST API v2.".into(),
-                website_url: "https://myanimelist.net".into(),
-                oauth_authorize_url: "https://myanimelist.net/v1/oauth2/authorize".into(),
-                supports_public_username_sync: true,
-                supports_oauth_token: true,
-                supports_seasonal_browse: true,
-                status: "plugin-slot".into(),
-            },
-        });
-        plugins.insert("myanimelist".into(), mal);
-
-        let kitsu = Arc::new(StubTrackerPlugin {
-            desc: TrackerPluginDescriptor {
-                id: "kitsu".into(),
-                name: "Kitsu".into(),
-                description: "Internal plugin slot for Kitsu JSON:API tracker sync.".into(),
-                website_url: "https://kitsu.app".into(),
-                oauth_authorize_url: "https://kitsu.app/api/oauth/token".into(),
-                supports_public_username_sync: true,
-                supports_oauth_token: true,
-                supports_seasonal_browse: false,
-                status: "plugin-slot".into(),
-            },
-        });
-        plugins.insert("kitsu".into(), kitsu);
-
-        Self { plugins }
+        let mut registry = Self { trackers: HashMap::new() };
+        registry.register(Arc::new(AniListPlugin::new()));
+        registry
     }
 
-    pub fn list_descriptors(&self) -> Vec<TrackerPluginDescriptor> {
-        let mut list: Vec<TrackerPluginDescriptor> =
-            self.plugins.values().map(|p| p.descriptor()).collect();
+    /// Register (or replace) a tracker under its descriptor's id. Tests use it to inject mocks.
+    pub fn register(&mut self, tracker: Arc<dyn Tracker>) {
+        self.trackers.insert(tracker.descriptor().id, tracker);
+    }
+
+    /// The tracker with this id; `None` for an unknown id (never another tracker in its place).
+    pub fn get(&self, id: &str) -> Option<Arc<dyn Tracker>> {
+        self.trackers.get(id).cloned()
+    }
+
+    /// Every tracker's descriptor, by id.
+    pub fn descriptors(&self) -> Vec<TrackerDescriptor> {
+        let mut list: Vec<TrackerDescriptor> = self.trackers.values().map(|t| t.descriptor()).collect();
         list.sort_by(|a, b| a.id.cmp(&b.id));
         list
     }
+}
 
-    /// Register (or replace) a plugin under `plugin_id`. Used by tests to inject mock trackers.
-    pub fn register(&mut self, plugin_id: &str, plugin: Arc<dyn TrackerPlugin>) {
-        self.plugins.insert(plugin_id.to_string(), plugin);
+impl Default for TrackerRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registry_knows_anilist_and_nothing_else() {
+        let registry = TrackerRegistry::new();
+        assert!(registry.get(DEFAULT_TRACKER).is_some());
+        // An unknown id is never answered by another tracker
+        assert!(registry.get("myanimelist").is_none());
+        let ids: Vec<String> = registry.descriptors().into_iter().map(|d| d.id).collect();
+        assert_eq!(ids, vec!["anilist"]);
     }
 
-    pub fn get(&self, plugin_id: &str) -> Option<Arc<dyn TrackerPlugin>> {
-        self.plugins
-            .get(plugin_id)
-            .cloned()
-            .or_else(|| self.plugins.get("anilist").cloned())
+    #[test]
+    fn unsupported_errors_name_the_tracker() {
+        struct Bare;
+        impl AccountExtras for Bare {
+            fn tracker_name(&self) -> &str {
+                "Bare"
+            }
+        }
+        let err = futures_lite_block_on(Bare.create_custom_list("t", "x")).unwrap_err();
+        assert_eq!(err.kind(), "unsupported");
+        assert_eq!(err.to_string(), "Bare doesn't support creating custom lists.");
+    }
+
+    fn futures_lite_block_on<T>(f: BoxFuture<'_, T>) -> T {
+        tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(f)
     }
 }

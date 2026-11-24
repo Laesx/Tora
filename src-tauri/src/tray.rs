@@ -128,7 +128,12 @@ pub fn apply_settings(app: &AppHandle, settings: &AppSettings) {
 }
 
 /// Makes the Windows startup entry match the setting (also fixes a stale entry after a reinstall).
+/// Release builds only: the entry is named after the product, so a dev build would point the installed
+/// app's entry at itself, or remove it.
 pub fn sync_autostart(app: &AppHandle, enabled: bool) {
+    if cfg!(debug_assertions) {
+        return;
+    }
     let launcher = app.autolaunch();
     match launcher.is_enabled() {
         Ok(current) if current == enabled => {}

@@ -1,12 +1,13 @@
 import React, { useMemo, useState } from "react";
 import { ChevronUp, ExternalLink, Pin, PinOff, RefreshCw, StickyNote, UserCheck } from "lucide-react";
 import { AnimeEntry, FollowingEntry, FollowingPage } from "@/lib/types";
-import { anilistAnimeUrl, openExternal } from "@/lib/anime";
+import { openExternal } from "@/lib/anime";
 import { STATUS_INFO } from "@/lib/status";
 import { formatRelativeTime } from "@/lib/format";
 import { formatScore } from "@/lib/scores";
 import { useScoreFormat } from "@/contexts/scoreFormat";
 import { useToast } from "@/contexts/toast";
+import { useTracker } from "@/contexts/tracker";
 import { useNow } from "@/hooks/useNow";
 import { PageSection } from "./PageSection";
 import { togglePinnedUser, usePinnedUsers } from "./followingPins";
@@ -28,6 +29,7 @@ export const FollowingSection: React.FC<{
   onRefresh: () => void;
 }> = ({ anime, page, loading, refreshing, onRefresh }) => {
   const pins = usePinnedUsers();
+  const tracker = useTracker();
   const [expanded, setExpanded] = useState(false);
 
   // Pinned people in the order they were pinned, then everyone else by last update
@@ -80,7 +82,7 @@ export const FollowingSection: React.FC<{
             expanded={expanded}
             canCollapse={entries.length > PREVIEW_COUNT}
             onToggle={() => setExpanded((v) => !v)}
-            moreOnAniList={page.has_more ? anilistAnimeUrl(anime) : null}
+            moreUrl={page.has_more ? tracker.animeUrl(anime) : null}
           />
         </>
       )}
@@ -98,20 +100,21 @@ const FollowingRow: React.FC<{ entry: FollowingEntry; anime: AnimeEntry; pinned:
   pinned,
 }) => {
   const showToast = useToast();
+  const tracker = useTracker();
   const scoreFormat = useScoreFormat();
   const now = useNow(60_000);
   const [noteOpen, setNoteOpen] = useState(false);
   const status = STATUS_INFO[e.status];
   const score = e.score > 0 ? formatScore(e.score, scoreFormat) : null;
   const progress = e.status === "COMPLETED" && !e.repeat ? null : `${e.progress}/${anime.episodes ?? "?"}`;
-  const openProfile = () => openExternal(`https://anilist.co/user/${encodeURIComponent(e.user_name)}`, showToast);
+  const openProfile = () => openExternal(tracker.link("user", e.user_name), showToast);
   const PinIcon = pinned ? PinOff : Pin;
   return (
     <div className="group rounded-lg hover:bg-bg-tertiary/50 transition">
       <div className="flex items-center gap-2 px-1.5 py-1.5 min-w-0">
         <button
           onClick={openProfile}
-          title={`${e.user_name} on AniList`}
+          title={`${e.user_name} on ${tracker.name}`}
           className="w-8 h-8 rounded-full overflow-hidden bg-bg-tertiary shrink-0"
         >
           {e.avatar && <img src={e.avatar} alt="" loading="lazy" decoding="async" className="w-full h-full object-cover" />}
@@ -120,7 +123,7 @@ const FollowingRow: React.FC<{ entry: FollowingEntry; anime: AnimeEntry; pinned:
           <div className="flex items-center gap-1 min-w-0">
             <button
               onClick={openProfile}
-              title={`${e.user_name} on AniList`}
+              title={`${e.user_name} on ${tracker.name}`}
               className="text-xs font-semibold text-text-primary truncate hover:text-accent text-left"
             >
               {e.user_name}
@@ -171,10 +174,12 @@ const FollowingFooter: React.FC<{
   expanded: boolean;
   canCollapse: boolean;
   onToggle: () => void;
-  moreOnAniList: string | null;
-}> = ({ hidden, expanded, canCollapse, onToggle, moreOnAniList }) => {
+  /** The anime's page on the tracker, when it lists more followed users than shown */
+  moreUrl: string | null;
+}> = ({ hidden, expanded, canCollapse, onToggle, moreUrl }) => {
   const showToast = useToast();
-  if (!canCollapse && !moreOnAniList) return null;
+  const tracker = useTracker();
+  if (!canCollapse && !moreUrl) return null;
   return (
     <div className="flex items-center justify-between gap-2">
       {canCollapse ? (
@@ -191,13 +196,13 @@ const FollowingFooter: React.FC<{
       ) : (
         <span />
       )}
-      {moreOnAniList && expanded && (
+      {moreUrl && expanded && (
         <button
-          onClick={() => openExternal(moreOnAniList, showToast)}
+          onClick={() => openExternal(moreUrl, showToast)}
           className="flex items-center gap-1 text-[11px] font-semibold text-text-secondary hover:text-accent"
         >
           <ExternalLink className="w-3 h-3" />
-          More on AniList
+          More on {tracker.name}
         </button>
       )}
     </div>

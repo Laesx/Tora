@@ -1,6 +1,6 @@
 import React from "react";
 import { ArrowLeft, ArrowRight, ExternalLink, Keyboard, LogIn, LogOut, Search, Settings, User } from "lucide-react";
-import { AppSettings } from "@/lib/types";
+import { useTracker } from "@/contexts/tracker";
 import toraMark from "@/assets/tora-mark.svg";
 import { KeyHint } from "@/components/KeyHint";
 import { NAV_ITEMS, NavTab, SETTINGS_SHORTCUT_DIGIT } from "./nav";
@@ -20,8 +20,6 @@ interface SidebarProps {
   /** Ctrl is held: show each tab's Ctrl+N badge */
   showShortcutHints: boolean;
   listCount: number;
-  settings: AppSettings | null;
-  isSignedIn: boolean;
   isAuthorizing: boolean;
   onSignIn: () => void;
   onSignOut: () => void;
@@ -49,7 +47,7 @@ const iconButtonClass = (active: boolean) =>
 const navArrowClass =
   "p-1.5 text-text-muted hover:text-accent hover:bg-bg-tertiary transition cursor-pointer disabled:opacity-40 disabled:pointer-events-none";
 
-/** Brand, Back / Forward, Ctrl+S button, tab navigation, keyboard shortcuts and the AniList account card. */
+/** Brand, Back / Forward, Ctrl+S button, tab navigation, keyboard shortcuts and the tracker account card. */
 export const Sidebar: React.FC<SidebarProps> = ({
   activeTab,
   onNavigate,
@@ -63,8 +61,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onOpenShortcuts,
   showShortcutHints,
   listCount,
-  settings,
-  isSignedIn,
   isAuthorizing,
   onSignIn,
   onSignOut,
@@ -177,64 +173,82 @@ export const Sidebar: React.FC<SidebarProps> = ({
         <kbd className="px-1.5 py-0.5 text-[10px] font-mono rounded bg-bg-tertiary text-text-secondary">?</kbd>
       </button>
 
-      {/* AniList account */}
-      {isSignedIn && settings ? (
-        <div className="flex items-center justify-between gap-2 p-2 rounded-xl bg-bg-primary border border-border-subtle">
-          <button
-            onClick={onOpenProfile}
-            className="flex items-center gap-2.5 min-w-0 flex-1 text-left group cursor-pointer"
-            title={`Open @${settings.anilist_username} on AniList`}
-          >
-            {settings.anilist_avatar ? (
-              <img
-                src={settings.anilist_avatar}
-                alt={settings.anilist_username}
-                className="w-9 h-9 rounded-full object-cover border border-border-subtle group-hover:border-accent transition shrink-0 bg-bg-tertiary"
-              />
-            ) : (
-              <div className="w-9 h-9 rounded-full bg-accent/15 border border-accent/30 group-hover:border-accent flex items-center justify-center text-accent font-bold text-xs shrink-0 transition">
-                {settings.anilist_username ? (
-                  settings.anilist_username.charAt(0).toUpperCase()
-                ) : (
-                  <User className="w-4 h-4" />
-                )}
-              </div>
-            )}
-            <div className="min-w-0 flex-1">
-              <div className="text-xs font-bold text-text-primary group-hover:text-accent transition truncate flex items-center gap-1">
-                <span className="truncate">{settings.anilist_username || "AniList User"}</span>
-                <ExternalLink className="w-3 h-3 opacity-0 group-hover:opacity-100 transition shrink-0 text-accent" />
-              </div>
-              <div className="text-[10px] text-text-muted truncate">AniList Profile</div>
-            </div>
-          </button>
-
-          <button
-            onClick={onSignOut}
-            className="p-2 rounded-lg text-text-muted hover:text-rose-400 hover:bg-rose-500/10 transition shrink-0 cursor-pointer"
-            title="Sign Out"
-          >
-            <LogOut className="w-4 h-4" />
-          </button>
-        </div>
-      ) : (
-        <button
-          onClick={onSignIn}
-          className="w-full flex items-center gap-3 p-3 rounded-xl bg-gradient-to-r from-accent/15 via-bg-primary to-bg-primary border border-accent/40 hover:border-accent hover:from-accent/25 transition text-left group cursor-pointer shadow-sm"
-        >
-          <div className="w-9 h-9 rounded-xl bg-accent text-white flex items-center justify-center shrink-0 shadow-sm group-hover:scale-105 transition">
-            <LogIn className="w-4 h-4" />
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="text-xs font-bold text-text-primary group-hover:text-accent transition">
-              {isAuthorizing ? "Waiting for AniList..." : "Sign in with AniList"}
-            </div>
-            <div className="text-[10px] text-text-muted truncate">
-              {isAuthorizing ? "Authorize in browser or click to retry" : "Click to authorize & sync your list"}
-            </div>
-          </div>
-        </button>
-      )}
+      <AccountCard
+        isAuthorizing={isAuthorizing}
+        onSignIn={onSignIn}
+        onSignOut={onSignOut}
+        onOpenProfile={onOpenProfile}
+      />
     </div>
   </aside>
 );
+
+/** The signed-in account (opens its profile, signs out), or the sign-in button for the active tracker. */
+const AccountCard: React.FC<{
+  isAuthorizing: boolean;
+  onSignIn: () => void;
+  onSignOut: () => void;
+  onOpenProfile: () => void;
+}> = ({ isAuthorizing, onSignIn, onSignOut, onOpenProfile }) => {
+  const { account, name } = useTracker();
+  if (account) {
+    return (
+      <div className="flex items-center justify-between gap-2 p-2 rounded-xl bg-bg-primary border border-border-subtle">
+        <button
+          onClick={onOpenProfile}
+          className="flex items-center gap-2.5 min-w-0 flex-1 text-left group cursor-pointer"
+          title={`Open @${account.username} on ${name}`}
+        >
+          {account.avatar_url ? (
+            <img
+              src={account.avatar_url}
+              alt={account.username}
+              className="w-9 h-9 rounded-full object-cover border border-border-subtle group-hover:border-accent transition shrink-0 bg-bg-tertiary"
+            />
+          ) : (
+            <div className="w-9 h-9 rounded-full bg-accent/15 border border-accent/30 group-hover:border-accent flex items-center justify-center text-accent font-bold text-xs shrink-0 transition">
+              {account.username ? (
+                account.username.charAt(0).toUpperCase()
+              ) : (
+                <User className="w-4 h-4" />
+              )}
+            </div>
+          )}
+          <div className="min-w-0 flex-1">
+            <div className="text-xs font-bold text-text-primary group-hover:text-accent transition truncate flex items-center gap-1">
+              <span className="truncate">{account.username || `${name} user`}</span>
+              <ExternalLink className="w-3 h-3 opacity-0 group-hover:opacity-100 transition shrink-0 text-accent" />
+            </div>
+            <div className="text-[10px] text-text-muted truncate">{name} profile</div>
+          </div>
+        </button>
+
+        <button
+          onClick={onSignOut}
+          className="p-2 rounded-lg text-text-muted hover:text-rose-400 hover:bg-rose-500/10 transition shrink-0 cursor-pointer"
+          title="Sign Out"
+        >
+          <LogOut className="w-4 h-4" />
+        </button>
+      </div>
+    );
+  }
+  return (
+      <button
+        onClick={onSignIn}
+        className="w-full flex items-center gap-3 p-3 rounded-xl bg-gradient-to-r from-accent/15 via-bg-primary to-bg-primary border border-accent/40 hover:border-accent hover:from-accent/25 transition text-left group cursor-pointer shadow-sm"
+      >
+        <div className="w-9 h-9 rounded-xl bg-accent text-white flex items-center justify-center shrink-0 shadow-sm group-hover:scale-105 transition">
+          <LogIn className="w-4 h-4" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="text-xs font-bold text-text-primary group-hover:text-accent transition">
+            {isAuthorizing ? `Waiting for ${name}...` : `Sign in with ${name}`}
+          </div>
+          <div className="text-[10px] text-text-muted truncate">
+            {isAuthorizing ? "Authorize in browser or click to retry" : "Click to authorize & sync your list"}
+          </div>
+        </div>
+      </button>
+  );
+};

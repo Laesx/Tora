@@ -27,7 +27,7 @@ import {
   AppSettings,
   ProcessMemory,
   RelationsInfo,
-  TrackerPluginDescriptor,
+  TrackerDescriptor,
 } from "@/lib/types";
 import { ACCENT_SWATCHES, THEME_PRESETS, applyThemeToDocument } from "@/lib/theme";
 import { formatBytes } from "@/lib/format";
@@ -40,6 +40,7 @@ import { TorrentSettingsSection } from "@/features/torrents/TorrentSettings";
 import { AniListHistorySettings } from "@/features/settings/AniListHistorySettings";
 import { SettingsBackupsPanel } from "./SettingsBackups";
 import { useToast } from "@/contexts/toast";
+import { useTracker } from "@/contexts/tracker";
 import { logError } from "@/lib/log";
 
 export type SettingsSection =
@@ -178,7 +179,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   updateChecking,
   onOpenChangelog,
 }) => {
-  const [plugins, setPlugins] = useState<TrackerPluginDescriptor[]>([]);
+  const [trackers, setTrackers] = useState<TrackerDescriptor[]>([]);
+  const { tracker: activeTracker, account } = useTracker();
   const [section, setSection] = useState<SettingsSection>(sectionRequest?.section ?? "appearance");
 
   useEffect(() => {
@@ -186,7 +188,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   }, [sectionRequest]);
 
   useEffect(() => {
-    toraApi.getTrackerPlugins().then(setPlugins).catch(logError("settings", "Loading tracker plugins failed"));
+    toraApi.getTrackers().then(setTrackers).catch(logError("settings", "Loading trackers failed"));
   }, []);
 
   const handleSelectTheme = async (themeId: string, defaultAccent?: string) => {
@@ -439,7 +441,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
         {section === "tracker" && (
           <>
-            {/* Internal Tracker Plugin System (AniList Primary + Extensible Slots) */}
+            {/* The trackers Tora can sync with: the active one is the signed-in account's (else the list owner's) */}
             <div className="bg-bg-secondary border border-border-subtle rounded-2xl p-5 space-y-5">
               <div>
                 <h2 className="text-base font-bold text-text-primary flex items-center gap-2">
@@ -447,47 +449,28 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   Tracker
                 </h2>
                 <p className="text-xs text-text-secondary mt-0.5">
-                  Select the tracker used for synchronization and metadata discovery.
+                  The service your list syncs with. Sign in from the sidebar.
                 </p>
               </div>
 
-              {/* Plugin Cards */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                {plugins.map((plug) => {
-                  const isSelected = settings.active_tracker_plugin === plug.id;
-                  const isDisabled = plug.status !== "active";
+                {trackers.map((t) => {
+                  const isActive = activeTracker?.id === t.id;
                   return (
                     <div
-                      key={plug.id}
-                      onClick={() => {
-                        if (isDisabled) return;
-                        onUpdateSettings({
-                          ...settings,
-                          active_tracker_plugin: plug.id,
-                        });
-                      }}
-                      className={`p-4 rounded-xl border transition space-y-2 ${isDisabled
-                        ? "opacity-50 cursor-not-allowed border-border-subtle bg-bg-primary select-none"
-                        : isSelected
-                          ? "border-accent bg-accent/10 cursor-pointer"
-                          : "border-border-subtle bg-bg-primary hover:border-text-muted cursor-pointer"
-                        }`}
+                      key={t.id}
+                      className={`p-4 rounded-xl border space-y-2 ${isActive ? "border-accent bg-accent/10" : "border-border-subtle bg-bg-primary"}`}
                     >
                       <div className="flex items-center justify-between">
-                        <span className="text-xs font-bold text-text-primary">
-                          {plug.name}
-                        </span>
-                        <span
-                          className={`px-2 py-0.5 rounded text-[10px] font-semibold uppercase ${plug.status === "active"
-                            ? "bg-emerald-500/20 text-emerald-400"
-                            : "bg-bg-tertiary text-text-muted"
-                            }`}
-                        >
-                          {plug.status === "active" ? "active" : "coming soon"}
-                        </span>
+                        <span className="text-xs font-bold text-text-primary">{t.name}</span>
+                        {isActive && (
+                          <span className="px-2 py-0.5 rounded text-[10px] font-semibold uppercase bg-emerald-500/20 text-emerald-400">
+                            active
+                          </span>
+                        )}
                       </div>
                       <p className="text-[11px] text-text-muted leading-relaxed">
-                        {plug.description}
+                        {isActive && account ? `Signed in as @${account.username}` : isActive ? "Signed out" : "Not in use"}
                       </p>
                     </div>
                   );
