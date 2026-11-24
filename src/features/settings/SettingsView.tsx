@@ -118,6 +118,29 @@ const UPDATE_OPTIONS: { key: "update_wait_for_close" | "update_require_focus"; l
   },
 ];
 
+// Settings -> Playback: what detection reacts to and when it opens Now Playing
+const DETECTION_OPTIONS: {
+  key: "recognition_library_only" | "now_playing_focus_matched" | "now_playing_focus_unmatched";
+  label: string;
+  hint: string;
+}[] = [
+  {
+    key: "recognition_library_only",
+    label: "Only detect files in my library",
+    hint: "Videos outside your library folders (and streams) are ignored, as if nothing were playing",
+  },
+  {
+    key: "now_playing_focus_matched",
+    label: "Open Now Playing when an episode is recognized",
+    hint: "Otherwise the playing banner shows on the tab you're on",
+  },
+  {
+    key: "now_playing_focus_unmatched",
+    label: "Open Now Playing when a file isn't recognized",
+    hint: "So you can link it to an anime right away",
+  },
+];
+
 // Settings -> About: what Tora is built on (links open in the browser)
 const CREDITS: { name: string; role: string; license?: string; url: string }[] = [
   { name: "Taiga", role: "The anime tracker Tora is inspired by", url: "https://taiga.moe" },
@@ -506,7 +529,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     className="w-full px-3 py-2 rounded-xl bg-bg-primary border border-border-subtle text-text-primary cursor-pointer"
                   >
                     <option value="auto">Automatic: update the list after the delay</option>
-                    <option value="manual">Manual: open Now Playing and offer an Update button</option>
+                    <option value="manual">Manual: offer an Update button in Now Playing</option>
                   </select>
                 </div>
 
@@ -544,6 +567,21 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                       disabled={isManualUpdate}
                       onChange={(e) => onUpdateSettings({ ...settings, [key]: e.target.checked })}
                       className="rounded accent-accent w-4 h-4 mt-0.5 cursor-pointer disabled:cursor-not-allowed"
+                    />
+                    <span>
+                      <span className="font-semibold text-text-primary">{label}</span>
+                      <span className="block text-[11px] text-text-muted">{hint}</span>
+                    </span>
+                  </label>
+                ))}
+
+                {DETECTION_OPTIONS.map(({ key, label, hint }) => (
+                  <label key={key} className="flex items-start gap-2.5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={settings[key]}
+                      onChange={(e) => onUpdateSettings({ ...settings, [key]: e.target.checked })}
+                      className="rounded accent-accent w-4 h-4 mt-0.5 cursor-pointer"
                     />
                     <span>
                       <span className="font-semibold text-text-primary">{label}</span>

@@ -22,6 +22,8 @@ interface NowPlayingHeroProps {
   onConfirmUpdate: () => void;
   /** Show this season in the Seasons tab */
   onOpenSeason: (season: string, year: number) => void;
+  /** The "Media detection" switch, placed in the hero's top-right corner */
+  detectionToggle: React.ReactNode;
 }
 
 const secondaryButton =
@@ -41,6 +43,7 @@ export const NowPlayingHero: React.FC<NowPlayingHeroProps> = ({
   onLinkDetectedEpisode,
   onConfirmUpdate,
   onOpenSeason,
+  detectionToggle,
 }) => {
   const { searchTorrents } = useAnimeActions();
   const [isRelinking, setIsRelinking] = useState(false);
@@ -127,6 +130,9 @@ export const NowPlayingHero: React.FC<NowPlayingHeroProps> = ({
   if (entry) {
     const total = entry.episodes;
     return (
+      <>
+      {/* On the banner, like the anime page's back / close pills */}
+      <div className="absolute top-3 right-4 z-10">{detectionToggle}</div>
       <AnimePage
         key={entry.id}
         anime={entry}
@@ -157,14 +163,16 @@ export const NowPlayingHero: React.FC<NowPlayingHeroProps> = ({
         belowHero={linkPanel}
         footer={windowTitle}
       />
+      </>
     );
   }
 
   // Unmatched (or matched to an entry the list does not hold yet): only what the player says
   const title = session.matched_anime_title || session.parsed.anime_title || session.cleaned_media_title;
   return (
-    <div className="space-y-5 px-6 pt-5 max-w-7xl mx-auto">
+    <div className="space-y-5 px-6 pt-6 max-w-7xl mx-auto">
       <div className="relative rounded-2xl overflow-hidden border border-border-subtle bg-bg-secondary">
+        <div className="absolute top-3 right-3 z-10">{detectionToggle}</div>
         <div className="relative flex flex-col sm:flex-row gap-6 p-6">
           {session.matched_cover_image ? (
             <img
@@ -179,7 +187,8 @@ export const NowPlayingHero: React.FC<NowPlayingHeroProps> = ({
             </div>
           )}
           <div className="flex-1 min-w-0 space-y-3">
-            <div className="flex flex-wrap items-center gap-2">{badges}</div>
+            {/* Room for the detection switch in the corner */}
+            <div className="flex flex-wrap items-center gap-2 pr-36">{badges}</div>
             <h2 className="text-2xl font-extrabold text-text-primary leading-tight">{title}</h2>
             <div className="text-lg font-bold text-accent">
               Episode {ep ?? "?"}

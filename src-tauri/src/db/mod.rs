@@ -315,6 +315,16 @@ pub struct AppSettings {
     pub anilist_user_id: Option<i64>,
     pub anilist_avatar: Option<String>,
     pub recognition_enabled: bool,
+    /// Only files in the library (under an enabled library folder, or an indexed file's name when the
+    /// player gives no path) start a playback session; anything else counts as nothing playing.
+    #[serde(default)]
+    pub recognition_library_only: bool,
+    /// A new session whose file matched an anime switches to the Now Playing tab.
+    #[serde(default = "default_true")]
+    pub now_playing_focus_matched: bool,
+    /// A new session whose file matched nothing switches to the Now Playing tab (to link it).
+    #[serde(default = "default_true")]
+    pub now_playing_focus_unmatched: bool,
     pub recognition_delay_seconds: u64,
     /// "auto": count down, then update the list (default) | "manual": never update by itself, Now
     /// Playing offers an "Update" button.
@@ -433,6 +443,9 @@ impl Default for AppSettings {
             anilist_user_id: None,
             anilist_avatar: None,
             recognition_enabled: true,
+            recognition_library_only: false,
+            now_playing_focus_matched: true,
+            now_playing_focus_unmatched: true,
             recognition_delay_seconds: 120,
             update_mode: default_update_mode(),
             update_wait_for_close: false,
@@ -4498,6 +4511,58 @@ impl Database {
         self.match_episode_to_anime(parsed, media_path)
     }
 
+    /// Whether what a player is playing belongs to the library (`recognition_library_only`). With a path:
+    /// an indexed file, or a file under an enabled library folder (not indexed yet). With only a title: an
+    /// indexed file's name, with or without its extension.
+    pub fn is_library_media(&self, media_path: Option<&str>, file_name: &str) -> bool {
+        let Ok(conn) = self.reader() else {
+            return false;
+        };
+        let indexed = |sql: &str, value: &str| {
+            conn.query_row(sql, params![value], |_| Ok(()))
+                .optional()
+                .ok()
+                .flatten()
+                .is_some()
+        };
+        match media_path {
+            Some(path) => {
+                if indexed(
+                    "SELECT 1 FROM local_episodes WHERE file_path = ?1 COLLATE NOCASE LIMIT 1",
+                    path,
+                ) {
+                    return true;
+                }
+                let file_key = normalize_dir_key(path);
+                let folders: Vec<String> = conn
+                    .prepare("SELECT path FROM library_folders WHERE enabled = 1")
+                    .and_then(|mut stmt| {
+                        stmt.query_map([], |r| r.get::<_, String>(0))?
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                    .unwrap_or_default();
+                folders.iter().any(|folder| {
+                    let key = normalize_dir_key(folder);
+                    !key.is_empty()
+                        && file_key.len() > key.len()
+                        && file_key.starts_with(&key)
+                        && file_key[key.len()..].starts_with('\\')
+                })
+            }
+            None => {
+                let name = file_name.trim();
+                !name.is_empty()
+                    && indexed(
+                        "SELECT 1 FROM local_episodes
+                         WHERE file_name = ?1 COLLATE NOCASE
+                            OR substr(file_name, 1, length(?1) + 1) = ?1 || '.' COLLATE NOCASE
+                         LIMIT 1",
+                        name,
+                    )
+            }
+        }
+    }
+
     pub fn record_watch_history(
         &self,
         anime_id: Option<i64>,
@@ -5292,6 +5357,36 @@ mod tests {
         assert!(db.set_custom_folder_if_empty(7, "D:/Anime/Show").unwrap());
         assert!(!db.set_custom_folder_if_empty(7, "D:/Other").unwrap());
         assert_eq!(db.get_anime_entry_by_id(7).unwrap().custom_folder.as_deref(), Some("D:/Anime/Show"));
+    }
+
+    #[test]
+    fn library_media_by_path_folder_or_file_name() {
+        let db = Database::open_in_memory().expect("db");
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute_batch(
+                "INSERT INTO library_folders (id, path, label, drive_root, enabled) VALUES
+                    (1, 'D:\\Anime', 'Anime', 'D:\\', 1),
+                    (2, 'E:\\Off', 'Off', 'E:\\', 0);
+                 INSERT INTO local_episodes (folder_id, file_path, file_name, drive_root, parsed_title, normalized_title)
+                    VALUES (1, 'F:\\Moved\\Show - 01.mkv', 'Show - 01.mkv', 'F:\\', 'Show', 'show');",
+            )
+            .unwrap();
+        }
+        // Indexed path, any case
+        assert!(db.is_library_media(Some("f:\\moved\\show - 01.MKV"), "show - 01.MKV"));
+        // Under an enabled library folder, not indexed yet (by whole segments)
+        assert!(db.is_library_media(Some("D:/Anime/New/Show - 02.mkv"), "Show - 02.mkv"));
+        assert!(!db.is_library_media(Some("D:\\AnimeOther\\x.mkv"), "x.mkv"));
+        // A disabled folder or anywhere else
+        assert!(!db.is_library_media(Some("E:\\Off\\Show - 03.mkv"), "Show - 03.mkv"));
+        assert!(!db.is_library_media(Some("C:\\Videos\\clip.mp4"), "clip.mp4"));
+        // Title only: an indexed file's name, with or without its extension
+        assert!(db.is_library_media(None, "Show - 01.mkv"));
+        assert!(db.is_library_media(None, "show - 01"));
+        assert!(!db.is_library_media(None, "Show - 0"));
+        assert!(!db.is_library_media(None, "Some YouTube video"));
+        assert!(!db.is_library_media(None, "  "));
     }
 
     #[test]

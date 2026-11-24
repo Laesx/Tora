@@ -12,7 +12,7 @@ const sameSession = (a: DetectedMediaSession, b: DetectedMediaSession) =>
  * different file starts playing, `onScrobbled` when the backend auto-synced the episode.
  */
 export function useMediaPoll(handlers: {
-  onNewSession: () => void;
+  onNewSession: (session: DetectedMediaSession) => void;
   onScrobbled: (session: DetectedMediaSession) => void;
 }) {
   const [activeSession, setActiveSession] = useState<DetectedMediaSession | null>(null);
@@ -34,7 +34,7 @@ export function useMediaPoll(handlers: {
         const session = await toraApi.pollMediaRecognition();
         const prev = sessionRef.current;
         if (!prev && !session) return;
-        if (session && (!prev || !sameSession(prev, session))) handlersRef.current.onNewSession();
+        if (session && (!prev || !sameSession(prev, session))) handlersRef.current.onNewSession(session);
         if (session?.matched_anime_id && session.auto_synced && !prev?.auto_synced) {
           handlersRef.current.onScrobbled(session);
         }

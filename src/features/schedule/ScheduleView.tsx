@@ -83,11 +83,26 @@ const LIST_STATUS_OPTIONS: { id: ListStatusFilter; label: string }[] = [
   { id: "watching", label: "Only Watching" },
 ];
 
+/** One anime in a slot: several episodes released at once (a whole season drop) share one card. */
+interface SlotEntry {
+  item: AiringScheduleItem;
+  /** Ascending */
+  episodes: number[];
+}
+
 /** Airings of one day sharing the same time. */
 interface Slot {
   airingAt: number;
-  items: AiringScheduleItem[];
+  entries: SlotEntry[];
 }
+
+/** "1–12" for a run of episodes, "1, 3, 5" otherwise. */
+const episodeLabel = (episodes: number[]) => {
+  const first = episodes[0];
+  const last = episodes[episodes.length - 1];
+  if (episodes.length === 1) return String(first);
+  return last - first === episodes.length - 1 ? `${first}–${last}` : episodes.join(", ");
+};
 
 /** One row of a day's timeline: a time slot or an inferred break, ordered by time. */
 type DayRow = { kind: "slot"; at: number; slot: Slot } | { kind: "break"; at: number; brk: InferredBreak };
@@ -246,10 +261,17 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({
     let last: Slot | null = null;
     for (const item of visible) {
       if (last && last.airingAt === item.airing_at) {
-        last.items.push(item);
+        // Episodes of one anime released at the same time fold into one card
+        const same = last.entries.find((e) => e.item.media.id === item.media.id);
+        if (same) {
+          same.episodes.push(item.episode);
+          same.episodes.sort((a, b) => a - b);
+        } else {
+          last.entries.push({ item, episodes: [item.episode] });
+        }
         continue;
       }
-      last = { airingAt: item.airing_at, items: [item] };
+      last = { airingAt: item.airing_at, entries: [{ item, episodes: [item.episode] }] };
       push(item.airing_at, { kind: "slot", at: item.airing_at, slot: last });
     }
     for (const brk of breaks) push(brk.expectedAt, { kind: "break", at: brk.expectedAt, brk });
@@ -559,7 +581,10 @@ const DaySection: React.FC<{
   // The "now" marker goes before the first upcoming row of today
   const upcoming = isToday ? rows.findIndex((r) => r.at > now) : -1;
   const markerAt = isToday ? (upcoming === -1 ? rows.length : upcoming) : -1;
-  const episodes = rows.reduce((n, r) => n + (r.kind === "slot" ? r.slot.items.length : 0), 0);
+  const episodes = rows.reduce(
+    (n, r) => n + (r.kind === "slot" ? r.slot.entries.reduce((m, e) => m + e.episodes.length, 0) : 0),
+    0
+  );
   return (
     <section ref={sectionRef} className="min-w-0 scroll-mt-4">
       <h2 className="mb-3 flex items-baseline gap-1.5">
@@ -579,10 +604,11 @@ const DaySection: React.FC<{
             {i === markerAt && <NowMarker now={now} />}
             {row.kind === "slot" ? (
               <TimeRow at={row.at} now={now} variant={variant}>
-                {row.slot.items.map((item) => (
+                {row.slot.entries.map(({ item, episodes }) => (
                   <ScheduleCard
-                    key={`${item.media.id}-${item.episode}`}
+                    key={`${item.media.id}-${episodes[0]}`}
                     item={item}
+                    episodes={episodes}
                     entry={listById.get(item.media.id)}
                     aired={row.at <= now}
                     handlers={handlers}
@@ -658,19 +684,22 @@ const TimeRow: React.FC<{
 
 const ScheduleCard: React.FC<{
   item: AiringScheduleItem;
+  /** The episodes this card stands for (several when released at once), ascending */
+  episodes: number[];
   entry: AnimeEntry | undefined;
   aired: boolean;
   handlers: CardHandlers;
-}> = ({ item, entry, aired, handlers }) => {
+}> = ({ item, episodes, entry, aired, handlers }) => {
   const titleOf = useAnimeTitle();
   const anime = entry ?? item.media;
   const status = entry ? STATUS_INFO[entry.user_status] : undefined;
-  const watched = !!entry && entry.user_progress >= item.episode;
+  const lastEp = episodes[episodes.length - 1];
+  const watched = !!entry && entry.user_progress >= lastEp;
   // The user's next episode (up to this airing) is downloaded and ready to play
   const nextEp = entry ? entry.user_progress + 1 : 0;
-  const nextReady = !!entry && nextEp <= item.episode && entry.available_episodes.includes(nextEp);
+  const nextReady = !!entry && nextEp <= lastEp && entry.available_episodes.includes(nextEp);
   const behind =
-    entry && aired && WATCHING.includes(entry.user_status) ? Math.max(0, item.episode - entry.user_progress) : 0;
+    entry && aired && WATCHING.includes(entry.user_status) ? Math.max(0, lastEp - entry.user_progress) : 0;
   return (
     <div
       role="button"
@@ -709,7 +738,7 @@ const ScheduleCard: React.FC<{
           {titleOf(anime)}
         </div>
         <div className="text-[10px] text-text-muted mt-0.5">
-          EP {item.episode}
+          EP {episodeLabel(episodes)}
           {anime.episodes ? `/${anime.episodes}` : ""}
           {anime.format ? ` · ${formatEnum(anime.format)}` : ""}
           {item.country && item.country !== "JP" ? ` · ${item.country}` : ""}

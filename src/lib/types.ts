@@ -858,6 +858,12 @@ export interface AppSettings {
   anilist_user_id: number | null;
   anilist_avatar: string | null;
   recognition_enabled: boolean;
+  /** Only files in the library start a playback session (anything else counts as nothing playing) */
+  recognition_library_only: boolean;
+  /** A new session matched to an anime switches to Now Playing */
+  now_playing_focus_matched: boolean;
+  /** A new session that matched nothing switches to Now Playing */
+  now_playing_focus_unmatched: boolean;
   recognition_delay_seconds: number;
   /** "auto": count down, then update the list; "manual": Now Playing offers an Update button */
   update_mode: "auto" | "manual";

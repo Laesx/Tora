@@ -19,8 +19,6 @@ interface SidebarProps {
   onOpenShortcuts: () => void;
   /** Ctrl is held: show each tab's Ctrl+N badge */
   showShortcutHints: boolean;
-  /** A player session is active (pulsing dot on Now Playing) */
-  isPlaying: boolean;
   listCount: number;
   settings: AppSettings | null;
   isSignedIn: boolean;
@@ -64,7 +62,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onOpenPalette,
   onOpenShortcuts,
   showShortcutHints,
-  isPlaying,
   listCount,
   settings,
   isSignedIn,
@@ -150,12 +147,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 <Icon className="w-4 h-4" />
                 {label}
               </span>
-              {/* The count / playing dot fades out under the Ctrl badge */}
+              {/* The count fades out under the Ctrl badge */}
               <span className="relative flex items-center">
                 <span className={`flex items-center transition-opacity duration-200 ${showShortcutHints ? "opacity-0" : "opacity-100"}`}>
-                  {id === "nowplaying" && isPlaying && (
-                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-                  )}
                   {id === "watchlist" && <span className="text-[11px] font-mono opacity-80">{listCount}</span>}
                 </span>
                 <KeyHint label={String(i + 1)} visible={showShortcutHints} className="right-0 top-1/2 -translate-y-1/2" />

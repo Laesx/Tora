@@ -141,13 +141,12 @@ export function useWatchlist({
   const canGroup = !isSearching && (customListFilter !== null || statusFilter === "ALL");
   const grouped = canGroup && prefs.groupByStatus;
 
-  // A search is always grouped: matches from every list, best match first and the sort dropdown as the tie-break
+  // A search is always grouped: matches from every list, in the sort dropdown's order (the palette keeps
+  // best match first)
   const groups = useMemo((): WatchlistGroup[] | null => {
     if (isSearching) {
-      const hits = searchAnime(searchIndex, deferredSearchQuery).sort(
-        (a, b) => b.score - a.score || compareBySort(a.item, b.item)
-      );
-      return groupByStatus(hits.map((h) => h.item), statusOf);
+      const hits = searchAnime(searchIndex, deferredSearchQuery).map((h) => h.item);
+      return groupByStatus(hits.sort(compareBySort), statusOf);
     }
     return grouped ? groupByStatus(listAnime, statusOf) : null;
   }, [isSearching, searchIndex, deferredSearchQuery, compareBySort, grouped, listAnime, statusOf]);

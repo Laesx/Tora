@@ -58,6 +58,9 @@ pub struct AppState {
     /// `Database::matcher_generation` at the last match attempt for the active (unmatched) session.
     /// A continuing unmatched session is only re-matched once the matcher data changed since then.
     pub unmatched_check_generation: AtomicU64,
+    /// `recognition_library_only`: the last media found outside the library (player + title) and when it
+    /// was checked, so the poll skips the query for it for `IGNORED_MEDIA_RECHECK_SECS`.
+    pub ignored_media: Mutex<Option<(String, i64)>>,
     /// RAM cache of fetched torrent feeds + releases sent this session.
     pub torrents: Arc<TorrentCache>,
     /// Discord Rich Presence for the playing anime (fed by the media poll).
@@ -827,6 +830,53 @@ async fn presence_anime_for(
     Some(anime)
 }
 
+/// How long media found outside the library stays ignored before the poll checks it again (a file
+/// that is being downloaded into a library folder gets indexed meanwhile).
+const IGNORED_MEDIA_RECHECK_SECS: i64 = 30;
+
+/// `recognition_library_only`: whether the media a player shows belongs to the library. A miss is
+/// remembered for [`IGNORED_MEDIA_RECHECK_SECS`] and logged once per file.
+async fn is_library_media_cached(
+    state: &AppState,
+    player_name: &str,
+    cleaned_title: &str,
+    media_path: Option<String>,
+    now: i64,
+) -> Result<bool, String> {
+    let key = format!("{}\u{1f}{}", player_name, cleaned_title);
+    let known_miss = {
+        let ignored = state.ignored_media.lock().map_err(|e| e.to_string())?;
+        match ignored.as_ref() {
+            Some((k, at)) if *k == key => Some(now - at < IGNORED_MEDIA_RECHECK_SECS),
+            _ => None,
+        }
+    };
+    if known_miss == Some(true) {
+        return Ok(false);
+    }
+    let db = state.db.clone();
+    let title = cleaned_title.to_string();
+    let in_library =
+        tokio::task::spawn_blocking(move || db.is_library_media(media_path.as_deref(), &title))
+            .await
+            .map_err(|e| e.to_string())?;
+    let mut ignored = state.ignored_media.lock().map_err(|e| e.to_string())?;
+    if in_library {
+        *ignored = None;
+    } else {
+        if known_miss.is_none() {
+            log::info!(
+                target: "playback",
+                "ignored (not in the library): {:?} in {}",
+                cleaned_title,
+                player_name
+            );
+        }
+        *ignored = Some((key, now));
+    }
+    Ok(in_library)
+}
+
 async fn poll_session(
     app: &tauri::AppHandle,
     state: &AppState,
@@ -891,8 +941,15 @@ async fn poll_session(
         // New playback session detected; the previous one may still owe its held update
         end_session(app, state, replaced).await;
 
-        let db = state.db.clone();
         let media_path = media_file_path(&exe_path);
+        if settings.recognition_library_only
+            && !is_library_media_cached(state, &player_name, &cleaned_title, media_path.clone(), now)
+                .await?
+        {
+            return Ok(None);
+        }
+
+        let db = state.db.clone();
         let (parsed, matched, generation) = tokio::task::spawn_blocking(move || {
             let mut parsed = parsed;
             // Read before matching: a change that lands meanwhile triggers one more attempt later.
@@ -2105,6 +2162,7 @@ pub fn run() {
                 oauth_listener_active,
                 sync: sync.clone(),
                 unmatched_check_generation: AtomicU64::new(u64::MAX),
+                ignored_media: Mutex::new(None),
                 torrents: torrent_cache.clone(),
                 discord: DiscordPresence::start(),
             });

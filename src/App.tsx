@@ -298,8 +298,13 @@ export const App: React.FC = () => {
   };
 
   const [activeSession, setActiveSession] = useMediaPoll({
-    // Focus Now Playing when a new playback session is detected (Back returns to what was open)
-    onNewSession: () => {
+    // Focus Now Playing when a new playback session is detected, if the settings ask for it for a matched /
+    // unmatched file (Back returns to what was open)
+    onNewSession: (session) => {
+      const focus = session.matched_anime_id
+        ? settings?.now_playing_focus_matched ?? true
+        : settings?.now_playing_focus_unmatched ?? true;
+      if (!focus) return;
       if (activeTab !== "nowplaying") remember();
       setActiveTab("nowplaying");
     },
@@ -797,7 +802,6 @@ export const App: React.FC = () => {
                       onOpenPalette={() => setCmdOpen(true)}
                       onOpenShortcuts={() => setShortcutsOpen(true)}
                       showShortcutHints={showShortcutHints}
-                      isPlaying={activeSession !== null}
                       listCount={animeList.length}
                       settings={settings}
                       isSignedIn={isSignedIn}
@@ -918,7 +922,6 @@ export const App: React.FC = () => {
                                   await list.refresh();
                                 }}
                                 onConfirmUpdate={() => void confirmPlaybackUpdate()}
-                                onDismissSession={dismissSession}
                                 onOpenSeason={openSeason}
                               />
                             )}
