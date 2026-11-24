@@ -9,6 +9,14 @@ Model: one active tracker, and each tracker offers only what it supports nativel
 (or does worse); they record what AniList could have filled in. Each account keeps its own database
 (`db/storage.rs`), so switching trackers or accounts loses nothing.
 
+In code, each tracker's descriptor lists the optional features it has (`TrackerFeature` in
+`src-tauri/src/trackers/mod.rs`, with a note for partial support); the app hides or turns off the rest, and
+Settings → Tracker shows the table. Rows of the matrix below map to them: Airing schedule → `airing_schedule`,
+Next episode countdown → `next_episode`, Characters → `characters`, Staff → `staff`, Recommendations →
+`recommendations`, Source manga → `source_material`, Custom lists → `custom_lists`, Following → `following`,
+Activity history import → `activity_history`. A `Fallback` cell means the feature is left out; `Prefer
+fallback` means it is listed with a note.
+
 ## Capability matrix
 
 `Native` = the tracker does it · `Fallback` = AniList through ID mapping (toggle on) · `Prefer fallback` = the

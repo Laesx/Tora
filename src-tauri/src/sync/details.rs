@@ -6,7 +6,7 @@
 //! memory for a few minutes.
 
 use super::TrackerSyncService;
-use crate::trackers::{AnimePageFetch, AnimePageParts, FollowingPage, MediaDetails, SeasonalAnime};
+use crate::trackers::{AnimePageFetch, AnimePageParts, FollowingPage, MediaDetails, SeasonalAnime, TrackerFeature};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
@@ -66,8 +66,13 @@ impl TrackerSyncService {
     /// Everything the anime page needs for one media: stored data while it's fresh, and one request for
     /// whatever is missing or old (metadata, details, recommendations, followed users). Calls are
     /// serialized, so a second identical call is served by the first one's results.
-    pub async fn anime_page(&self, anilist_id: i64, req: AnimePageRequest) -> Result<AnimePageData, String> {
+    pub async fn anime_page(&self, anilist_id: i64, mut req: AnimePageRequest) -> Result<AnimePageData, String> {
         let _turn = self.page_lock.lock().await;
+        // Only what the tracker has is asked for (the page hides the rest)
+        let features = self.tracker().await.map_err(|e| e.to_string())?.descriptor();
+        req.recommendations &= features.supports(TrackerFeature::Recommendations);
+        req.following &= features.supports(TrackerFeature::Following);
+        let has_details = features.supports(TrackerFeature::Characters) || features.supports(TrackerFeature::Staff);
         let stored_meta = self
             .blocking(move |db| db.get_media_metadata(anilist_id))
             .await?
@@ -79,10 +84,10 @@ impl TrackerSyncService {
         // Stored before relations existed: fetched once more, the stored copy serves if that fails
         let need_meta = stored_meta.as_ref().map_or(true, |m| m.metadata.relations.is_none());
         let max_age = details_max_age(stored_meta.as_ref().map(|m| m.entry.airing_status.as_str()));
-        let need_details = req.refresh_details
-            || stored_details.as_ref().map_or(true, |(at, _)| now - at >= max_age);
+        let stale = req.refresh_details || stored_details.as_ref().map_or(true, |(at, _)| now - at >= max_age);
+        let need_details = has_details && stale;
         let need_recommendations = req.recommendations
-            && (need_details || !stored_details.as_ref().is_some_and(|(_, d)| has_recommendations(d)));
+            && (stale || !stored_details.as_ref().is_some_and(|(_, d)| has_recommendations(d)));
         let cached_following = match (&token, req.following && !req.refresh_following) {
             (Some(token), true) => self.cached_following(anilist_id, token)?,
             _ => None,
@@ -142,8 +147,10 @@ impl TrackerSyncService {
             (new_details, recommendations) => {
                 let (fetched_at, mut details) = match (new_details, &stored) {
                     (Some(d), _) => (now, d),
-                    // Only recommendations were missing: the rest keeps its age
-                    (None, Some((at, d))) => (*at, d.clone()),
+                    // Only recommendations were missing: the rest keeps its age (a tracker without
+                    // characters or staff has no rest, so the recommendations set it)
+                    (None, Some((at, d))) if has_details => (*at, d.clone()),
+                    (None, Some((_, d))) => (now, d.clone()),
                     (None, None) => (now, MediaDetails::default()),
                 };
                 match (recommendations, &stored) {

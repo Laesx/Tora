@@ -850,6 +850,24 @@ export interface TrackerLinks {
   tag: string | null;
 }
 
+/** A feature only some trackers have (`TrackerFeature`; labels in `TRACKER_FEATURES`). */
+export type TrackerFeature =
+  | "airing_schedule"
+  | "next_episode"
+  | "characters"
+  | "staff"
+  | "recommendations"
+  | "source_material"
+  | "custom_lists"
+  | "following"
+  | "activity_history";
+
+/** A feature a tracker has; `note` says how it falls short when it does. */
+export interface FeatureSupport {
+  feature: TrackerFeature;
+  note: string | null;
+}
+
 /** A tracker Tora can sync with (`get_trackers`). */
 export interface TrackerDescriptor {
   id: string;
@@ -857,6 +875,8 @@ export interface TrackerDescriptor {
   website_url: string;
   auth: TrackerAuthMethod;
   links: TrackerLinks;
+  /** What it has; anything missing is unsupported (never filled in from another tracker) */
+  features: FeatureSupport[];
 }
 
 /** The signed-in account (never a token). */

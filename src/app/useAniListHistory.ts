@@ -11,6 +11,8 @@ import { errorText, log } from "@/lib/log";
  */
 export function useAniListHistoryState(
   settings: AppSettings | null,
+  /** The active tracker can import activity: the setting belongs to the device, so another tracker ignores it */
+  supported: boolean,
   updateSettings: (next: AppSettings) => Promise<void>,
   showToast: ShowToast
 ) {
@@ -22,7 +24,7 @@ export function useAniListHistoryState(
   }, []);
   const [version, setVersion] = useState(0);
   const [modalOpen, setModalOpen] = useState(false);
-  const enabled = Boolean(settings?.anilist_history_enabled);
+  const enabled = supported && Boolean(settings?.anilist_history_enabled);
 
   const load = useCallback(() => {
     toraApi
@@ -58,6 +60,7 @@ export function useAniListHistoryState(
   const api = useMemo<AniListHistoryApi>(
     () => ({
       status,
+      supported,
       enabled,
       hasData: (status?.activity_count ?? 0) > 0,
       version,
@@ -96,7 +99,7 @@ export function useAniListHistoryState(
       },
       setEnabled,
     }),
-    [status, enabled, version, setEnabled, setStatus, showToast]
+    [status, supported, enabled, version, setEnabled, setStatus, showToast]
   );
 
   return {

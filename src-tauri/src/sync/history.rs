@@ -10,7 +10,7 @@
 
 use super::{TrackerSyncService, EVENT_AUTH_INVALID};
 use crate::db::{AniListHistoryState, AniListHistoryStatus, ImportStatus};
-use crate::trackers::{ActivityPage, ActivityPageQuery, TrackerError, Tracker, ACTIVITY_PAGE_SIZE};
+use crate::trackers::{ActivityPage, ActivityPageQuery, Tracker, TrackerError, TrackerFeature, ACTIVITY_PAGE_SIZE};
 use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -346,7 +346,11 @@ impl TrackerSyncService {
     pub async fn refresh_history(&self, reason: &str) -> Result<usize, String> {
         let settings = self.blocking(|db| db.get_settings()).await?;
         let state = self.blocking(|db| db.anilist_history_state()).await?;
-        if !settings.anilist_history_enabled || state.status != ImportStatus::Done {
+        // The setting belongs to the device: another tracker's account may have no activity to import
+        if !settings.anilist_history_enabled
+            || state.status != ImportStatus::Done
+            || !self.supports(TrackerFeature::ActivityHistory).await
+        {
             return Ok(0);
         }
         if self.history_running.swap(true, Ordering::SeqCst) {

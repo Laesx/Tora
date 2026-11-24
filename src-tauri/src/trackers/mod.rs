@@ -60,6 +60,83 @@ pub struct TrackerLinks {
     pub tag: Option<String>,
 }
 
+/// A feature only some trackers have (`docs/trackers.md`). Every tracker syncs the list, searches, browses
+/// seasons and shows related anime; the app hides or disables what the active tracker lacks, and never
+/// fills it in from another tracker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackerFeature {
+    /// The weekly airing timetable (the Schedule tab).
+    AiringSchedule,
+    /// The next episode's air time (countdowns, "airing in").
+    NextEpisode,
+    /// Characters and voice actors on the anime page.
+    Characters,
+    /// Staff on the anime page.
+    Staff,
+    /// Recommendations on the anime page.
+    Recommendations,
+    /// The manga / novel an anime adapts ("Based on").
+    SourceMaterial,
+    /// Custom lists and "hide from status lists".
+    CustomLists,
+    /// Followed users' entries on the anime page.
+    Following,
+    /// Importing the account's watch activity into History.
+    ActivityHistory,
+}
+
+impl TrackerFeature {
+    /// Every feature, in the order the support table lists them.
+    pub const ALL: [TrackerFeature; 9] = [
+        TrackerFeature::AiringSchedule,
+        TrackerFeature::NextEpisode,
+        TrackerFeature::Characters,
+        TrackerFeature::Staff,
+        TrackerFeature::Recommendations,
+        TrackerFeature::SourceMaterial,
+        TrackerFeature::CustomLists,
+        TrackerFeature::Following,
+        TrackerFeature::ActivityHistory,
+    ];
+
+    /// What "<tracker> doesn't support …" messages call it.
+    pub fn describe(self) -> &'static str {
+        match self {
+            TrackerFeature::AiringSchedule => "an airing schedule",
+            TrackerFeature::NextEpisode => "next episode times",
+            TrackerFeature::Characters => "characters",
+            TrackerFeature::Staff => "staff",
+            TrackerFeature::Recommendations => "recommendations",
+            TrackerFeature::SourceMaterial => "source material",
+            TrackerFeature::CustomLists => "custom lists",
+            TrackerFeature::Following => "followed users",
+            TrackerFeature::ActivityHistory => "activity history",
+        }
+    }
+}
+
+/// A feature a tracker has; `note` says how it falls short when it does ("only anime before 2022").
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FeatureSupport {
+    pub feature: TrackerFeature,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+impl FeatureSupport {
+    pub fn full(feature: TrackerFeature) -> Self {
+        Self { feature, note: None }
+    }
+
+    pub fn partial(feature: TrackerFeature, note: &str) -> Self {
+        Self {
+            feature,
+            note: Some(note.into()),
+        }
+    }
+}
+
 /// What the app shows about a tracker and how it signs in.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackerDescriptor {
@@ -70,6 +147,27 @@ pub struct TrackerDescriptor {
     pub website_url: String,
     pub auth: AuthMethod,
     pub links: TrackerLinks,
+    /// The [`TrackerFeature`]s it has; anything missing is unsupported.
+    pub features: Vec<FeatureSupport>,
+}
+
+impl TrackerDescriptor {
+    pub fn supports(&self, feature: TrackerFeature) -> bool {
+        self.features.iter().any(|f| f.feature == feature)
+    }
+
+    /// `Ok` when the tracker has `feature`, else the [`TrackerError::Unsupported`] naming both.
+    pub fn require(&self, feature: TrackerFeature) -> Result<(), TrackerError> {
+        if self.supports(feature) {
+            Ok(())
+        } else {
+            Err(TrackerError::Unsupported(format!(
+                "{} doesn't support {}.",
+                self.name,
+                feature.describe()
+            )))
+        }
+    }
 }
 
 /// The tokens a sign-in produced (stored with the account, never sent to the frontend).
@@ -736,6 +834,28 @@ mod tests {
         let err = futures_lite_block_on(Bare.create_custom_list("t", "x")).unwrap_err();
         assert_eq!(err.kind(), "unsupported");
         assert_eq!(err.to_string(), "Bare doesn't support creating custom lists.");
+    }
+
+    #[test]
+    fn anilist_has_every_feature_and_require_names_what_is_missing() {
+        let anilist = TrackerRegistry::new().get(DEFAULT_TRACKER).unwrap().descriptor();
+        for feature in TrackerFeature::ALL {
+            assert!(anilist.supports(feature), "{feature:?}");
+        }
+        let bare = TrackerDescriptor {
+            name: "Bare".into(),
+            features: vec![FeatureSupport::partial(TrackerFeature::Characters, "older anime only")],
+            ..anilist
+        };
+        assert!(bare.require(TrackerFeature::Characters).is_ok());
+        let err = bare.require(TrackerFeature::CustomLists).unwrap_err();
+        assert_eq!(err.kind(), "unsupported");
+        assert_eq!(err.to_string(), "Bare doesn't support custom lists.");
+        // The frontend reads features by these names
+        assert_eq!(
+            serde_json::to_value(&bare.features).unwrap(),
+            serde_json::json!([{ "feature": "characters", "note": "older anime only" }])
+        );
     }
 
     fn futures_lite_block_on<T>(f: BoxFuture<'_, T>) -> T {

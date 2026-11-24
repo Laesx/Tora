@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AccountInfo, AnimeEntry, AppSettings, DetectedMediaSession, ScanSummary, TrackerState } from "@/lib/types";
+import { AccountInfo, AnimeEntry, AppSettings, DetectedMediaSession, ScanSummary, TrackerFeature, TrackerState } from "@/lib/types";
 import { toraApi } from "@/lib/api";
 import { applyThemeToDocument } from "@/lib/theme";
 import { plural } from "@/lib/format";
@@ -10,11 +10,11 @@ import { setDateSettings } from "@/lib/dates";
 import { CustomListsContext } from "@/contexts/customLists";
 import { ToastContext } from "@/contexts/toast";
 import { ScoreFormatContext } from "@/contexts/scoreFormat";
-import { TrackerContext, TrackerContextValue } from "@/contexts/tracker";
+import { TrackerContext, TrackerContextValue, trackerSupports } from "@/contexts/tracker";
 import { trackerLink } from "@/lib/trackers";
 import { DEFAULT_SCORE_FORMAT, parseScoreFormat, ScoreFormat } from "@/lib/scores";
 import { AnimeActions, AnimeActionsContext } from "@/contexts/animeActions";
-import { NAV_ITEMS, NavTab } from "@/app/nav";
+import { NAV_ITEMS, NavTab, tabAvailable } from "@/app/nav";
 import { captureView, NavCapture, NavLocation, sameLocation } from "@/app/navigation";
 import { useNavHistory } from "@/app/useNavHistory";
 import { Navigation, NavigationContext } from "@/contexts/navigation";
@@ -75,10 +75,11 @@ export const App: React.FC = () => {
   // The saga view (its root anime), a sheet like the anime page; one of the two at a time
   const [saga, setSaga] = useState<AnimeEntry | null>(null);
   const sheetOpen = animePage !== null || saga !== null;
+  // A tab the active tracker can't back (Schedule without an airing schedule) shows the list instead
   const setActiveTab = (tab: NavTab) => {
     setAnimePage(null);
     setSaga(null);
-    setActiveTabState(tab);
+    setActiveTabState(tabAvailable(tab, supports) ? tab : "watchlist");
   };
   const [settings, setSettings] = useState<AppSettings | null>(null);
   // The active tracker and the signed-in account (never a token)
@@ -88,6 +89,12 @@ export const App: React.FC = () => {
     [trackerState]
   );
   const trackerName = trackerState?.tracker.name ?? "your tracker";
+  const supports = (feature: TrackerFeature) => trackerSupports(trackerState?.tracker ?? null, feature);
+  // Switched to a tracker that can't back the open tab: the list instead
+  useEffect(() => {
+    if (!tabAvailable(activeTab, supports)) setActiveTabState("watchlist");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [trackerState, activeTab]);
   const setAccount = (account: AccountInfo | null) =>
     setTrackerState((prev) => (prev ? { ...prev, account } : prev));
   const reloadTrackerState = () =>
@@ -108,7 +115,12 @@ export const App: React.FC = () => {
   const { animeList, selectedAnime, setSelectedAnime } = list;
   const stepper = useEpisodeStepper(list.replaceEntries, showToast, titleOf);
   const customLists = useCustomListsState(animeList);
-  const anilistHistory = useAniListHistoryState(settings, (next) => handleUpdateSettings(next), showToast);
+  const anilistHistory = useAniListHistoryState(
+    settings,
+    supports("activity_history"),
+    (next) => handleUpdateSettings(next),
+    showToast
+  );
   const watchlist = useWatchlist({
     animeList,
     stepSnapshots: stepper.snapshots,
@@ -476,6 +488,7 @@ export const App: React.FC = () => {
   };
 
   const navigateTo = (tab: NavTab) => {
+    if (!tabAvailable(tab, supports)) return;
     closeTransientLayers();
     setSettingsOpen(false);
     if (tab !== activeTab || sheetOpen) remember();
@@ -801,6 +814,7 @@ export const App: React.FC = () => {
     checkForUpdates: () => void updater.checkForUpdates(true),
     openChangelog: updater.openChangelog,
     customListNames: customLists.names,
+    tabAvailable: (tab) => tabAvailable(tab, supports),
     openCustomList: (name) => showInWatchlist(() => watchlist.showCustomList(name)),
     setViewMode,
     setTheme: (theme, accent) => {

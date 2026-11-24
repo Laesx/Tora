@@ -24,7 +24,7 @@ use crate::detection::anitomy::{parse_filename, AnitomyElements};
 use crate::discord::{DiscordPresence, PresenceAnime, PresenceInfo};
 use crate::library::scanner::{DriveStorageSummary, LibraryMonitorHandle, ScanSummary};
 use crate::trackers::{
-    AccessTokens, AuthMethod, SeasonalAnime, TrackerDescriptor, TrackerRegistry, TrackerUserProfile,
+    AccessTokens, AuthMethod, SeasonalAnime, TrackerDescriptor, TrackerFeature, TrackerRegistry, TrackerUserProfile,
 };
 use crate::sync::{
     AiringScheduleResult, ChangeSource, SeasonResult, SignOutOutcome, SyncEmitter, SyncStatus, SyncSummary,
@@ -1256,6 +1256,7 @@ async fn get_anilist_history_status(state: State<'_, AppState>) -> Result<AniLis
 async fn start_anilist_history_import(
     state: State<'_, AppState>,
 ) -> Result<AniListHistoryStatus, String> {
+    state.sync.require_feature(TrackerFeature::ActivityHistory).await?;
     state.sync.start_history_import();
     state.sync.history_status().await
 }

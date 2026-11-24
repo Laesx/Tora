@@ -31,8 +31,8 @@ use crate::db::{
 use crate::detection::anisthesia::DetectedMediaSession;
 use crate::library::scanner::ScanSummary;
 use crate::trackers::{
-    AccessTokens, AiringScheduleItem, SeasonalAnime, Tracker, TrackerEntryUpdate, TrackerError, TrackerRegistry,
-    TrackerUserProfile, MEDIA_DETAILS_CHUNK,
+    AccessTokens, AiringScheduleItem, SeasonalAnime, Tracker, TrackerEntryUpdate, TrackerError, TrackerFeature,
+    TrackerRegistry, TrackerUserProfile, MEDIA_DETAILS_CHUNK,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -723,6 +723,17 @@ impl TrackerSyncService {
         self.tracker_by_id(&id)
     }
 
+    /// `Ok` when the active tracker has `feature`, else its "doesn't support" message.
+    pub async fn require_feature(&self, feature: TrackerFeature) -> Result<(), String> {
+        let tracker = self.tracker().await.map_err(|e| e.to_string())?;
+        tracker.descriptor().require(feature).map_err(|e| e.to_string())
+    }
+
+    /// Whether the active tracker has `feature` (false when it can't be resolved).
+    pub async fn supports(&self, feature: TrackerFeature) -> bool {
+        self.require_feature(feature).await.is_ok()
+    }
+
     /// Every registered tracker's descriptor.
     pub fn trackers(&self) -> &TrackerRegistry {
         &self.trackers
@@ -880,6 +891,7 @@ impl TrackerSyncService {
         self: &Arc<Self>,
         change: CustomListChange,
     ) -> Result<CustomListsState, String> {
+        self.require_feature(TrackerFeature::CustomLists).await?;
         let now = chrono::Utc::now().timestamp();
         let (state, ids, signed_in) = self
             .blocking(move |db| {
@@ -2486,12 +2498,18 @@ mod tests {
         saga_media: Mutex<HashMap<i64, SeasonalAnime>>,
         /// Ids of every `fetch_media_metadata_batch` call.
         batch_calls: Mutex<Vec<Vec<i64>>>,
+        /// Replaces AniList's feature list (a tracker with fewer features).
+        features: Option<Vec<crate::trackers::FeatureSupport>>,
     }
 
     impl Tracker for MockTracker {
         fn descriptor(&self) -> crate::trackers::TrackerDescriptor {
             // Registered in AniList's place
-            crate::trackers::anilist::AniListPlugin::new().descriptor()
+            let mut descriptor = crate::trackers::anilist::AniListPlugin::new().descriptor();
+            if let Some(features) = &self.features {
+                descriptor.features = features.clone();
+            }
+            descriptor
         }
         fn auth(&self) -> &dyn crate::trackers::TrackerAuth {
             self
@@ -3944,6 +3962,55 @@ mod tests {
         assert_eq!(mock.page_calls.lock().unwrap().len(), 2);
         svc.anime_page(id, following(true)).await.unwrap();
         assert_eq!(page_parts(&mock)[2..], [(false, false, false, true)]);
+    }
+
+    #[tokio::test]
+    async fn a_tracker_is_never_asked_for_what_it_lacks() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let mock = Arc::new(MockTracker {
+            features: Some(vec![]),
+            ..Default::default()
+        });
+        let (svc, _events) = service(db.clone(), mock.clone());
+        sign_in(&db, 1);
+        let id = 9_000_030;
+
+        // Only the metadata: no details, recommendations or followed users, whatever the page asks for
+        let req = AnimePageRequest {
+            recommendations: true,
+            following: true,
+            refresh_details: true,
+            ..Default::default()
+        };
+        let page = svc.anime_page(id, req.clone()).await.unwrap();
+        assert_eq!((page.details, page.following), (None, None));
+        assert_eq!(page_parts(&mock), vec![(true, false, false, false)]);
+        svc.anime_page(id, req).await.unwrap();
+        assert_eq!(mock.page_calls.lock().unwrap().len(), 1);
+
+        // Custom list edits and the activity import are refused with the tracker's name
+        let err = svc
+            .set_custom_lists(CustomListChange {
+                anime_ids: vec![id],
+                toggles: vec![],
+                hidden_from_status_lists: Some(true),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(err, "AniList doesn't support custom lists.");
+        assert!(svc.require_feature(TrackerFeature::ActivityHistory).await.is_err());
+
+        // The device-wide history setting never makes another account's pull ask for activity
+        let mut settings = db.get_settings().unwrap();
+        settings.anilist_history_enabled = true;
+        db.save_settings(&settings).unwrap();
+        db.set_anilist_history_state(&crate::db::AniListHistoryState {
+            status: ImportStatus::Done,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(svc.refresh_history("manual").await.unwrap(), 0);
+        assert!(mock.activity_calls.lock().unwrap().is_empty());
     }
 
     fn saga_media(id: i64, relations: &[(i64, &str)]) -> SeasonalAnime {

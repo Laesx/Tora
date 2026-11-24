@@ -41,6 +41,7 @@ import { AniListHistorySettings } from "@/features/settings/AniListHistorySettin
 import { SettingsBackupsPanel } from "./SettingsBackups";
 import { useToast } from "@/contexts/toast";
 import { useTracker } from "@/contexts/tracker";
+import { TrackerSupportTable } from "./TrackerSupportTable";
 import { logError } from "@/lib/log";
 
 export type SettingsSection =
@@ -180,7 +181,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   onOpenChangelog,
 }) => {
   const [trackers, setTrackers] = useState<TrackerDescriptor[]>([]);
-  const { tracker: activeTracker, account } = useTracker();
+  const { tracker: activeTracker, account, supports } = useTracker();
   const [section, setSection] = useState<SettingsSection>(sectionRequest?.section ?? "appearance");
 
   useEffect(() => {
@@ -476,9 +477,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   );
                 })}
               </div>
+
+              <TrackerSupportTable trackers={trackers} activeId={activeTracker?.id ?? null} />
             </div>
 
-            <AniListHistorySettings settings={settings} />
+            {supports("activity_history") && <AniListHistorySettings settings={settings} />}
           </>
         )}
 

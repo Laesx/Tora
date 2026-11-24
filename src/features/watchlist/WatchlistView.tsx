@@ -86,7 +86,8 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
   showKeyHints,
 }) => {
   const { openAnime } = useAnimeActions();
-  const { name: trackerName } = useTracker();
+  const { name: trackerName, supports } = useTracker();
+  const supportsLists = supports("custom_lists");
   const toolbarRef = useRef<HTMLDivElement | null>(null);
   // Toolbar height (it wraps on narrow windows): scrolling to a card keeps it below the bar
   const [toolbarHeight, setToolbarHeight] = useState(0);
@@ -150,7 +151,7 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
             );
           })}
           {/* Signed in, the chip shows even with no lists so the first one can be created */}
-          {(customListNames.length > 0 || isSignedIn) && (
+          {supportsLists && (customListNames.length > 0 || isSignedIn) && (
             <CustomListsChip
               names={customListNames}
               counts={customListCounts}

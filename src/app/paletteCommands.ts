@@ -20,6 +20,8 @@ interface PaletteCommandDeps {
   checkForUpdates: () => void;
   openChangelog: () => void;
   customListNames: string[];
+  /** Whether a tab works with the active tracker (unavailable ones are left out) */
+  tabAvailable: (tab: NavTab) => boolean;
   openCustomList: (name: string) => void;
   setViewMode: (mode: ViewMode) => void;
   setTheme: (themeId: string, accent: string) => void;
@@ -28,14 +30,20 @@ interface PaletteCommandDeps {
 /** Every command in the Ctrl+S Commands tab, in display order. */
 export function buildPaletteCommands(d: PaletteCommandDeps): PaletteCommand[] {
   return [
-    ...NAV_ITEMS.map((item, i) => ({
-      id: `go-${item.id}`,
-      label: `Go to ${item.label}`,
-      keywords: item.keywords,
-      icon: item.icon,
-      shortcut: `Ctrl+${i + 1}`,
-      run: () => d.navigate(item.id),
-    })),
+    ...NAV_ITEMS.flatMap((item, i) =>
+      d.tabAvailable(item.id)
+        ? [
+          {
+            id: `go-${item.id}`,
+            label: `Go to ${item.label}`,
+            keywords: item.keywords,
+            icon: item.icon,
+            shortcut: `Ctrl+${i + 1}`,
+            run: () => d.navigate(item.id),
+          },
+        ]
+        : []
+    ),
     ...(d.goBack ? [{ id: "go-back", label: "Go Back", keywords: ["previous", "history", "return"], icon: ArrowLeft, shortcut: "Alt+←", run: d.goBack }] : []),
     ...(d.goForward ? [{ id: "go-forward", label: "Go Forward", keywords: ["next", "history"], icon: ArrowRight, shortcut: "Alt+→", run: d.goForward }] : []),
     { id: "settings", label: "Open Settings", keywords: ["preferences", "options"], icon: Settings, shortcut: `Ctrl+${SETTINGS_SHORTCUT_DIGIT}`, run: d.openSettings },

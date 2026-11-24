@@ -1,7 +1,8 @@
 use crate::db::AnimeEntry;
 use crate::trackers::{
     AccountExtras, ActivityMedia, ActivityPage, ActivityPageQuery, AiringScheduleItem, AiringSchedulePage,
-    AnimePageFetch, AnimePageParts, AuthMethod, BoxFuture, Catalog, CharacterRole, CharactersPage, FollowingEntry,
+    AnimePageFetch, AnimePageParts, AuthMethod, BoxFuture, Catalog, CharacterRole, CharactersPage, FeatureSupport,
+    FollowingEntry, TrackerFeature,
     FollowingPage, ListSync, MediaDetails, MediaMetadata, MediaPrequel, MediaRanking, MediaRecommendation,
     MediaRelation, MediaTag, RemoteEntryState, RemoteListActivity, RemoteListMembership, RemoteListSnapshot,
     SeasonPage, SeasonalAnime, StaffRole, StudioRef, Tracker, TrackerAuth, TrackerDescriptor, TrackerEntryUpdate,
@@ -1282,6 +1283,7 @@ impl Tracker for AniListPlugin {
                 genre: Some("https://anilist.co/search/anime/{name}".into()),
                 tag: Some("https://anilist.co/search/anime?genres={name}".into()),
             },
+            features: TrackerFeature::ALL.into_iter().map(FeatureSupport::full).collect(),
         }
     }
 

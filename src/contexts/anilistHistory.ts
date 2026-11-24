@@ -4,7 +4,9 @@ import { AniListHistoryStatus } from "@/lib/types";
 /** The AniList activity import, shared by History, Stats, Settings and the import modal. */
 export interface AniListHistoryApi {
   status: AniListHistoryStatus | null;
-  /** `AppSettings.anilist_history_enabled` */
+  /** The active tracker can import activity (`activity_history`) */
+  supported: boolean;
+  /** `AppSettings.anilist_history_enabled`, while the tracker supports it */
   enabled: boolean;
   /** Imported activity exists (shown even after the setting was turned off) */
   hasData: boolean;
@@ -25,6 +27,7 @@ const noop = async () => {};
 
 export const AniListHistoryContext = createContext<AniListHistoryApi>({
   status: null,
+  supported: false,
   enabled: false,
   hasData: false,
   version: 0,

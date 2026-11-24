@@ -7,6 +7,7 @@ import { pickEpisodeFile, usePinnedRelease } from "@/lib/releases";
 import { useToast } from "@/contexts/toast";
 import { useAnimeActions } from "@/contexts/animeActions";
 import { useCustomLists } from "@/contexts/customLists";
+import { useTracker } from "@/contexts/tracker";
 import { CustomListsPanel } from "@/components/CustomListsPanel";
 import { useEntryEditor } from "@/features/detail/useEntryEditor";
 import { UserStatePanel } from "@/features/detail/UserStatePanel";
@@ -70,6 +71,7 @@ export const AnimePage: React.FC<AnimePageProps> = ({
   const showToast = useToast();
   const { searchTorrents, openSaga } = useAnimeActions();
   const customListNames = useCustomLists().names;
+  const { supports } = useTracker();
   const editor = useEntryEditor({
     anime,
     inList,
@@ -80,8 +82,10 @@ export const AnimePage: React.FC<AnimePageProps> = ({
   // Metadata (tags, studios, rankings, relations), details and followed users: one backend call, at
   // most one AniList request. Closed Recommendations / Following sections fetch nothing.
   const mediaId = anime.id;
-  const recommendationsOpen = !useSectionCollapsed("recommendations");
-  const followingOpen = !useSectionCollapsed("following");
+  // Sections the tracker can't fill aren't shown, so they ask for nothing
+  const recommendationsOpen = !useSectionCollapsed("recommendations") && supports("recommendations");
+  const followingOpen = !useSectionCollapsed("following") && supports("following");
+  const hasDetails = supports("characters") || supports("staff");
   const page = useAnimePageData(mediaId, { recommendations: recommendationsOpen, following: followingOpen });
   const media = page.data?.media ?? null;
   const details = page.data?.details ?? null;
@@ -153,7 +157,7 @@ export const AnimePage: React.FC<AnimePageProps> = ({
       </PageSection>
     ),
     synopsis: anime.synopsis && <SynopsisSection synopsis={anime.synopsis} />,
-    characters: details && details.characters.length > 0 && (
+    characters: supports("characters") && details && details.characters.length > 0 && (
       <CharactersSection
         details={details}
         loading={page.refreshing === "details"}
@@ -162,11 +166,11 @@ export const AnimePage: React.FC<AnimePageProps> = ({
         onRefresh={page.refreshDetails}
       />
     ),
-    staff: details && <StaffSection anime={anime} details={details} />,
-    recommendations: (details || !recommendationsOpen) && (
+    staff: supports("staff") && details && <StaffSection anime={anime} details={details} />,
+    recommendations: supports("recommendations") && (details || !recommendationsOpen) && (
       <RecommendationsSection details={details} loading={page.loading} listById={listById} />
     ),
-    detailsStatus: !details && (page.loading || page.data?.error) && (
+    detailsStatus: hasDetails && !details && (page.loading || page.data?.error) && (
       <PageSection>
         {page.loading ? (
           <p className="text-xs text-text-muted">Loading characters and staff…</p>
@@ -182,7 +186,7 @@ export const AnimePage: React.FC<AnimePageProps> = ({
     ),
     info: <InfoPanel anime={anime} media={media} sources={sourceRelations(relations)} onOpenSeason={onOpenSeason} />,
     history: inList && <HistorySection anime={anime} />,
-    following: (page.data?.signed_in ?? true) && (
+    following: supports("following") && (page.data?.signed_in ?? true) && (
       <FollowingSection
         anime={anime}
         page={page.data?.following ?? null}

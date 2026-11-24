@@ -33,7 +33,7 @@ interface SidebarProps {
 }
 
 const navClass = (active: boolean) =>
-  `w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${active ? "bg-accent text-white shadow-sm" : "text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
+  `w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition disabled:opacity-40 disabled:cursor-not-allowed ${active ? "bg-accent text-white shadow-sm" : "text-text-secondary enabled:hover:bg-bg-tertiary enabled:hover:text-text-primary"
   }`;
 
 /** Square icon button next to the brand (settings) */
@@ -135,30 +135,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         <kbd className="shrink-0 px-1.5 py-0.5 text-[10px] font-mono rounded bg-bg-tertiary text-text-secondary">Ctrl+S</kbd>
       </button>
 
-      <nav className="space-y-1">
-        {NAV_ITEMS.map(({ id, label, icon: Icon }, i) => (
-          <React.Fragment key={id}>
-            <button onClick={() => onNavigate(id)} className={navClass(activeTab === id)}>
-              <span className="flex items-center gap-2.5">
-                <Icon className="w-4 h-4" />
-                {label}
-              </span>
-              {/* The count fades out under the Ctrl badge */}
-              <span className="relative flex items-center">
-                <span className={`flex items-center transition-opacity duration-200 ${showShortcutHints ? "opacity-0" : "opacity-100"}`}>
-                  {id === "watchlist" && <span className="text-[11px] font-mono opacity-80">{listCount}</span>}
-                </span>
-                <KeyHint label={String(i + 1)} visible={showShortcutHints} className="right-0 top-1/2 -translate-y-1/2" />
-              </span>
-            </button>
-            {id === "nowplaying" && (
-              <div className="py-1.5 px-1">
-                <div className="border-t border-border-subtle" />
-              </div>
-            )}
-          </React.Fragment>
-        ))}
-      </nav>
+      <NavList activeTab={activeTab} onNavigate={onNavigate} showShortcutHints={showShortcutHints} listCount={listCount} />
     </div>
 
     <div className="p-3 space-y-2">
@@ -182,6 +159,50 @@ export const Sidebar: React.FC<SidebarProps> = ({
     </div>
   </aside>
 );
+
+/** The tabs; one the active tracker can't back is disabled, its tooltip saying why. */
+const NavList: React.FC<{
+  activeTab: NavTab;
+  onNavigate: (tab: NavTab) => void;
+  showShortcutHints: boolean;
+  listCount: number;
+}> = ({ activeTab, onNavigate, showShortcutHints, listCount }) => {
+  const tracker = useTracker();
+  return (
+    <nav className="space-y-1">
+      {NAV_ITEMS.map(({ id, label, icon: Icon, needs }, i) => {
+        const off = needs !== undefined && !tracker.supports(needs.feature);
+        return (
+          <React.Fragment key={id}>
+            <button
+              onClick={() => onNavigate(id)}
+              disabled={off}
+              title={off ? `${tracker.name} ${needs!.missing}` : undefined}
+              className={navClass(activeTab === id)}
+            >
+              <span className="flex items-center gap-2.5">
+                <Icon className="w-4 h-4" />
+                {label}
+              </span>
+              {/* The count fades out under the Ctrl badge */}
+              <span className="relative flex items-center">
+                <span className={`flex items-center transition-opacity duration-200 ${showShortcutHints ? "opacity-0" : "opacity-100"}`}>
+                  {id === "watchlist" && <span className="text-[11px] font-mono opacity-80">{listCount}</span>}
+                </span>
+                {!off && <KeyHint label={String(i + 1)} visible={showShortcutHints} className="right-0 top-1/2 -translate-y-1/2" />}
+              </span>
+            </button>
+            {id === "nowplaying" && (
+              <div className="py-1.5 px-1">
+                <div className="border-t border-border-subtle" />
+              </div>
+            )}
+          </React.Fragment>
+        );
+      })}
+    </nav>
+  );
+};
 
 /** The signed-in account (opens its profile, signs out), or the sign-in button for the active tracker. */
 const AccountCard: React.FC<{

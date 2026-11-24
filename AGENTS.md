@@ -80,7 +80,7 @@ Tora/
 │   ├── main.tsx                          # React 18 entrypoint & root provider
 │   ├── App.tsx                           # Wiring only: app state hooks, context providers, tab switch, drawer / palette / modals
 │   ├── app/                              # App shell and app-wide state
-│   │   ├── nav.ts                        # `NavTab`, `NAV_ITEMS` (the 8 tabs: sidebar rows, Ctrl+1–8, palette "Go to"), `SETTINGS_SHORTCUT_DIGIT` (Settings is a modal, not a tab)
+│   │   ├── nav.ts                        # `NavTab`, `NAV_ITEMS` (the 8 tabs: sidebar rows, Ctrl+1–8, palette "Go to"; `needs`: the tracker feature a tab needs, `tabAvailable`), `SETTINGS_SHORTCUT_DIGIT` (Settings is a modal, not a tab)
 │   │   ├── Sidebar.tsx                   # Brand + version, ← → (back / forward) and Settings (modal) buttons, Quick Jump (Ctrl+S) bar, tab navigation (Ctrl+N badges while Ctrl is held), keyboard shortcuts row, AniList account card
 │   │   ├── NowPlayingBanner.tsx          # Live playback strip above every tab except Now Playing
 │   │   ├── SignOutModal.tsx              # Sign-out confirmation
@@ -111,7 +111,7 @@ Tora/
 │   │   ├── customLists.ts                # AniList custom lists context (`useCustomLists`), optimistic membership edit, coverage helper
 │   │   ├── anilistHistory.ts             # AniList activity import context (`useAniListHistory`), `importProgress`
 │   │   ├── scoreFormat.ts                # The AniList account's score format (`useScoreFormat`)
-│   │   ├── tracker.ts                    # The active tracker + signed-in account (`useTracker`: name, `signedIn`, `link`, `animeUrl`)
+│   │   ├── tracker.ts                    # The active tracker + signed-in account (`useTracker`: name, `signedIn`, `link`, `animeUrl`, `supports(feature)`)
 │   │   └── titles.ts                     # Display title language (`useAnimeTitle`, `altTitles`, `displayTitle` for plain helpers)
 │   ├── hooks/                            # Generic hooks
 │   │   ├── virtual.ts                    # `useScrollViewport` (list width / top / scroll / viewport height) + `visibleRange` (binary search)
@@ -127,7 +127,7 @@ Tora/
 │   │   ├── dates.ts                      # Date locale + clock from Settings (`dateLocale`, `formatTime`, `formatDateTime`, `formatDate`, `todayIso`), date field parsing
 │   │   ├── scores.ts                     # User scores in the AniList score format: `formatScore`, `formatMeanScore`, 0–100 ⇄ format value, `SCORE_SCALES`
 │   │   ├── covers.ts                     # `getOptimizedCoverUrl` (AniList CDN downscaling)
-│   │   ├── trackers.ts                   # `trackerLink` / `trackerAnimeUrl`: tracker page URLs from the descriptor's templates
+│   │   ├── trackers.ts                   # `trackerLink` / `trackerAnimeUrl`: tracker page URLs from the descriptor's templates; `TRACKER_FEATURES` (labels of the optional features), `featureSupport`
 │   │   ├── status.ts                     # List status labels / icons / colors (`LIST_STATUSES`, `STATUS_INFO`, `statusLabel`, watchlist tabs, search group order)
 │   │   ├── anime.ts                      # AniList links, play / open-folder, date & enum formatting
 │   │   ├── episodes.ts                   # Episode ranges, aired / estimated totals, progress bar model
@@ -219,6 +219,7 @@ Tora/
 │   │   │   ├── SettingsView.tsx          # Sectioned settings: Appearance, Tracker, Library, Playback & Detection (update mode, Discord, Anisthesia players), Torrents, System (tray, start with Windows), Diagnostics, About
 │   │   │   ├── LibraryManagerView.tsx    # Multi-drive folder manager, disk usage & virtualized episode table (Settings → Library)
 │   │   │   ├── AnitomyParserPanel.tsx    # Interactive Anitomy filename / window title parser (Settings → Diagnostics)
+│   │   │   ├── TrackerSupportTable.tsx   # Settings → Tracker: what each registered tracker supports (features × trackers, partial support with its note)
 │   │   │   ├── AniListHistorySettings.tsx # Settings → Tracker: AniList activity import status, Keep it updated, Update now, Delete
 │   │   │   └── SettingsBackups.tsx       # Settings → About: settings snapshots list, Back up now, Restore
 │   │   └── torrents/
@@ -278,7 +279,7 @@ Tora/
         │   ├── mod.rs                    # Library module declaration
         │   └── scanner.rs                # Fast filesystem scanner, Win32 IOCP directory watcher, batch episode matcher, folder links, one-time match repair
         ├── trackers/
-        │   ├── mod.rs                    # `Tracker` + parts (`TrackerAuth`, `ListSync`, `Catalog`, `AccountExtras`), `TrackerDescriptor` (sign-in method, link templates), `TrackerRegistry`, neutral data types
+        │   ├── mod.rs                    # `Tracker` + parts (`TrackerAuth`, `ListSync`, `Catalog`, `AccountExtras`), `TrackerDescriptor` (sign-in method, link templates, `TrackerFeature`s), `TrackerRegistry`, neutral data types
         │   └── anilist.rs                # AniList GraphQL v2: profile, list fetch / save / delete, catalog, custom lists, activity
         ├── sync/mod.rs                   # `TrackerSyncService`: unified push/pull/delete pipeline, `normalize_change`, rate limiter
         ├── sync/history.rs               # AniList activity import (resumable, paced) and the refresh after each pull
@@ -503,7 +504,8 @@ Rules that keep it that way:
 ### 8a. Trackers (`src-tauri/src/trackers/`, `db/accounts.rs`)
 - **One active tracker.** It is the signed-in account's, else the list owner's, else `DEFAULT_TRACKER` (`Database::active_tracker_id`). `TrackerSyncService::tracker()` resolves it per call; `TrackerRegistry::get` never answers an unknown id with another tracker. What each tracker supports, and every API fact behind it, is in `docs/trackers.md` (response fixtures in `src-tauri/fixtures/trackers/`).
 - **Rate limits are per tracker**: every request goes through `TrackerSyncService::limiter(&tracker)`, one `RateLimiter` per tracker id spaced by `Tracker::min_request_interval` (AniList 700 ms, `DEFAULT_MIN_REQUEST_INTERVAL` 1 s otherwise); "the shared rate limiter" elsewhere in this file means that tracker's. Never call a tracker outside it.
-- **A tracker is parts**: `Tracker::descriptor()` (id, name, `AuthMethod`, `TrackerLinks`) plus `auth()` / `list()` / `catalog()` / `extras()`. Optional methods default to `TrackerError::Unsupported` (kind `unsupported`). Adapters return the neutral types in AniList's vocabulary (statuses, formats, relation types, 0–100 scores) and translate their tracker's values.
+- **Features**: `TrackerDescriptor.features` lists the optional `TrackerFeature`s the tracker has (`FeatureSupport`, with a `note` when it only partly has one): airing schedule, next episode, characters, staff, recommendations, source material, custom lists, Following, activity import. Everything else (list sync, search, seasons, related anime / saga) every tracker must have. **No fallback**: what the active tracker lacks is hidden or turned off, never filled in from another tracker. Frontend: `useTracker().supports(feature)` (true until the state has loaded); a tab that needs a feature (`NavItem.needs`: Schedule) is disabled in the sidebar with the reason, skipped by Ctrl+N and the palette, and `setActiveTab` shows the list instead; anime page sections the tracker lacks are not shown and ask for nothing; the custom lists chip and the activity import (`AniListHistoryApi.supported`; `anilist_history_enabled` belongs to the device) follow it. Backend: `TrackerSyncService::require_feature` / `supports` refuse custom list edits and the import, `refresh_history` skips, and `anime_page` drops recommendations / Following / details the tracker lacks. Settings → Tracker shows the table (`TrackerSupportTable`, labels in `TRACKER_FEATURES`); add a feature to both enums, `TRACKER_FEATURES` and `docs/trackers.md`.
+- **A tracker is parts**: `Tracker::descriptor()` (id, name, `AuthMethod`, `TrackerLinks`, features) plus `auth()` / `list()` / `catalog()` / `extras()`. Optional methods default to `TrackerError::Unsupported` (kind `unsupported`). Adapters return the neutral types in AniList's vocabulary (statuses, formats, relation types, 0–100 scores) and translate their tracker's values.
 - **The account is not a setting**: `TrackerAccount` (tracker, user id, name, avatar, access / refresh token, expiry) lives under the `app_settings` key `tracker_account`, never in `AppSettings` or a settings backup, and is never logged or sent to the frontend. The frontend gets `AccountInfo` (`get_tracker_state`, `tracker-auth-updated`). The old `AppSettings.anilist_*` / `active_tracker_plugin` fields are moved out once by `accounts::migrate_account_out_of_settings` (a data migration).
 - **Signing in**: `start_tracker_sign_in(tracker)` follows the descriptor's `AuthMethod` (AniList: `BrowserToken`, the implicit grant finishing on the `127.0.0.1:8096` listener at `/AniSync/token`). `refresh_tracker_profile` re-reads the name / avatar with the stored token.
 - **Links**: the frontend builds every external link from the active tracker's `TrackerLinks` templates (`useTracker().link(kind, id)` / `.animeUrl(anime)`, `src/contexts/tracker.ts`, `src/lib/trackers.ts`); never hard-code a tracker's site. A `null` template means the tracker has no such page: show text, not a link. UI text names the tracker with `useTracker().name`; features only AniList has (custom lists, Following, activity import, the airing schedule) keep saying AniList.
