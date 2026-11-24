@@ -903,6 +903,8 @@ export interface StoredAccount {
   active: boolean;
   /** Anime on its list */
   entries: number;
+  /** Edits and deletions not sent to the tracker yet (lost if the account is removed) */
+  unsent: number;
 }
 
 /** `get_tracker_state`: the active tracker (the account's, else the list owner's) and the signed-in account. */

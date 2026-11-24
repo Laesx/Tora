@@ -33,14 +33,16 @@ pub struct StoredAccount {
     pub active: bool,
     /// Anime on its list
     pub entries: u32,
+    /// Edits and deletions not sent to the tracker yet (lost if the account is removed)
+    pub unsent: u32,
 }
 
-/// What an account database says about its account: the stored sign-in, its name, its list size.
-/// `schema`: `acct.` for the attached one, empty for a file opened on its own.
+/// What an account database says about its account: the stored sign-in, its name, its list size and its
+/// unsent changes. `schema`: `acct.` for the attached one, empty for a file opened on its own.
 fn read_account_db(
     conn: &Connection,
     schema: &str,
-) -> (Option<accounts::TrackerAccount>, Option<accounts::AccountProfile>, u32) {
+) -> (Option<accounts::TrackerAccount>, Option<accounts::AccountProfile>, u32, u32) {
     let value = |key: &str| -> Option<String> {
         conn.query_row(
             &format!("SELECT value_json FROM {schema}app_settings WHERE key = ?1"),
@@ -53,10 +55,11 @@ fn read_account_db(
     };
     let account = value(accounts::TRACKER_ACCOUNT_KEY).and_then(|j| serde_json::from_str(&j).ok());
     let profile = value(accounts::ACCOUNT_PROFILE_KEY).and_then(|j| serde_json::from_str(&j).ok());
-    let entries = conn
-        .query_row(&format!("SELECT COUNT(*) FROM {schema}anime_entries"), [], |r| r.get::<_, i64>(0))
-        .unwrap_or(0);
-    (account, profile, entries.max(0) as u32)
+    let count = |sql: String| conn.query_row(&sql, [], |r| r.get::<_, i64>(0)).unwrap_or(0).max(0) as u32;
+    let entries = count(format!("SELECT COUNT(*) FROM {schema}anime_entries"));
+    let unsent = count(format!("SELECT COUNT(*) FROM {schema}anime_entries WHERE sync_pending = 1"))
+        + count(format!("SELECT COUNT(*) FROM {schema}tracker_pending_deletions"));
+    (account, profile, entries, unsent)
 }
 
 /// `mal-123456` → (`mal`, 123456); `local` and anything else → `None`.
@@ -483,7 +486,7 @@ impl Database {
         let mut out = Vec::with_capacity(owners.len());
         for owner in owners {
             let is_active = Some(&owner) == active.as_ref();
-            let (account, profile, entries) = if is_active {
+            let (account, profile, entries, unsent) = if is_active {
                 let conn = self.reader()?;
                 read_account_db(&conn, "acct.")
             } else {
@@ -519,6 +522,7 @@ impl Database {
                 signed_in,
                 active: is_active,
                 entries,
+                unsent,
             });
         }
         let first_other = usize::from(active.is_some()).min(out.len());
@@ -527,6 +531,31 @@ impl Database {
                 .cmp(&(b.tracker.as_str(), b.username.as_deref().unwrap_or("")))
         });
         Ok(out)
+    }
+
+    /// Delete another account's database from this computer: its list, history, cached pages, saved sign-in
+    /// and unsent changes. Never the account in use. Holds the write connection so a switch to it can't
+    /// attach the file meanwhile.
+    pub fn remove_stored_account(&self, owner: &ListOwner) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        if accounts::read_owner(&conn)?.as_ref() == Some(owner) {
+            return Err("The account in use can't be removed: switch to another account first".into());
+        }
+        let AccountTarget::File(path) = self.account_target(Some(owner)) else {
+            return Ok(());
+        };
+        if !path.exists() {
+            return Err("That account isn't on this computer".into());
+        }
+        // The database file last: an interrupted removal leaves a file the account list still shows
+        for file in sidecars(&path).iter().rev() {
+            if file.exists() {
+                std::fs::remove_file(file).map_err(|e| format!("Removing {}: {}", file.display(), e))?;
+            }
+        }
+        drop(conn);
+        log::info!(target: "app", "removed account database {}", account_file_stem(Some(owner)));
+        Ok(())
     }
 
     /// The account database's name (`anilist-460805`, `local`), for settings backups.
@@ -579,6 +608,33 @@ mod tests {
         // Reopened: the active account's database is attached again
         let db = Database::open(&dir.join("tora_library.db")).unwrap();
         assert!(db.get_anime_entry_by_id(1).is_ok());
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn removing_an_account_deletes_only_its_file() {
+        let dir = temp_dir("remove");
+        let db = Database::open(&dir.join("tora_library.db")).unwrap();
+        let anilist = ListOwner::new("anilist", 7);
+        let mal = ListOwner::new("mal", 99);
+        db.switch_account(&anilist).unwrap();
+        db.switch_account(&mal).unwrap();
+        db.upsert_anime_entry(&test_entry(5, "MAL anime")).unwrap();
+
+        assert!(db.remove_stored_account(&mal).is_err(), "never the account in use");
+        let accounts = db.stored_accounts().unwrap();
+        assert_eq!(accounts.len(), 2);
+        assert_eq!(accounts[0].entries, 1);
+
+        db.remove_stored_account(&anilist).unwrap();
+        assert!(!dir.join("accounts").join("anilist-7.db").exists());
+        assert!(dir.join("accounts").join("mal-99.db").exists());
+        let accounts = db.stored_accounts().unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert!(accounts[0].active);
+        assert!(db.get_anime_entry_by_id(5).is_ok(), "the list in use is untouched");
+        assert!(db.remove_stored_account(&anilist).is_err(), "already gone");
         drop(db);
         let _ = std::fs::remove_dir_all(&dir);
     }

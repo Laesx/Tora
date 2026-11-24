@@ -314,6 +314,16 @@ async fn switch_tracker_account(
     Ok(account)
 }
 
+/// Delete another account's database from this computer (Settings → Tracker). Never the account in use.
+#[tauri::command]
+async fn remove_stored_account(state: State<'_, AppState>, tracker: String, user_id: i64) -> Result<(), String> {
+    let db = state.db.clone();
+    let owner = crate::db::ListOwner::new(&tracker, user_id);
+    tokio::task::spawn_blocking(move || db.remove_stored_account(&owner))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// Fetch the signed-in account's name and avatar again (the list and tokens stay as they are).
 #[tauri::command]
 async fn refresh_tracker_profile(state: State<'_, AppState>) -> Result<Option<AccountInfo>, String> {
@@ -2398,6 +2408,7 @@ pub fn run() {
             get_tracker_state,
             get_stored_accounts,
             switch_tracker_account,
+            remove_stored_account,
             refresh_tracker_profile,
             sync_tracker_list,
             get_sync_status,

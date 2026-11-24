@@ -161,6 +161,9 @@ export const toraApi = {
   /** Switch to an account with its saved sign-in (`tracker-account-switched` follows) */
   switchTrackerAccount: (tracker: string, userId: number) =>
     invoke<AccountInfo>("switch_tracker_account", { tracker, userId }),
+  /** Delete another account's database from this computer (never the account in use) */
+  removeStoredAccount: (tracker: string, userId: number) =>
+    invoke<void>("remove_stored_account", { tracker, userId }),
 
   // Flushes queued pushes/deletes, then pulls the signed-in user's list from the tracker
   syncTrackerList: () => invoke<SyncSummary>("sync_tracker_list"),

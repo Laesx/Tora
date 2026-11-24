@@ -1,177 +1,242 @@
-import React, { useCallback, useEffect, useState } from "react";
-import { ArrowRightLeft, LogIn, Plug, User } from "lucide-react";
-import { StoredAccount, TrackerDescriptor } from "@/lib/types";
-import { toraApi } from "@/lib/api";
-import { logError } from "@/lib/log";
-import { useToast } from "@/contexts/toast";
+import React, { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
+import { ArrowRightLeft, ExternalLink, Loader2, LogIn, LogOut, Plug, Plus, Trash2, TriangleAlert } from "lucide-react";
+import { StoredAccount } from "@/lib/types";
+import { plural } from "@/lib/format";
 import { useTracker } from "@/contexts/tracker";
+import { AccountAvatar } from "@/app/AccountMenu";
+import { accountKey, useStoredAccounts } from "@/app/useStoredAccounts";
 import { TrackerSupportTable } from "./TrackerSupportTable";
 
+const accountLabel = (a: StoredAccount) => (a.username ? `@${a.username}` : `Account ${a.user_id}`);
+
+const rowButton =
+  "flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-bg-tertiary text-text-primary hover:bg-accent hover:text-white disabled:opacity-50 disabled:pointer-events-none transition cursor-pointer";
+
 /**
- * Settings → Tracker: the trackers (sign in / switch), the accounts with a list on this computer (switch with
- * their stored sign-in, no new sign-in), and what each tracker supports.
+ * Settings → Tracker: one list of the accounts on this computer. The one in use comes first (profile, sign
+ * out); the others switch with their saved sign-in, sign in again, or are removed from this computer. Below:
+ * adding an account per tracker, and what each tracker supports (collapsed).
  */
-export const TrackerSettings: React.FC = () => {
+export const TrackerSettings: React.FC<{ onSignOut: () => void; onOpenProfile: () => void }> = ({
+  onSignOut,
+  onOpenProfile,
+}) => {
   const { tracker: activeTracker, account } = useTracker();
-  const showToast = useToast();
-  const [trackers, setTrackers] = useState<TrackerDescriptor[]>([]);
-  const [accounts, setAccounts] = useState<StoredAccount[]>([]);
-  const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    toraApi.getTrackers().then(setTrackers).catch(logError("settings", "Loading trackers failed"));
-  }, []);
-  const loadAccounts = useCallback(() => {
-    toraApi.getStoredAccounts().then(setAccounts).catch(logError("settings", "Loading accounts failed"));
-  }, []);
-  // Again after every sign-in, sign-out or switch
-  useEffect(loadAccounts, [loadAccounts, account?.tracker, account?.user_id]);
-
-  const trackerName = (id: string) => trackers.find((t) => t.id === id)?.name ?? id;
-
-  const signIn = async (t: TrackerDescriptor) => {
-    try {
-      setBusy(true);
-      await toraApi.startTrackerSignIn(t.id);
-      showToast(`Opened ${t.name} in your browser — approve Tora there to sign in`, "info");
-    } catch (err) {
-      showToast(String(err), "error");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  // The app reloads the list on `tracker-account-switched` and says so
-  const switchTo = async (a: StoredAccount) => {
-    try {
-      setBusy(true);
-      await toraApi.switchTrackerAccount(a.tracker, a.user_id);
-    } catch (err) {
-      showToast(String(err), "error");
-    } finally {
-      setBusy(false);
-      loadAccounts();
-    }
-  };
-
-  /** A tracker card's button: the stored account of that tracker when there is one, else a new sign-in */
-  const openTracker = (t: TrackerDescriptor) => {
-    const stored = accounts.find((a) => a.tracker === t.id && a.signed_in && !a.active);
-    return stored ? switchTo(stored) : signIn(t);
-  };
+  const { trackers, accounts, busy, trackerName, signIn, switchTo, remove } = useStoredAccounts();
+  const [removing, setRemoving] = useState<StoredAccount | null>(null);
+  const current = accounts.find((a) => a.active);
+  const others = accounts.filter((a) => !a.active);
 
   return (
     <div className="bg-bg-secondary border border-border-subtle rounded-2xl p-5 space-y-5">
       <div>
         <h2 className="text-base font-bold text-text-primary flex items-center gap-2">
           <Plug className="w-5 h-5 text-accent" />
-          Tracker
+          Accounts
         </h2>
         <p className="text-xs text-text-secondary mt-0.5">
-          The service your list syncs with. Switching to another tracker or account loads its list; each
-          account's list, history and settings stay on this computer for when you switch back.
+          Your list syncs with the account in use. Each account keeps its own list, history and settings on this
+          computer, so switching back finds everything as it was.
         </p>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-        {trackers.map((t) => {
-          const isActive = activeTracker?.id === t.id;
-          return (
-            <div
-              key={t.id}
-              className={`p-4 rounded-xl border space-y-2 ${isActive ? "border-accent bg-accent/10" : "border-border-subtle bg-bg-primary"}`}
-            >
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-bold text-text-primary">{t.name}</span>
-                {isActive && (
-                  <span className="px-2 py-0.5 rounded text-[10px] font-semibold uppercase bg-emerald-500/20 text-emerald-400">
-                    active
-                  </span>
-                )}
+      <div className="rounded-xl border border-border-subtle divide-y divide-border-subtle overflow-hidden">
+        {/* The account in use, signed in or not; nothing before the first sign-in */}
+        {current ? (
+          <div className="flex items-center gap-3 px-3 py-2.5 bg-accent/5">
+            <AccountAvatar avatarUrl={current.avatar_url} name={current.username} tracker={current.tracker} />
+            <div className="min-w-0 flex-1 pl-1">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-semibold text-text-primary truncate">{accountLabel(current)}</span>
+                <span className="px-1.5 py-px rounded text-[9px] font-semibold uppercase bg-emerald-500/20 text-emerald-400">
+                  in use
+                </span>
               </div>
-              <p className="text-[11px] text-text-muted leading-relaxed">
-                {isActive && account ? `Signed in as @${account.username}` : isActive ? "Signed out" : "Not in use"}
-              </p>
-              {!(isActive && account) && (
+              <div className="text-[11px] text-text-muted truncate">
+                {trackerName(current.tracker)} · {current.entries.toLocaleString()} anime
+                {!account && " · signed out"}
+              </div>
+            </div>
+            {account ? (
+              <>
+                <button onClick={onOpenProfile} className={rowButton} title={`Open your ${trackerName(current.tracker)} profile`}>
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  Profile
+                </button>
+                <button onClick={onSignOut} className={`${rowButton} hover:!bg-rose-600`}>
+                  <LogOut className="w-3.5 h-3.5" />
+                  Sign out
+                </button>
+              </>
+            ) : (
+              <button onClick={() => void signIn(current.tracker)} disabled={busy !== null} className={rowButton}>
+                <LogIn className="w-3.5 h-3.5" />
+                Sign in
+              </button>
+            )}
+          </div>
+        ) : (
+          <div className="px-3 py-3 bg-bg-primary text-[11px] text-text-muted">
+            Not signed in{activeTracker ? ` to ${activeTracker.name}` : ""}: add an account below to sync your list.
+          </div>
+        )}
+
+        {others.map((a) => {
+          const key = accountKey(a);
+          return (
+            <div key={key} className="flex items-center gap-3 px-3 py-2.5 bg-bg-primary">
+              <span className={a.signed_in ? "" : "opacity-50"}>
+                <AccountAvatar avatarUrl={a.avatar_url} name={a.username} tracker={a.tracker} />
+              </span>
+              <div className="min-w-0 flex-1 pl-1">
+                <div className="text-xs font-semibold text-text-primary truncate">{accountLabel(a)}</div>
+                <div className="text-[11px] text-text-muted truncate">
+                  {trackerName(a.tracker)} · {a.entries.toLocaleString()} anime
+                  {!a.signed_in && " · signed out"}
+                </div>
+              </div>
+              {busy === key && <Loader2 className="w-3.5 h-3.5 animate-spin text-accent shrink-0" />}
+              {a.signed_in ? (
+                <button onClick={() => void switchTo(a)} disabled={busy !== null} className={rowButton}>
+                  <ArrowRightLeft className="w-3.5 h-3.5" />
+                  Switch
+                </button>
+              ) : (
                 <button
-                  onClick={() => void openTracker(t)}
-                  disabled={busy}
-                  className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-accent text-white hover:opacity-90 disabled:opacity-50 transition cursor-pointer"
+                  onClick={() => void signIn(a.tracker)}
+                  disabled={busy !== null}
+                  title={`Signs in whoever is logged in on ${trackerName(a.tracker)} in your browser`}
+                  className={rowButton}
                 >
                   <LogIn className="w-3.5 h-3.5" />
-                  {isActive ? `Sign in to ${t.name}` : `Switch to ${t.name}`}
+                  Sign in
                 </button>
               )}
+              <button
+                onClick={() => setRemoving(a)}
+                disabled={busy !== null}
+                title="Remove from this computer"
+                aria-label={`Remove ${accountLabel(a)} from this computer`}
+                className="p-1.5 rounded-lg text-text-muted hover:text-rose-400 hover:bg-rose-500/10 disabled:opacity-50 disabled:pointer-events-none transition cursor-pointer"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
             </div>
           );
         })}
       </div>
 
-      {accounts.length > 0 && (
-        <div className="space-y-2">
-          <div>
-            <h3 className="text-xs font-bold text-text-primary">Accounts on this computer</h3>
-            <p className="text-[11px] text-text-muted mt-0.5 leading-relaxed">
-              Switching uses the account's saved sign-in. Signing out of an account forgets it, so that one needs
-              a new sign-in.
-            </p>
-          </div>
-          <div className="rounded-xl border border-border-subtle divide-y divide-border-subtle overflow-hidden">
-            {accounts.map((a) => (
-              <div
-                key={`${a.tracker}-${a.user_id}`}
-                className={`flex items-center gap-3 px-3 py-2 ${a.active ? "bg-accent/5" : "bg-bg-primary"}`}
-              >
-                {a.avatar_url ? (
-                  <img src={a.avatar_url} alt="" className="w-7 h-7 rounded-full object-cover shrink-0" />
-                ) : (
-                  <span className="w-7 h-7 rounded-full bg-bg-tertiary flex items-center justify-center shrink-0">
-                    <User className="w-3.5 h-3.5 text-text-muted" />
-                  </span>
-                )}
-                <div className="min-w-0 flex-1">
-                  <div className="text-xs font-semibold text-text-primary truncate">
-                    {a.username ? `@${a.username}` : `Account ${a.user_id}`}
-                  </div>
-                  <div className="text-[11px] text-text-muted">
-                    {trackerName(a.tracker)} · {a.entries.toLocaleString()} anime
-                    {!a.signed_in && " · signed out"}
-                  </div>
-                </div>
-                {a.active ? (
-                  <span className="px-2 py-0.5 rounded text-[10px] font-semibold uppercase bg-emerald-500/20 text-emerald-400">
-                    in use
-                  </span>
-                ) : a.signed_in ? (
-                  <button
-                    onClick={() => void switchTo(a)}
-                    disabled={busy}
-                    className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-bg-tertiary text-text-primary hover:bg-accent hover:text-white disabled:opacity-50 transition cursor-pointer"
-                  >
-                    <ArrowRightLeft className="w-3.5 h-3.5" />
-                    Switch
-                  </button>
-                ) : (
-                  <button
-                    onClick={() => {
-                      const t = trackers.find((x) => x.id === a.tracker);
-                      if (t) void signIn(t);
-                    }}
-                    disabled={busy}
-                    title="Sign in to this account again (the browser asks which account)"
-                    className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-bg-tertiary text-text-primary hover:bg-accent hover:text-white disabled:opacity-50 transition cursor-pointer"
-                  >
-                    <LogIn className="w-3.5 h-3.5" />
-                    Sign in
-                  </button>
-                )}
-              </div>
-            ))}
-          </div>
+      <div className="space-y-1.5">
+        <div className="flex flex-wrap gap-2">
+          {trackers.map((t) => (
+            <button
+              key={t.id}
+              onClick={() => void signIn(t.id)}
+              disabled={busy !== null}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold border border-border-subtle bg-bg-primary text-text-secondary hover:border-accent/50 hover:text-text-primary disabled:opacity-50 transition cursor-pointer"
+            >
+              {busy === t.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
+              Add {t.name} account
+            </button>
+          ))}
         </div>
-      )}
+        <p className="text-[11px] text-text-muted leading-relaxed">
+          Signs in whoever is logged in on the tracker's site in your browser: log out there first to add another
+          account of the same tracker.
+        </p>
+      </div>
 
       <TrackerSupportTable trackers={trackers} activeId={activeTracker?.id ?? null} />
+
+      {removing && (
+        <RemoveAccountModal
+          account={removing}
+          trackerName={trackerName(removing.tracker)}
+          onCancel={() => setRemoving(null)}
+          onConfirm={() => {
+            const a = removing;
+            setRemoving(null);
+            void remove(a);
+          }}
+        />
+      )}
     </div>
+  );
+};
+
+/** Confirmation before deleting an account's database: what goes, and the unsent changes lost with it. */
+const RemoveAccountModal: React.FC<{
+  account: StoredAccount;
+  trackerName: string;
+  onCancel: () => void;
+  onConfirm: () => void;
+}> = ({ account, trackerName, onCancel, onConfirm }) => {
+  // Esc closes this, not Settings underneath (the app's handler listens on window, bubbling)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.stopPropagation();
+      onCancel();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [onCancel]);
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4"
+      onClick={onCancel}
+    >
+      <div
+        role="alertdialog"
+        className="bg-bg-secondary border border-border-subtle rounded-2xl p-5 max-w-sm w-full shadow-2xl space-y-4"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-rose-500/15 border border-rose-500/30 flex items-center justify-center text-rose-400 shrink-0">
+            <Trash2 className="w-5 h-5" />
+          </div>
+          <div className="min-w-0">
+            <h3 className="text-sm font-bold text-text-primary">Remove from this computer?</h3>
+            <p className="text-[11px] text-text-muted truncate">
+              {accountLabel(account)} · {trackerName}
+            </p>
+          </div>
+        </div>
+
+        <p className="text-xs text-text-secondary leading-relaxed">
+          Deletes this account's list, watch history, imported activity, cached anime pages and saved sign-in from
+          Tora, along with what you set only here (folder links, aliases, pinned releases). Your list on{" "}
+          {trackerName} isn't touched: signing in again downloads it. This can't be undone.
+        </p>
+
+        {account.unsent > 0 && (
+          <p className="flex gap-2 text-xs text-rose-300 bg-rose-500/10 border border-rose-500/30 rounded-xl px-3 py-2 leading-relaxed">
+            <TriangleAlert className="w-4 h-4 shrink-0 mt-px" />
+            {plural(account.unsent, "change")} {account.unsent === 1 ? "hasn't" : "haven't"} been sent to{" "}
+            {trackerName} yet and will be lost. {account.signed_in ? "Switch to" : "Sign in to"} this account first
+            to send {account.unsent === 1 ? "it" : "them"}.
+          </p>
+        )}
+
+        <div className="flex items-center justify-end gap-2.5 pt-1">
+          <button
+            onClick={onCancel}
+            autoFocus
+            className="px-4 py-2 rounded-xl bg-bg-tertiary hover:bg-bg-elevated text-text-secondary hover:text-text-primary text-xs font-semibold border border-border-subtle transition cursor-pointer"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold transition shadow-sm cursor-pointer"
+          >
+            Remove
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body
   );
 };

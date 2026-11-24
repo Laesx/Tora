@@ -1,5 +1,5 @@
-import React from "react";
-import { Check, CircleAlert, Minus } from "lucide-react";
+import React, { useState } from "react";
+import { Check, ChevronRight, CircleAlert, Minus } from "lucide-react";
 import { TrackerDescriptor } from "@/lib/types";
 import { featureSupport, TRACKER_FEATURES } from "@/lib/trackers";
 
@@ -11,12 +11,23 @@ export const TrackerSupportTable: React.FC<{ trackers: TrackerDescriptor[]; acti
   trackers,
   activeId,
 }) => {
+  // Reference, not something to act on: collapsed until asked for
+  const [open, setOpen] = useState(false);
   if (trackers.length === 0) return null;
   return (
     <div className="space-y-2">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="flex items-center gap-1 text-xs font-bold text-text-primary hover:text-accent transition cursor-pointer"
+      >
+        <ChevronRight className={`w-3.5 h-3.5 transition-transform ${open ? "rotate-90" : ""}`} />
+        What each tracker supports
+      </button>
+      {open && (
+      <>
       <div>
-        <h3 className="text-xs font-bold text-text-primary">What each tracker supports</h3>
-        <p className="text-[11px] text-text-muted mt-0.5 leading-relaxed">
+        <p className="text-[11px] text-text-muted leading-relaxed">
           Every tracker syncs your list, searches anime, browses seasons and shows related anime. While a tracker is
           active, what it doesn't support is hidden or turned off.
         </p>
@@ -65,6 +76,8 @@ export const TrackerSupportTable: React.FC<{ trackers: TrackerDescriptor[]; acti
           </tbody>
         </table>
       </div>
+      </>
+      )}
     </div>
   );
 };

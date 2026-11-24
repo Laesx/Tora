@@ -4,12 +4,16 @@ import { createPortal } from "react-dom";
 /** Window event that closes every open right-click menu (e.g. when the command palette opens). */
 export const CLOSE_MENUS_EVENT = "tora:close-menus";
 
-/** Portal that keeps a context menu inside the viewport and closes it on outside click / Escape / scroll. */
+/**
+ * Portal that keeps a context menu inside the viewport and closes it on outside click / Escape / scroll.
+ * `above`: the menu's bottom edge sits at `anchor.y` (for buttons at the bottom of the window).
+ */
 export const FloatingQuickMenu: React.FC<{
   anchor: { x: number; y: number };
   onClose: () => void;
+  above?: boolean;
   children: React.ReactNode;
-}> = ({ anchor, onClose, children }) => {
+}> = ({ anchor, onClose, above = false, children }) => {
   const ref = useRef<HTMLDivElement | null>(null);
   const [position, setPosition] = useState({ top: anchor.y, left: anchor.x });
 
@@ -20,14 +24,14 @@ export const FloatingQuickMenu: React.FC<{
       const rect = el.getBoundingClientRect();
       setPosition({
         left: Math.max(8, Math.min(window.innerWidth - rect.width - 8, anchor.x)),
-        top: Math.max(8, Math.min(window.innerHeight - rect.height - 8, anchor.y)),
+        top: Math.max(8, Math.min(window.innerHeight - rect.height - 8, above ? anchor.y - rect.height : anchor.y)),
       });
     };
     clamp();
     const ro = new ResizeObserver(clamp);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [anchor.x, anchor.y]);
+  }, [anchor.x, anchor.y, above]);
 
   useEffect(() => {
     const onDown = (e: MouseEvent) => {

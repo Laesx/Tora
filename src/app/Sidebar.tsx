@@ -1,6 +1,8 @@
-import React from "react";
-import { ArrowLeft, ArrowRight, ExternalLink, Keyboard, LogIn, LogOut, Search, Settings, User } from "lucide-react";
+import React, { useCallback, useRef, useState } from "react";
+import { ArrowLeft, ArrowRight, ChevronsUpDown, Keyboard, LogIn, Search, Settings } from "lucide-react";
 import { useTracker } from "@/contexts/tracker";
+import { AccountAvatar, AccountMenu } from "./AccountMenu";
+import { useStoredAccounts } from "./useStoredAccounts";
 import toraMark from "@/assets/tora-mark.svg";
 import { KeyHint } from "@/components/KeyHint";
 import { NAV_ITEMS, NavTab, SETTINGS_SHORTCUT_DIGIT } from "./nav";
@@ -24,6 +26,8 @@ interface SidebarProps {
   onSignIn: () => void;
   onSignOut: () => void;
   onOpenProfile: () => void;
+  /** Settings → Tracker (the account menu's "Manage accounts…") */
+  onManageAccounts: () => void;
   /** Running app version (empty until known) */
   version: string;
   /** Unseen changelog or a postponed update: the version badge shows a dot and opens the changelog */
@@ -65,6 +69,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onSignIn,
   onSignOut,
   onOpenProfile,
+  onManageAccounts,
   version,
   updateDot,
   updateChecking,
@@ -155,6 +160,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         onSignIn={onSignIn}
         onSignOut={onSignOut}
         onOpenProfile={onOpenProfile}
+        onManageAccounts={onManageAccounts}
       />
     </div>
   </aside>
@@ -210,48 +216,53 @@ const AccountCard: React.FC<{
   onSignIn: () => void;
   onSignOut: () => void;
   onOpenProfile: () => void;
-}> = ({ isAuthorizing, onSignIn, onSignOut, onOpenProfile }) => {
+  onManageAccounts: () => void;
+}> = ({ isAuthorizing, onSignIn, onSignOut, onOpenProfile, onManageAccounts }) => {
   const { account, name } = useTracker();
+  // Loaded here, not in the menu: the menu then opens at its full size at once
+  const stored = useStoredAccounts();
+  const cardRef = useRef<HTMLButtonElement | null>(null);
+  const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null);
+  const toggleMenu = () => {
+    const rect = cardRef.current?.getBoundingClientRect();
+    // List sizes may have changed since the last load: refreshed in the background, the rows stay put
+    if (!menuAt) stored.reload();
+    setMenuAt((open) => (open || !rect ? null : { x: rect.left, y: rect.top - 6 }));
+  };
+  const closeMenu = useCallback(() => setMenuAt(null), []);
   if (account) {
     return (
-      <div className="flex items-center justify-between gap-2 p-2 rounded-xl bg-bg-primary border border-border-subtle">
+      <>
         <button
-          onClick={onOpenProfile}
-          className="flex items-center gap-2.5 min-w-0 flex-1 text-left group cursor-pointer"
-          title={`Open @${account.username} on ${name}`}
+          ref={cardRef}
+          onClick={toggleMenu}
+          // The menu closes on any press outside it: this one toggles it instead of reopening at once
+          onMouseDown={(e) => menuAt && e.stopPropagation()}
+          aria-haspopup="menu"
+          aria-expanded={menuAt !== null}
+          title="Accounts"
+          className={`w-full flex items-center gap-2.5 p-2 rounded-xl bg-bg-primary border text-left group cursor-pointer transition ${menuAt ? "border-accent" : "border-border-subtle hover:border-accent/50"}`}
         >
-          {account.avatar_url ? (
-            <img
-              src={account.avatar_url}
-              alt={account.username}
-              className="w-9 h-9 rounded-full object-cover border border-border-subtle group-hover:border-accent transition shrink-0 bg-bg-tertiary"
-            />
-          ) : (
-            <div className="w-9 h-9 rounded-full bg-accent/15 border border-accent/30 group-hover:border-accent flex items-center justify-center text-accent font-bold text-xs shrink-0 transition">
-              {account.username ? (
-                account.username.charAt(0).toUpperCase()
-              ) : (
-                <User className="w-4 h-4" />
-              )}
+          <AccountAvatar avatarUrl={account.avatar_url} name={account.username} tracker={account.tracker} />
+          <div className="min-w-0 flex-1 pl-1">
+            <div className="text-xs font-bold text-text-primary group-hover:text-accent transition truncate">
+              {account.username || `${name} user`}
             </div>
-          )}
-          <div className="min-w-0 flex-1">
-            <div className="text-xs font-bold text-text-primary group-hover:text-accent transition truncate flex items-center gap-1">
-              <span className="truncate">{account.username || `${name} user`}</span>
-              <ExternalLink className="w-3 h-3 opacity-0 group-hover:opacity-100 transition shrink-0 text-accent" />
-            </div>
-            <div className="text-[10px] text-text-muted truncate">{name} profile</div>
+            <div className="text-[10px] text-text-muted truncate">{name}</div>
           </div>
+          <ChevronsUpDown className="w-4 h-4 text-text-muted group-hover:text-accent transition shrink-0" />
         </button>
-
-        <button
-          onClick={onSignOut}
-          className="p-2 rounded-lg text-text-muted hover:text-rose-400 hover:bg-rose-500/10 transition shrink-0 cursor-pointer"
-          title="Sign Out"
-        >
-          <LogOut className="w-4 h-4" />
-        </button>
-      </div>
+        {menuAt && (
+          <AccountMenu
+            anchor={menuAt}
+            stored={stored}
+            onClose={closeMenu}
+            onOpenProfile={onOpenProfile}
+            onManageAccounts={onManageAccounts}
+            onSignOut={onSignOut}
+          />
+        )}
+      </>
     );
   }
   return (

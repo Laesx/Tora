@@ -167,6 +167,9 @@ interface SettingsViewProps {
   onCheckForUpdates: () => void;
   updateChecking: boolean;
   onOpenChangelog: () => void;
+  /** Settings → Tracker: the account in use (the same confirmation / tracker page as the sidebar menu) */
+  onSignOut: () => void;
+  onOpenProfile: () => void;
 }
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
@@ -179,6 +182,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   onCheckForUpdates,
   updateChecking,
   onOpenChangelog,
+  onSignOut,
+  onOpenProfile,
 }) => {
   const { supports } = useTracker();
   const [section, setSection] = useState<SettingsSection>(sectionRequest?.section ?? "appearance");
@@ -437,7 +442,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
         {section === "tracker" && (
           <>
-            <TrackerSettings />
+            <TrackerSettings onSignOut={onSignOut} onOpenProfile={onOpenProfile} />
 
             {supports("activity_history") && <AniListHistorySettings settings={settings} />}
           </>

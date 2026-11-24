@@ -38,3 +38,7 @@ export const featureSupport = (
   tracker: TrackerDescriptor | null | undefined,
   feature: TrackerFeature
 ): FeatureSupport | null => tracker?.features.find((f) => f.feature === feature) ?? null;
+
+/** A tracker's short name for small badges ("AL", "MAL"); unknown ids show their first letters. */
+export const trackerShortName = (id: string): string =>
+  ({ anilist: "AL", mal: "MAL", kitsu: "KIT" } as Record<string, string>)[id] ?? id.slice(0, 3).toUpperCase();

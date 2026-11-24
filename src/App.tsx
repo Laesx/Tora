@@ -855,6 +855,7 @@ export const App: React.FC = () => {
                       onSignIn={handleStartSignIn}
                       onSignOut={() => setSignOutModalOpen(true)}
                       onOpenProfile={handleOpenProfile}
+                      onManageAccounts={() => openSettings("tracker")}
                       version={updater.version}
                       updateDot={updater.showDot}
                       updateChecking={updater.checking}
@@ -1059,6 +1060,8 @@ export const App: React.FC = () => {
                         onCheckForUpdates={() => void updater.checkForUpdates(true)}
                         updateChecking={updater.checking}
                         onOpenChangelog={updater.openChangelog}
+                        onSignOut={() => setSignOutModalOpen(true)}
+                        onOpenProfile={handleOpenProfile}
                       />
                     )}
 
