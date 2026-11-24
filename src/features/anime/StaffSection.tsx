@@ -48,9 +48,9 @@ export const StaffSection: React.FC<{ anime: AnimeEntry; details: MediaDetails }
       </div>
       {(staff.length > PREVIEW_COUNT || details.staff_has_more) && (
         <div className="flex items-center justify-end gap-4">
-          {expanded && details.staff_has_more && tracker.link("anime_staff", anime.anilist_id ?? anime.id) && (
+          {expanded && details.staff_has_more && tracker.link("anime_staff", anime.id) && (
             <button
-              onClick={() => openExternal(tracker.link("anime_staff", anime.anilist_id ?? anime.id), showToast)}
+              onClick={() => openExternal(tracker.link("anime_staff", anime.id), showToast)}
               className="flex items-center gap-1 text-[11px] font-semibold text-text-secondary hover:text-accent"
             >
               <ExternalLink className="w-3 h-3" />

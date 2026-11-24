@@ -16,7 +16,7 @@
 //! - `tracker-entry-synced`  `{ entry }`
 //! - `library-changed`       `ScanSummary` (after a pull, when background matching bound new local files)
 //! - `tracker-account-switched` `{ previous_tracker, previous_user_id, tracker, user_id, username,
-//!   discarded_changes }`
+//!   new_account }`
 //! - `anilist-history-progress` / `anilist-history-updated` (see [`history`])
 //!
 //! Edits and deletes are always queued (`sync_pending` / tombstones), signed in or not; they are only sent
@@ -536,12 +536,12 @@ pub struct SyncStatus {
 /// Result of [`TrackerSyncService::sign_in`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SignInOutcome {
-    /// A different account than the list owner signed in (another user, or another tracker); the previous
-    /// account's list data was wiped.
+    /// A different account than the list owner signed in (another user, or another tracker): its database
+    /// is now the account database; the previous account's stays as it was, unsent changes included.
     pub account_switched: bool,
     pub previous_owner: Option<ListOwner>,
-    /// Unsent changes (pending entries + queued deletions) of the previous account that were dropped.
-    pub discarded_changes: usize,
+    /// The account had no database yet (its list is imported by the next pull).
+    pub new_account: bool,
     /// The account now signed in.
     pub account: Option<AccountInfo>,
 }
@@ -1309,11 +1309,12 @@ impl TrackerSyncService {
         Ok((out.succeeded, out.failed))
     }
 
-    /// Adopt a verified account of `tracker` and store it with its tokens. If the list has no owner yet or
-    /// belongs to this account, the local list and its queued changes are kept (the next pull sends them).
-    /// A different account (another user, or another tracker) wipes the previous account's list data
-    /// ([`Database::reset_for_account_switch`]), clears the playback match and emits
-    /// `tracker-account-switched`. Callers run `pull("post_auth")` after.
+    /// Adopt a verified account of `tracker` and store it with its tokens (in its own database). If the list
+    /// has no owner yet or belongs to this account, the local list and its queued changes are kept (the next
+    /// pull sends them). A different account (another user, or another tracker) switches to that account's
+    /// database ([`Database::switch_account`]: the previous one is kept, nothing is deleted), rematches the
+    /// library against its list, clears the playback match and emits `tracker-account-switched`. Callers
+    /// run `pull("post_auth")` after.
     pub async fn sign_in(
         &self,
         tracker: &str,
@@ -1343,13 +1344,13 @@ impl TrackerSyncService {
                     account: Some(account.info()),
                     ..Default::default()
                 };
-                match previous {
-                    Some(owner) if owner != new_owner => {
-                        outcome.account_switched = true;
-                        outcome.discarded_changes = db.reset_for_account_switch(&new_owner)?;
+                if previous.as_ref() != Some(&new_owner) {
+                    outcome.new_account = db.switch_account(&new_owner)?;
+                    outcome.account_switched = previous.is_some();
+                    // Library matches point at the previous list's anime ids
+                    if outcome.account_switched {
+                        db.rematch_from_index()?;
                     }
-                    Some(_) => {}
-                    None => db.set_list_owner(&new_owner)?,
                 }
                 db.set_tracker_account(&account)?;
                 Ok(outcome)
@@ -1359,10 +1360,11 @@ impl TrackerSyncService {
         if outcome.account_switched {
             log::info!(
                 target: "sync",
-                "signed in as a different account ({:?} -> {} {}): local list reset",
+                "signed in as a different account ({:?} -> {} {}){}",
                 outcome.previous_owner,
                 tracker,
-                profile.user_id
+                profile.user_id,
+                if outcome.new_account { ", new account database" } else { "" }
             );
             if let Ok(mut last) = self.last_synced_at.lock() {
                 *last = None;
@@ -1383,7 +1385,7 @@ impl TrackerSyncService {
                     "tracker": tracker,
                     "user_id": profile.user_id,
                     "username": profile.username,
-                    "discarded_changes": outcome.discarded_changes,
+                    "new_account": outcome.new_account,
                 }),
             );
         }
@@ -3280,7 +3282,7 @@ mod tests {
         assert_eq!(db.score_format().unwrap(), "POINT_10_DECIMAL");
         assert!(!db.set_score_format("POINT_10_DECIMAL").unwrap());
 
-        db.reset_for_account_switch(&crate::db::ListOwner::new("anilist", 7)).unwrap();
+        db.switch_account(&crate::db::ListOwner::new("anilist", 7)).unwrap();
         assert_eq!(db.score_format().unwrap(), "POINT_100");
     }
 
@@ -3704,8 +3706,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_different_account_wipes_the_previous_list_and_keeps_machine_data() {
-        let db = Arc::new(Database::open_in_memory().unwrap());
+    async fn a_different_account_gets_its_own_database_and_switching_back_restores_everything() {
+        let dir = std::env::temp_dir().join(format!("tora-sync-switch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let db = Arc::new(Database::open(&dir.join("tora_library.db")).unwrap());
         let mock = Arc::new(MockTracker {
             viewer_id: 7,
             ..Default::default()
@@ -3728,21 +3732,21 @@ mod tests {
 
         let outcome = svc.sign_in("anilist", AccessTokens::access_only("token-b"), &profile(7, "bob")).await.unwrap();
         assert!(outcome.account_switched);
+        assert!(outcome.new_account);
         assert_eq!(outcome.previous_owner, Some(crate::db::ListOwner::new("anilist", 42)));
-        assert_eq!(outcome.discarded_changes, 2);
         assert_eq!(db.list_owner().unwrap(), Some(crate::db::ListOwner::new("anilist", 7)));
         let stored = db.tracker_account().unwrap().unwrap();
         assert_eq!((stored.user_id, stored.access_token.as_str(), stored.username.as_str()), (7, "token-b", "bob"));
 
-        // Account data is gone…
+        // Bob's database is new: none of Alice's data…
         assert!(db.list_anime_entries().unwrap().is_empty());
         assert_eq!(db.count_pending_deletions().unwrap(), 0);
         assert!(db.list_watch_history(10, 0).unwrap().is_empty());
         assert_ne!(db.matcher_generation(), generation);
         assert!(db.matcher_index().unwrap().user_aliases.is_empty());
-        // …machine data stays: the indexed file (unmatched) and the torrent config
+        assert!(crate::torrents::config::load_fansubs(&db).unwrap().is_empty());
+        // …while the device's stays: the indexed file, rematched against Bob's (empty) list
         assert_eq!(matched_of(&db, "C:/lib/alpha-01.mkv"), None);
-        assert_eq!(crate::torrents::config::load_fansubs(&db).unwrap().len(), 1);
         let switched = events
             .lock()
             .unwrap()
@@ -3750,7 +3754,7 @@ mod tests {
             .find(|(n, _)| n == EVENT_ACCOUNT_SWITCHED)
             .map(|(_, v)| v.clone())
             .unwrap();
-        assert_eq!(switched["discarded_changes"], 2);
+        assert_eq!(switched["new_account"], true);
         assert_eq!(switched["username"], "bob");
 
         // The new account's list is imported fresh; nothing from the old account was ever sent
@@ -3759,6 +3763,25 @@ mod tests {
         assert_eq!(summary.added, 1);
         assert!(mock.saves.lock().unwrap().is_empty());
         assert!(mock.deletes.lock().unwrap().is_empty());
+
+        // Back to Alice: everything as it was, her unsent changes included
+        let outcome = svc.sign_in("anilist", AccessTokens::access_only("token-a"), &profile(42, "alice")).await.unwrap();
+        assert!(outcome.account_switched);
+        assert!(!outcome.new_account);
+        let alpha = db.get_anime_entry_by_id(1).unwrap();
+        assert!(alpha.sync_pending);
+        assert_eq!(alpha.custom_folder.as_deref(), Some("C:/lib/Alpha"));
+        assert!(db.get_anime_entry_by_id(9).is_err());
+        assert_eq!(db.count_pending_deletions().unwrap(), 1);
+        assert_eq!(db.list_watch_history(10, 0).unwrap().len(), 1);
+        assert_eq!(db.matcher_index().unwrap().user_aliases.get("alpha alias"), Some(&1));
+        assert_eq!(crate::torrents::config::load_fansubs(&db).unwrap().len(), 1);
+        assert_eq!(matched_of(&db, "C:/lib/alpha-01.mkv"), Some(1));
+        assert_eq!(db.tracker_account().unwrap().unwrap().access_token, "token-a");
+
+        drop(svc);
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

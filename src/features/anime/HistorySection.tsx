@@ -15,7 +15,7 @@ const shortDate = (ts: number) =>
 export const HistorySection: React.FC<{ anime: AnimeEntry }> = ({ anime }) => {
   const { openAnimeHistory } = useAnimeActions();
   const [episodes, setEpisodes] = useState<TimelineEpisode[] | null>(null);
-  const mediaId = anime.anilist_id ?? anime.id;
+  const mediaId = anime.id;
 
   useEffect(() => {
     let cancelled = false;

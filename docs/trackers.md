@@ -4,8 +4,10 @@ Source of truth for what each tracker can do, checked against the live APIs (Pha
 the real responses (personal values replaced) live in `src-tauri/fixtures/trackers/{anilist,mal,kitsu}`.
 Update this file when an API changes or a new tracker is added.
 
-Model (see the plan): one active tracker; its own data first; a feature it can't provide falls back to AniList's
-public API through ID mapping when "Fill in missing data from AniList" is on; account features never fall back.
+Model: one active tracker, and each tracker offers only what it supports natively: there is no AniList fallback
+(decided 2026-11-24, after Phase 0). Cells marked `Fallback` / `Prefer fallback` below are what the tracker lacks
+(or does worse); they record what AniList could have filled in. Each account keeps its own database
+(`db/storage.rs`), so switching trackers or accounts loses nothing.
 
 ## Capability matrix
 

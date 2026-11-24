@@ -54,7 +54,7 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
   const [relations, setRelations] = useState<MediaRelation[]>([]);
   const [adding, setAdding] = useState(false);
 
-  const mediaId = anime.anilist_id ?? anime.id;
+  const mediaId = anime.id;
   useEffect(() => {
     setStudioRefs(null);
     setRelations([]);

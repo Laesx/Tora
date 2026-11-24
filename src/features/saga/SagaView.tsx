@@ -120,7 +120,7 @@ export const SagaView: React.FC<{
   onBack: () => void;
   onClose: () => void;
 }> = ({ root, listById, backLabel, onBack, onClose }) => {
-  const rootId = root.anilist_id ?? root.id;
+  const rootId = root.id;
   const titleOf = useAnimeTitle();
   const tracker = useTracker();
   const { graph, loading, error, refresh, expand, loadMore } = useSagaData(rootId);

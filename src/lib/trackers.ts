@@ -18,4 +18,4 @@ export function trackerLink(
 
 /** The anime's page on the tracker: the URL it sent, else the tracker's template. */
 export const trackerAnimeUrl = (links: TrackerLinks | null | undefined, anime: AnimeEntry): string | null =>
-  anime.site_url || trackerLink(links, "anime", anime.anilist_id ?? anime.id);
+  anime.site_url || trackerLink(links, "anime", anime.id);

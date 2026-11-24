@@ -19,6 +19,7 @@ use std::process::Command;
 use rusqlite::{params, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tora_lib::db::storage::{account_file_of, ACCOUNTS_DIR};
 use tora_lib::db::Database;
 use tora_lib::library::scanner::parse_library_file;
 
@@ -107,6 +108,17 @@ fn snapshot(args: &[String]) -> Result<(), String> {
         .map_err(|e| format!("open {}: {e}", source.display()))?;
     conn.execute("VACUUM INTO ?1", params![target.to_string_lossy()])
         .map_err(|e| format!("copy the database: {e}"))?;
+    // The list lives in the active account's database: copied next to the snapshot, as the app keeps it
+    if let Some(account) = account_file_of(&conn, &source)? {
+        let dir = snapshot_accounts_dir(&target);
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let copy = dir.join(account.file_name().ok_or("account file name")?);
+        Connection::open_with_flags(&account, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .and_then(|c| c.execute("VACUUM INTO ?1", params![copy.to_string_lossy()]))
+            .map_err(|e| format!("copy the account database: {e}"))?;
+        conn.execute("ATTACH DATABASE ?1 AS acct", params![copy.to_string_lossy()])
+            .map_err(|e| e.to_string())?;
+    }
     let count = |sql: &str| conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap_or(0);
     let (files, entries) = (count("SELECT COUNT(*) FROM local_episodes"), count("SELECT COUNT(*) FROM anime_entries"));
 
@@ -114,6 +126,13 @@ fn snapshot(args: &[String]) -> Result<(), String> {
     write_atomic(&lab_dir().join("lab.json"), serde_json::to_string_pretty(&lab).unwrap().as_bytes())?;
     println!("snapshot {name}: {files} files, {entries} list entries (now the current snapshot)");
     Ok(())
+}
+
+/// Where a snapshot's account databases are: `<snapshot name>-accounts` next to it (snapshots taken before
+/// account databases have none: opening them moves their list into one).
+fn snapshot_accounts_dir(snapshot: &Path) -> PathBuf {
+    let stem = snapshot.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    snapshot.with_file_name(format!("{stem}-accounts"))
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -251,15 +270,27 @@ fn run(args: &[String]) -> Result<(), String> {
     fs::create_dir_all(&work).map_err(|e| e.to_string())?;
     let db_path = work.join("run.db");
     fs::copy(&snapshot_path, &db_path).map_err(|e| format!("copy the snapshot: {e}"))?;
+    let accounts = snapshot_accounts_dir(&snapshot_path);
+    if accounts.is_dir() {
+        let to = work.join(ACCOUNTS_DIR);
+        fs::create_dir_all(&to).map_err(|e| e.to_string())?;
+        for file in fs::read_dir(&accounts).map_err(|e| e.to_string())?.flatten() {
+            fs::copy(file.path(), to.join(file.file_name())).map_err(|e| format!("copy the account database: {e}"))?;
+        }
+    }
 
     let started = std::time::Instant::now();
-    {
+    let account = {
         let db = Database::open(&db_path)?;
         db.rematch_from_index()?;
-    }
+        db.account_name()?
+    };
     let elapsed_ms = started.elapsed().as_millis() as u64;
 
     let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e| e.to_string())?;
+    let account_db = work.join(ACCOUNTS_DIR).join(format!("{account}.db"));
+    conn.execute("ATTACH DATABASE ?1 AS acct", params![account_db.to_string_lossy()])
+        .map_err(|e| format!("attach the account database: {e}"))?;
     let files = read_files(&conn)?;
     let entries = read_entries(&conn)?;
     let links = read_links(&conn)?;

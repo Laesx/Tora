@@ -6,7 +6,7 @@
 
 use super::Database;
 use crate::trackers::DEFAULT_TRACKER;
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{Connection, Transaction};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -86,26 +86,10 @@ impl ListOwner {
     }
 }
 
-fn read_key(conn: &Connection, key: &str) -> Result<Option<String>, String> {
-    conn.query_row(
-        "SELECT value_json FROM app_settings WHERE key = ?1",
-        params![key],
-        |r| r.get(0),
-    )
-    .optional()
-    .map_err(|e| e.to_string())
-}
+// The account lives in its own database, the owner (which account is active) in the device's (`storage`)
+use super::storage::{read_setting as read_key, write_setting as write_key};
 
-fn write_key(conn: &Connection, key: &str, value: &str) -> Result<(), String> {
-    conn.execute(
-        "INSERT OR REPLACE INTO app_settings (key, value_json) VALUES (?1, ?2)",
-        params![key, value],
-    )
-    .map(|_| ())
-    .map_err(|e| e.to_string())
-}
-
-fn read_owner(conn: &Connection) -> Result<Option<ListOwner>, String> {
+pub(crate) fn read_owner(conn: &Connection) -> Result<Option<ListOwner>, String> {
     let Some(user_id) = read_key(conn, LIST_OWNER_KEY)?.and_then(|v| v.trim().parse::<i64>().ok()) else {
         return Ok(None);
     };
@@ -185,9 +169,7 @@ impl Database {
 
     pub fn clear_tracker_account(&self) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM app_settings WHERE key = ?1", params![TRACKER_ACCOUNT_KEY])
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+        super::storage::delete_setting(&conn, TRACKER_ACCOUNT_KEY)
     }
 
     /// The account the local list belongs to (`None` before the first sign-in).

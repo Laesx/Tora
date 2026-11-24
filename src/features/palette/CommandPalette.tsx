@@ -93,6 +93,15 @@ const RECENT_ANIME_KEY = "tora.palette.recentAnime";
 const RECENT_COMMANDS_KEY = "tora.palette.recentCommands";
 
 // Per-device conveniences: storage may be unavailable, so every access is guarded
+/** Another account is active: recent anime ids would point at its anime */
+export function forgetRecentAnime() {
+  try {
+    localStorage.removeItem(RECENT_ANIME_KEY);
+  } catch {
+    // storage unavailable: nothing stored either
+  }
+}
+
 function readRecent<T>(key: string): T[] {
   try {
     const parsed = JSON.parse(localStorage.getItem(key) || "[]");

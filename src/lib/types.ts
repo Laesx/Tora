@@ -1029,8 +1029,8 @@ export interface TrackerAccountSwitchedEvent {
   tracker: string;
   user_id: number;
   username: string;
-  /** Unsent changes of the previous account that were dropped. */
-  discarded_changes: number;
+  /** The account had no data on this device yet (its list arrives with the next sync). */
+  new_account: boolean;
 }
 
 export interface ThemePreset {

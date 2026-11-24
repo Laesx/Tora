@@ -79,7 +79,7 @@ export const AnimePage: React.FC<AnimePageProps> = ({
   const pinned = usePinnedRelease(anime.id);
   // Metadata (tags, studios, rankings, relations), details and followed users: one backend call, at
   // most one AniList request. Closed Recommendations / Following sections fetch nothing.
-  const mediaId = anime.anilist_id ?? anime.id;
+  const mediaId = anime.id;
   const recommendationsOpen = !useSectionCollapsed("recommendations");
   const followingOpen = !useSectionCollapsed("following");
   const page = useAnimePageData(mediaId, { recommendations: recommendationsOpen, following: followingOpen });

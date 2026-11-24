@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::Duration;
 
 mod accounts;
+pub mod storage;
 mod activity;
 mod settings;
 
@@ -1540,6 +1541,8 @@ pub struct Database {
     matcher_generation: Arc<AtomicU64>,
     /// `app_dataackups` for settings snapshots (`None` for in-memory test databases).
     backup_dir: Option<PathBuf>,
+    /// Folder of the account databases (`storage`); `None` for in-memory test databases.
+    accounts_dir: Option<PathBuf>,
 }
 
 /// AniList ids of the demo entries the removed seed used to insert.
@@ -2129,9 +2132,9 @@ fn write_resolved_state_tx(
     Ok(needs_rematch)
 }
 
-fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, String> {
+fn column_exists(conn: &Connection, schema: &str, table: &str, column: &str) -> Result<bool, String> {
     let mut stmt = conn
-        .prepare(&format!("PRAGMA table_info({})", table))
+        .prepare(&format!("PRAGMA {}.table_info({})", schema, table))
         .map_err(|e| e.to_string())?;
     let names = stmt
         .query_map([], |r| r.get::<_, String>(1))
@@ -2183,13 +2186,14 @@ fn sort_by_list_order(lists: &mut [String], names: &[String]) {
 
 fn add_column_if_missing(
     conn: &Connection,
+    schema: &str,
     table: &str,
     column: &str,
     decl: &str,
 ) -> Result<(), String> {
-    if !column_exists(conn, table, column)? {
+    if !column_exists(conn, schema, table, column)? {
         conn.execute(
-            &format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, decl),
+            &format!("ALTER TABLE {}.{} ADD COLUMN {} {}", schema, table, column, decl),
             [],
         )
         .map_err(|e| e.to_string())?;
@@ -2198,8 +2202,12 @@ fn add_column_if_missing(
 }
 
 fn table_exists(conn: &Connection, table: &str) -> Result<bool, String> {
+    table_exists_in(conn, "main", table)
+}
+
+fn table_exists_in(conn: &Connection, schema: &str, table: &str) -> Result<bool, String> {
     conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+        &format!("SELECT EXISTS(SELECT 1 FROM {schema}.sqlite_master WHERE type = 'table' AND name = ?1)"),
         params![table],
         |r| r.get(0),
     )
@@ -2207,19 +2215,13 @@ fn table_exists(conn: &Connection, table: &str) -> Result<bool, String> {
 }
 
 /// One-time / idempotent data migrations:
-/// - purge entries without an AniList id (they can never be synced),
 /// - drop season snapshots in the old inline format (media now live in `media_metadata`),
 /// - purge the old demo seed if its marker is present.
 fn run_data_migrations(conn: &mut Connection) -> Result<(), String> {
     let tx = conn.transaction().map_err(|e| e.to_string())?;
 
     tx.execute_batch(
-        "UPDATE local_episodes SET matched_anime_id = NULL
-           WHERE matched_anime_id IN (SELECT id FROM anime_entries WHERE anilist_id IS NULL);
-         DELETE FROM title_aliases
-           WHERE anime_id IN (SELECT id FROM anime_entries WHERE anilist_id IS NULL);
-         DELETE FROM anime_entries WHERE anilist_id IS NULL;
-         DELETE FROM seasonal_cache WHERE payload_json LIKE '[{%';
+        "DELETE FROM seasonal_cache WHERE payload_json LIKE '[{%';
          DELETE FROM airing_schedule_cache
            WHERE payload_json LIKE '[{%' AND payload_json NOT LIKE '%\"country\":%';",
     )
@@ -2251,7 +2253,15 @@ fn run_data_migrations(conn: &mut Connection) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     }
 
-    // Lists created before owner tracking belong to the account that was signed in at the time.
+    // After the owner migration (`migrate_legacy_owner`), which reads `anilist_user_id` from the settings
+    accounts::migrate_account_out_of_settings(&tx)?;
+
+    tx.commit().map_err(|e| e.to_string())
+}
+
+/// Lists created before owner tracking belong to the account that was signed in at the time (a
+/// single-file database, before its list moves into that account's file).
+fn migrate_legacy_owner(tx: &Connection) -> Result<(), String> {
     let has_owner: bool = tx
         .query_row(
             "SELECT 1 FROM app_settings WHERE key = ?1",
@@ -2283,35 +2293,18 @@ fn run_data_migrations(conn: &mut Connection) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         }
     }
-    // After the owner migration above, which reads `anilist_user_id` from the settings
-    accounts::migrate_account_out_of_settings(&tx)?;
-
-    tx.commit().map_err(|e| e.to_string())
+    Ok(())
 }
 
 fn read_release_preferences(conn: &Connection) -> Result<HashMap<i64, String>, String> {
-    let raw: Option<String> = conn
-        .query_row(
-            "SELECT value_json FROM app_settings WHERE key = ?1",
-            params![settings::RELEASE_PREFERENCES_KEY],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(|e| e.to_string())?;
+    let raw = storage::read_setting(conn, settings::RELEASE_PREFERENCES_KEY)?;
     Ok(raw
         .and_then(|json| serde_json::from_str(&json).ok())
         .unwrap_or_default())
 }
 
 fn read_not_interested(conn: &Connection) -> Result<Vec<i64>, String> {
-    let raw: Option<String> = conn
-        .query_row(
-            "SELECT value_json FROM app_settings WHERE key = ?1",
-            params![settings::SEASONS_NOT_INTERESTED_KEY],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(|e| e.to_string())?;
+    let raw = storage::read_setting(conn, settings::SEASONS_NOT_INTERESTED_KEY)?;
     Ok(raw
         .and_then(|json| serde_json::from_str(&json).ok())
         .unwrap_or_default())
@@ -2374,7 +2367,7 @@ const MERGE_LOCAL_SELECT_SQL: &str = "SELECT id, anilist_id, updated_at, sync_pe
         format, airing_status, episodes, season, season_year, average_score,
         cover_image, cover_color, next_airing_episode, next_airing_at, anilist_list_entry_id,
         start_date, end_date, custom_synonyms_json
-     FROM anime_entries WHERE anilist_id IS NOT NULL";
+     FROM anime_entries";
 
 /// Light-metadata update used by the diff-only merge. Heavy metadata columns (synopsis, genres, studios,
 /// banner, trailer, source, duration, site_url, mal_id) and `custom_folder` are never touched here.
@@ -2483,9 +2476,12 @@ impl Database {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
-        let mut db = Self::from_connection(conn)?;
-        // Opened after the schema exists and WAL mode is persisted in the file.
-        db.read_conn = Some(Mutex::new(Self::open_read_connection(db_path)?));
+        let accounts_dir = db_path.parent().map(|p| p.join(storage::ACCOUNTS_DIR));
+        let mut db = Self::from_connection(conn, accounts_dir)?;
+        // Opened after the schema exists and WAL mode is persisted in the files.
+        let reader = Self::open_read_connection(db_path)?;
+        storage::attach_account(&reader, &db.account_target(db.list_owner()?.as_ref()), false)?;
+        db.read_conn = Some(Mutex::new(reader));
         db.backup_dir = db_path.parent().map(|p| p.join("backups"));
         Ok(db)
     }
@@ -2494,7 +2490,7 @@ impl Database {
     #[cfg(test)]
     pub fn open_in_memory() -> Result<Self, String> {
         let conn = Connection::open_in_memory().map_err(|e| e.to_string())?;
-        Self::from_connection(conn)
+        Self::from_connection(conn, None)
     }
 
     fn open_read_connection(db_path: &Path) -> Result<Connection, String> {
@@ -2511,7 +2507,7 @@ impl Database {
         Ok(conn)
     }
 
-    fn from_connection(conn: Connection) -> Result<Self, String> {
+    fn from_connection(conn: Connection, accounts_dir: Option<PathBuf>) -> Result<Self, String> {
         conn.busy_timeout(Duration::from_millis(5000))
             .map_err(|e| e.to_string())?;
         conn.execute_batch(
@@ -2526,8 +2522,8 @@ impl Database {
 
         // Central matcher-cache invalidation: any INSERT / UPDATE / DELETE (incl. upserts and
         // `INSERT OR REPLACE`) on the tables the matcher index is built from bumps the generation.
-        // Both are rowid tables, so the hook fires for every row change. The one `DELETE FROM` without
-        // WHERE (`reset_for_account_switch`) hits SQLite's truncate optimization and bumps it manually.
+        // Both are rowid tables, so the hook fires for every row change. An account switch (`storage`)
+        // attaches another database, which the hook can't see: it bumps the generation itself.
         let matcher_generation = Arc::new(AtomicU64::new(0));
         let hook_generation = matcher_generation.clone();
         conn.update_hook(Some(
@@ -2544,6 +2540,7 @@ impl Database {
             matcher_cache: RwLock::new(None),
             matcher_generation,
             backup_dir: None,
+            accounts_dir,
         };
         db.init_schema()?;
         db.migrate_legacy_torrent_rules()?;
@@ -2632,53 +2629,12 @@ impl Database {
         Ok(index)
     }
 
+    /// Device tables in `main`, then the account database (`storage`): attached for the list owner, after
+    /// moving a single-file database's account data into it. Idempotent.
     fn init_schema(&self) -> Result<(), String> {
         let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS anime_entries (
-                id INTEGER PRIMARY KEY,
-                anilist_id INTEGER UNIQUE,
-                mal_id INTEGER,
-                title_romaji TEXT NOT NULL,
-                title_english TEXT,
-                title_native TEXT,
-                synonyms_json TEXT NOT NULL DEFAULT '[]',
-                normalized_titles_json TEXT NOT NULL DEFAULT '[]',
-                format TEXT NOT NULL DEFAULT 'TV',
-                airing_status TEXT NOT NULL DEFAULT 'FINISHED',
-                episodes INTEGER,
-                duration INTEGER,
-                season TEXT,
-                season_year INTEGER,
-                average_score INTEGER,
-                cover_image TEXT NOT NULL DEFAULT '',
-                banner_image TEXT,
-                cover_color TEXT,
-                synopsis TEXT NOT NULL DEFAULT '',
-                genres_json TEXT NOT NULL DEFAULT '[]',
-                studios_json TEXT NOT NULL DEFAULT '[]',
-                next_airing_episode INTEGER,
-                next_airing_at INTEGER,
-                trailer_url TEXT,
-                site_url TEXT,
-                source_material TEXT,
-                user_status TEXT NOT NULL DEFAULT 'CURRENT',
-                user_progress INTEGER NOT NULL DEFAULT 0,
-                user_score REAL NOT NULL DEFAULT 0,
-                user_repeats INTEGER NOT NULL DEFAULT 0,
-                user_notes TEXT NOT NULL DEFAULT '',
-                user_started_at TEXT,
-                user_completed_at TEXT,
-                custom_folder TEXT,
-                updated_at INTEGER NOT NULL DEFAULT 0,
-                sync_pending INTEGER NOT NULL DEFAULT 0,
-                anilist_list_entry_id INTEGER
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_anime_status ON anime_entries(user_status);
-            CREATE INDEX IF NOT EXISTS idx_anime_anilist ON anime_entries(anilist_id);
-
-            CREATE TABLE IF NOT EXISTS library_folders (
+            "CREATE TABLE IF NOT EXISTS library_folders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 path TEXT NOT NULL UNIQUE,
                 label TEXT NOT NULL,
@@ -2717,91 +2673,29 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_local_episodes_matched ON local_episodes(matched_anime_id);
             CREATE INDEX IF NOT EXISTS idx_local_episodes_folder ON local_episodes(folder_id);
 
-            CREATE TABLE IF NOT EXISTS title_aliases (
-                normalized_alias TEXT PRIMARY KEY,
-                anime_id INTEGER NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS watch_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                anime_id INTEGER,
-                anime_title TEXT NOT NULL,
-                episode_number INTEGER NOT NULL,
-                player_name TEXT NOT NULL,
-                file_name TEXT NOT NULL,
-                scrobbled_to_tracker INTEGER NOT NULL DEFAULT 0,
-                timestamp_unix INTEGER NOT NULL
-            );
-
             CREATE TABLE IF NOT EXISTS app_settings (
                 key TEXT PRIMARY KEY,
                 value_json TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS tracker_pending_deletions (
-                media_id INTEGER PRIMARY KEY,
-                list_entry_id INTEGER,
-                title TEXT NOT NULL DEFAULT '',
-                created_at INTEGER NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS seasonal_cache (
-                season TEXT NOT NULL,
-                year INTEGER NOT NULL,
-                fetched_at INTEGER NOT NULL,
-                payload_json TEXT NOT NULL,
-                PRIMARY KEY (season, year)
-            );
-
-            CREATE TABLE IF NOT EXISTS media_metadata (
-                anilist_id INTEGER PRIMARY KEY,
-                fetched_at INTEGER NOT NULL,
-                payload_json TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS airing_schedule_cache (
-                week_from INTEGER PRIMARY KEY,
-                week_to INTEGER NOT NULL,
-                fetched_at INTEGER NOT NULL,
-                payload_json TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS tracker_custom_lists (
-                name TEXT PRIMARY KEY,
-                position INTEGER NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS anime_custom_lists (
-                anime_id INTEGER PRIMARY KEY REFERENCES anime_entries(id) ON DELETE CASCADE,
-                lists_json TEXT NOT NULL DEFAULT '[]',
-                hidden_from_status_lists INTEGER NOT NULL DEFAULT 0,
-                dirty INTEGER NOT NULL DEFAULT 0
             );",
         )
         .map_err(|e| e.to_string())?;
-
         // Idempotent column migrations for existing databases
-        add_column_if_missing(&conn, "anime_entries", "user_started_at", "TEXT")?;
-        add_column_if_missing(&conn, "anime_entries", "user_completed_at", "TEXT")?;
-        add_column_if_missing(
-            &conn,
-            "anime_entries",
-            "sync_pending",
-            "INTEGER NOT NULL DEFAULT 0",
-        )?;
-        add_column_if_missing(&conn, "anime_entries", "anilist_list_entry_id", "INTEGER")?;
-        add_column_if_missing(&conn, "anime_entries", "start_date", "TEXT")?;
-        add_column_if_missing(&conn, "anime_entries", "end_date", "TEXT")?;
-        add_column_if_missing(&conn, "anime_entries", "custom_synonyms_json", "TEXT")?;
-        add_column_if_missing(&conn, "watch_history", "progress_from", "INTEGER")?;
-        add_column_if_missing(&conn, "local_episodes", "parsed_episode", "INTEGER")?;
-        add_column_if_missing(&conn, "local_episodes", "match_kind", "TEXT")?;
-        add_column_if_missing(&conn, "local_episodes", "extra_kind", "TEXT")?;
-        // The anime page's details, next to the metadata payload: season upserts never touch them and
-        // season reads never select them
-        add_column_if_missing(&conn, "media_metadata", "details_json", "TEXT")?;
-        add_column_if_missing(&conn, "media_metadata", "details_fetched_at", "INTEGER")?;
-        activity::create_tables(&conn)?;
+        add_column_if_missing(&conn, "main", "local_episodes", "parsed_episode", "INTEGER")?;
+        add_column_if_missing(&conn, "main", "local_episodes", "match_kind", "TEXT")?;
+        add_column_if_missing(&conn, "main", "local_episodes", "extra_kind", "TEXT")?;
+
+        if !storage::account_attached(&conn)? {
+            if table_exists_in(&conn, "main", "anime_entries")? {
+                // From before account files: the list (and its owner) move into the owner's file
+                migrate_legacy_owner(&conn)?;
+                let owner = accounts::read_owner(&conn)?;
+                storage::split_legacy(&mut conn, &self.account_target(owner.as_ref()))?;
+            } else {
+                let owner = accounts::read_owner(&conn)?;
+                storage::attach_account(&conn, &self.account_target(owner.as_ref()), true)?;
+            }
+        }
+        storage::create_account_schema(&conn)?;
 
         run_data_migrations(&mut conn)?;
         drop(conn);
@@ -2905,7 +2799,7 @@ impl Database {
             let rows = stmt
                 .query_map([], |r| {
                     Ok((
-                        r.get::<_, i64>(1)?,
+                        r.get::<_, i64>(0)?,
                         LocalMergeRow {
                             user: LocalSyncRow {
                                 id: r.get(0)?,
@@ -2950,9 +2844,8 @@ impl Database {
 
         let mut remote_media_ids: HashSet<i64> = HashSet::new();
         for remote in snapshot_entries {
-            let Some(media_id) = remote.anilist_id else {
-                continue;
-            };
+            // Entries are keyed by the tracker's own id (`id`): AniList's has an `anilist_id`, MAL's doesn't
+            let media_id = remote.id;
             // Duplicates in the snapshot: the first occurrence wins.
             if !remote_media_ids.insert(media_id) || skip_media_ids.contains(&media_id) {
                 continue;
@@ -4019,7 +3912,7 @@ impl Database {
                 local.insert(id, row);
             }
             let mut stmt = tx
-                .prepare("SELECT id, anilist_id FROM anime_entries WHERE anilist_id IS NOT NULL")
+                .prepare("SELECT id, id FROM anime_entries")
                 .map_err(|e| e.to_string())?;
             let rows = stmt
                 .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
@@ -4102,14 +3995,7 @@ impl Database {
     /// The list owner's score format (`POINT_100` until a pull stored one).
     pub fn score_format(&self) -> Result<String, String> {
         let conn = self.reader()?;
-        let raw: Option<String> = conn
-            .query_row(
-                "SELECT value_json FROM app_settings WHERE key = ?1",
-                params![SCORE_FORMAT_KEY],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(|e| e.to_string())?;
+        let raw = storage::read_setting(&conn, SCORE_FORMAT_KEY)?;
         Ok(raw
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty())
@@ -4122,11 +4008,7 @@ impl Database {
             return Ok(false);
         }
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "INSERT OR REPLACE INTO app_settings (key, value_json) VALUES (?1, ?2)",
-            params![SCORE_FORMAT_KEY, format],
-        )
-        .map_err(|e| e.to_string())?;
+        storage::write_setting(&conn, SCORE_FORMAT_KEY, format)?;
         Ok(true)
     }
 
@@ -4148,11 +4030,7 @@ impl Database {
             stored.dedup();
         }
         let json = serde_json::to_string(&stored).map_err(|e| e.to_string())?;
-        tx.execute(
-            "INSERT OR REPLACE INTO app_settings (key, value_json) VALUES (?1, ?2)",
-            params![settings::SEASONS_NOT_INTERESTED_KEY, json],
-        )
-        .map_err(|e| e.to_string())?;
+        storage::write_setting(&tx, settings::SEASONS_NOT_INTERESTED_KEY, &json)?;
         tx.commit().map_err(|e| e.to_string())
     }
 
@@ -4176,60 +4054,8 @@ impl Database {
             }
         }
         let json = serde_json::to_string(&stored).map_err(|e| e.to_string())?;
-        tx.execute(
-            "INSERT OR REPLACE INTO app_settings (key, value_json) VALUES (?1, ?2)",
-            params![settings::RELEASE_PREFERENCES_KEY, json],
-        )
-        .map_err(|e| e.to_string())?;
+        storage::write_setting(&tx, settings::RELEASE_PREFERENCES_KEY, &json)?;
         tx.commit().map_err(|e| e.to_string())
-    }
-
-    /// A different account signed in: drop everything that belonged to the previous one in one
-    /// transaction (list entries with their custom folders, queued pushes and deletions, watch history,
-    /// title aliases) and make `new_owner` the owner. Machine data stays: library folders and the indexed
-    /// files (only unmatched), settings, torrent config (feeds, filters, priority, fansub overrides) and the public
-    /// metadata caches. Imported AniList activity and its import state go with the account.
-    /// Returns how many unsent changes of the previous account were discarded.
-    pub fn reset_for_account_switch(&self, new_owner: &ListOwner) -> Result<usize, String> {
-        let discarded = {
-            let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
-            let tx = conn.transaction().map_err(|e| e.to_string())?;
-            let discarded: i64 = tx
-                .query_row(
-                    "SELECT (SELECT COUNT(*) FROM anime_entries WHERE sync_pending = 1)
-                          + (SELECT COUNT(*) FROM tracker_pending_deletions)",
-                    [],
-                    |r| r.get(0),
-                )
-                .map_err(|e| e.to_string())?;
-            tx.execute_batch(
-                "UPDATE local_episodes SET matched_anime_id = NULL, watched = 0
-                   WHERE matched_anime_id IS NOT NULL OR watched != 0;
-                 DELETE FROM tracker_pending_deletions;
-                 DELETE FROM watch_history;
-                 DELETE FROM title_aliases;
-                 DELETE FROM anime_custom_lists;
-                 DELETE FROM tracker_custom_lists;
-                 DELETE FROM anime_entries;",
-            )
-            .map_err(|e| e.to_string())?;
-            activity::clear_tx(&tx)?;
-            accounts::write_owner(&tx, new_owner)?;
-            // The new account's format arrives with its first pull
-            tx.execute("DELETE FROM app_settings WHERE key = ?1", params![SCORE_FORMAT_KEY])
-                .map_err(|e| e.to_string())?;
-            // Choices about what to watch belong to the person, like the list
-            tx.execute(
-                "DELETE FROM app_settings WHERE key = ?1",
-                params![settings::SEASONS_NOT_INTERESTED_KEY],
-            )
-            .map_err(|e| e.to_string())?;
-            tx.commit().map_err(|e| e.to_string())?;
-            discarded as usize
-        };
-        // `DELETE FROM` without WHERE hits SQLite's truncate optimization, which skips the update hook.
-        self.bump_matcher_generation();
-        Ok(discarded)
     }
 
     /// Recompute `normalized_titles_json` of every entry and the keys of the user's title links with the
@@ -5389,7 +5215,7 @@ mod tests {
     }
 
     #[test]
-    fn test_migrations_purge_null_anilist_and_seed() {
+    fn test_migrations_purge_the_seed_only() {
         let db = Database::open_in_memory().expect("db");
         db.upsert_anime_entries_batch(&[
             test_entry(154587, "Sousou no Frieren"),
@@ -5417,11 +5243,11 @@ mod tests {
         insert_matched_episode(&db, 900001, "C:/lib/local.mkv");
         insert_matched_episode(&db, 154587, "C:/lib/frieren.mkv");
 
-        // No seed marker: only the NULL-anilist row is purged
+        // No seed marker: nothing is purged (an entry without an AniList id is another tracker's anime)
         db.init_schema().unwrap();
-        assert!(db.get_anime_entry_by_id(900001).is_err());
-        assert_eq!(alias_count(&db, 900001), 0);
-        assert_eq!(matched_id_of(&db, "C:/lib/local.mkv"), None);
+        assert!(db.get_anime_entry_by_id(900001).is_ok());
+        assert_eq!(alias_count(&db, 900001), 1);
+        assert_eq!(matched_id_of(&db, "C:/lib/local.mkv"), Some(900001));
         assert!(db.get_anime_entry_by_id(154587).is_ok());
         assert_eq!(matched_id_of(&db, "C:/lib/frieren.mkv"), Some(154587));
 
@@ -6053,7 +5879,7 @@ mod tests {
         assert!(db.finish_push(&entry, 99, 9, Some(&now_lists)).unwrap());
         assert_eq!(db.dirty_custom_lists(1).unwrap(), None);
 
-        // Deleting an entry drops its membership; an account switch clears both tables
+        // Deleting an entry drops its membership; another account has its own lists
         db.delete_entries_with_tombstones(&[1]).unwrap();
         assert!(db.get_custom_lists().unwrap().members.is_empty());
         remote.insert(
@@ -6065,7 +5891,7 @@ mod tests {
         );
         db.merge_remote_custom_lists(&names, &remote).unwrap();
         assert_eq!(db.get_custom_lists().unwrap().members.len(), 1);
-        db.reset_for_account_switch(&crate::db::ListOwner::new("anilist", 7)).unwrap();
+        db.switch_account(&crate::db::ListOwner::new("anilist", 7)).unwrap();
         assert_eq!(db.get_custom_lists().unwrap(), CustomListsState::default());
     }
 
@@ -6097,7 +5923,7 @@ mod tests {
     }
 
     #[test]
-    fn release_preferences_set_clear_and_survive_account_switch() {
+    fn release_preferences_set_clear_and_belong_to_the_account() {
         let db = Database::open_in_memory().unwrap();
         assert!(db.release_preferences().unwrap().is_empty());
         db.set_release_preference(5, Some("d:/anime/show|*")).unwrap();
@@ -6106,8 +5932,9 @@ mod tests {
         let prefs = db.release_preferences().unwrap();
         assert_eq!(prefs.len(), 1);
         assert_eq!(prefs[&5], "d:/anime/show|*");
-        db.reset_for_account_switch(&crate::db::ListOwner::new("anilist", 7)).unwrap();
-        assert_eq!(db.release_preferences().unwrap().len(), 1);
+        // They hold this account's anime ids: another account starts without them
+        db.switch_account(&crate::db::ListOwner::new("mal", 7)).unwrap();
+        assert!(db.release_preferences().unwrap().is_empty());
     }
 
     #[test]
@@ -6120,7 +5947,7 @@ mod tests {
         db.set_not_interested(&[5, 42], false).unwrap();
         assert_eq!(db.not_interested_ids().unwrap(), vec![3, 9]);
 
-        db.reset_for_account_switch(&crate::db::ListOwner::new("anilist", 7)).unwrap();
+        db.switch_account(&crate::db::ListOwner::new("anilist", 7)).unwrap();
         assert!(db.not_interested_ids().unwrap().is_empty());
     }
 
@@ -6335,13 +6162,13 @@ mod tests {
         // Settings as stored before the account left them (each run moves the old fields out, so they are
         // stored again before every run)
         let migrate = |db: &Database| {
-            let mut conn = db.conn.lock().unwrap();
+            let conn = db.conn.lock().unwrap();
             conn.execute(
                 "INSERT OR REPLACE INTO app_settings (key, value_json) VALUES ('main', ?1)",
                 params![r#"{"anilist_user_id":42}"#],
             )
             .unwrap();
-            run_data_migrations(&mut conn).unwrap();
+            migrate_legacy_owner(&conn).unwrap();
         };
 
         // An empty list has no owner yet

@@ -47,7 +47,9 @@ import { AnimeDetailModal } from "@/features/detail/AnimeDetailModal";
 import type { EntryCallbacks } from "@/features/anime/AnimePage";
 import { AnimePageView } from "@/features/anime/AnimePageView";
 import { SagaView } from "@/features/saga/SagaView";
-import { CommandPalette } from "@/features/palette/CommandPalette";
+import { forgetSaga } from "@/features/saga/useSagaData";
+import { reloadReleasePreferences } from "@/lib/releases";
+import { CommandPalette, forgetRecentAnime } from "@/features/palette/CommandPalette";
 import { CLOSE_MENUS_EVENT } from "@/components/FloatingQuickMenu";
 import { TorrentsRequest, TorrentsView } from "@/features/torrents/TorrentsView";
 import { NowPlayingView } from "@/features/nowplaying/NowPlayingView";
@@ -405,19 +407,29 @@ export const App: React.FC = () => {
     },
     // A different account signed in: the previous account's list was wiped and the new account's list is
     // imported next (it arrives through tracker-list-synced)
-    accountSwitched: ({ username, discarded_changes }) => {
+    // Another account's data is now the active one (the previous account's stays on this device, as it
+    // was): load all of it, then the sync that follows sends its delta
+    accountSwitched: ({ username, new_account }) => {
       stepper.cancel();
       nav.clear();
       list.clear();
       sync.clearLastSynced();
       customLists.clear();
-      anilistHistory.load();
       setScoreFormat(DEFAULT_SCORE_FORMAT);
+      forgetSaga();
+      forgetRecentAnime();
+      void reloadReleasePreferences();
+      toraApi.getAnimeList().then(list.setList).catch(() => { });
+      customLists.refresh();
+      anilistHistory.load();
+      toraApi
+        .getScoreFormat()
+        .then((f) => setScoreFormat(parseScoreFormat(f)))
+        .catch(() => { });
+      sync.loadStatus();
       showToast(
-        discarded_changes > 0
-          ? `Switched to @${username}. ${plural(discarded_changes, "unsent change")} from the previous account ${discarded_changes === 1 ? "was" : "were"} discarded.`
-          : `Switched to @${username}. Importing their list…`,
-        discarded_changes > 0 ? "error" : "info"
+        new_account ? `Switched to @${username}. Importing their list…` : `Switched back to @${username}`,
+        "info"
       );
     },
     // A background push succeeded: replace the entry (clears sync_pending), unless a +1 / -1 is in flight
@@ -594,7 +606,7 @@ export const App: React.FC = () => {
     setHistoryRequest({
       period: null,
       source: "all",
-      anime: { id: anime.anilist_id ?? anime.id, title: titleOf(anime) },
+      anime: { id: anime.id, title: titleOf(anime) },
       nonce: Date.now(),
     });
     setActiveTab("history");

@@ -1,8 +1,8 @@
 //! Settings persistence safety: lenient loading (one bad field never resets the others) and rolling
 //! snapshots of every user-config key in `app_data\backups\`, restorable from Settings → About.
 
-use super::{AppSettings, Database};
-use rusqlite::{params, OptionalExtension};
+use super::{storage, AppSettings, Database};
+use rusqlite::params;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -47,6 +47,10 @@ pub const BACKUP_MIN_INTERVAL_SECS: i64 = 3600;
 struct SettingsSnapshot {
     version: u32,
     created_at: i64,
+    /// The account database its account keys came from (`anilist-460805`); `None` in backups made before
+    /// account databases, which were all AniList's.
+    #[serde(default)]
+    account: Option<String>,
     /// Parsed JSON per `app_settings` key; keys that were never written are absent.
     values: Map<String, Value>,
 }
@@ -91,15 +95,9 @@ pub(crate) fn settings_from_json(json: &str) -> Option<AppSettings> {
     serde_json::from_value(Value::Object(merged)).ok()
 }
 
-fn read_key(conn: &rusqlite::Connection, key: &str) -> Result<Option<String>, String> {
-    conn.query_row(
-        "SELECT value_json FROM app_settings WHERE key = ?1",
-        params![key],
-        |r| r.get(0),
-    )
-    .optional()
-    .map_err(|e| e.to_string())
-}
+// Account keys (pinned releases, "Not interested", fansub overrides, filters) live in the account's
+// database, the rest in the device's (`storage`)
+use super::storage::{read_setting as read_key, write_setting as write_key};
 
 fn backup_file_name(created_at_ms: i64) -> String {
     let stamp = chrono::DateTime::from_timestamp_millis(created_at_ms)
@@ -239,11 +237,7 @@ impl Database {
         let json = serde_json::to_string(value).map_err(|e| e.to_string())?;
         {
             let conn = self.conn.lock().map_err(|e| e.to_string())?;
-            conn.execute(
-                "INSERT OR REPLACE INTO app_settings (key, value_json) VALUES (?1, ?2)",
-                params![key, json],
-            )
-            .map_err(|e| e.to_string())?;
+            write_key(&conn, key, &json)?;
         }
         let _ = self.backup_settings_if_changed(Some(BACKUP_MIN_INTERVAL_SECS));
         Ok(())
@@ -259,9 +253,11 @@ impl Database {
                 values.insert(key.to_string(), v);
             }
         }
+        drop(conn);
         Ok(SettingsSnapshot {
             version: 1,
             created_at: chrono::Utc::now().timestamp(),
+            account: Some(self.account_name()?),
             values,
         })
     }
@@ -350,6 +346,12 @@ impl Database {
         }
         let snapshot = read_snapshot(&dir.join(file_name)).ok_or("Backup is missing or unreadable")?;
         self.backup_settings_now()?;
+        // Account keys hold that account's anime ids: only restored into the same account
+        let account = self.account_name()?;
+        let same_account = match snapshot.account.as_deref() {
+            Some(name) => name == account,
+            None => account.starts_with("anilist-") || account == storage::account_file_stem(None),
+        };
 
         let mut values = snapshot.values;
         if let Some(Value::Object(main)) = values.get_mut(MAIN_SETTINGS_KEY) {
@@ -365,7 +367,9 @@ impl Database {
             let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
             let tx = conn.transaction().map_err(|e| e.to_string())?;
             for (key, value) in &values {
-                if !BACKED_UP_KEYS.contains(&key.as_str()) {
+                if !BACKED_UP_KEYS.contains(&key.as_str())
+                    || (!same_account && storage::ACCOUNT_SETTING_KEYS.contains(&key.as_str()))
+                {
                     continue;
                 }
                 let text = match value {
@@ -373,11 +377,7 @@ impl Database {
                     Value::String(s) if key != MAIN_SETTINGS_KEY => s.clone(),
                     other => other.to_string(),
                 };
-                tx.execute(
-                    "INSERT OR REPLACE INTO app_settings (key, value_json) VALUES (?1, ?2)",
-                    params![key, text],
-                )
-                .map_err(|e| e.to_string())?;
+                write_key(&tx, key, &text)?;
             }
             tx.commit().map_err(|e| e.to_string())?;
         }
@@ -520,7 +520,7 @@ mod tests {
             serde_json::json!({ "theme": "old", "anilist_token": "stale", "anilist_user_id": 3 }),
         );
         let name = "settings-20200101-000000-000.json";
-        let snapshot = SettingsSnapshot { version: 1, created_at: 1, values };
+        let snapshot = SettingsSnapshot { version: 1, created_at: 1, account: None, values };
         std::fs::write(dir.join(name), serde_json::to_string(&snapshot).unwrap()).unwrap();
 
         assert_eq!(db.restore_settings_backup(name).unwrap().theme, "old");

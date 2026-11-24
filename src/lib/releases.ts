@@ -249,6 +249,14 @@ export function loadReleasePreferences(): Promise<void> {
   return loading;
 }
 
+/** Another account is active: its pins replace these (they hold the previous account's anime ids). */
+export function reloadReleasePreferences(): Promise<void> {
+  pinnedByAnime = {};
+  loading = null;
+  notify();
+  return loadReleasePreferences();
+}
+
 /** The anime's pinned release key (after `loadReleasePreferences`). */
 export const pinnedRelease = (animeId: number): string | null => pinnedByAnime[String(animeId)] ?? null;
 

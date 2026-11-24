@@ -11,6 +11,11 @@ let lastGraph: SagaGraph | null = null;
 /** Identical calls in flight share one answer */
 const inFlight = new Map<string, Promise<SagaGraph>>();
 
+/** Another account is active: its anime ids are another tracker's (or another list's) */
+export function forgetSaga() {
+  lastGraph = null;
+}
+
 function fetchSaga(id: number, request: SagaRequest): Promise<SagaGraph> {
   const key = JSON.stringify([id, request]);
   const pending = inFlight.get(key);

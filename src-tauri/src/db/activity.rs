@@ -31,7 +31,7 @@ const ANILIST_ONLY: &str = "NOT EXISTS (SELECT 1 FROM watch_history w
 
 pub(super) fn create_tables(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS anilist_activities (
+        "CREATE TABLE IF NOT EXISTS acct.anilist_activities (
              id INTEGER PRIMARY KEY,
              media_id INTEGER NOT NULL,
              status TEXT NOT NULL,
@@ -39,22 +39,22 @@ pub(super) fn create_tables(conn: &Connection) -> Result<(), String> {
              progress_to INTEGER NOT NULL,
              created_at INTEGER NOT NULL
          );
-         CREATE INDEX IF NOT EXISTS idx_anilist_activities_created ON anilist_activities(created_at, id);
-         CREATE INDEX IF NOT EXISTS idx_anilist_activities_media ON anilist_activities(media_id);
+         CREATE INDEX IF NOT EXISTS acct.idx_anilist_activities_created ON anilist_activities(created_at, id);
+         CREATE INDEX IF NOT EXISTS acct.idx_anilist_activities_media ON anilist_activities(media_id);
 
-         CREATE TABLE IF NOT EXISTS anilist_activity_episodes (
+         CREATE TABLE IF NOT EXISTS acct.anilist_activity_episodes (
              activity_id INTEGER NOT NULL REFERENCES anilist_activities(id) ON DELETE CASCADE,
              media_id INTEGER NOT NULL,
              episode INTEGER NOT NULL,
              created_at INTEGER NOT NULL,
              PRIMARY KEY (activity_id, episode)
          ) WITHOUT ROWID;
-         CREATE INDEX IF NOT EXISTS idx_anilist_activity_episodes_media
+         CREATE INDEX IF NOT EXISTS acct.idx_anilist_activity_episodes_media
              ON anilist_activity_episodes(media_id, episode);
-         CREATE INDEX IF NOT EXISTS idx_anilist_activity_episodes_created
+         CREATE INDEX IF NOT EXISTS acct.idx_anilist_activity_episodes_created
              ON anilist_activity_episodes(created_at);
 
-         CREATE TABLE IF NOT EXISTS anilist_activity_media (
+         CREATE TABLE IF NOT EXISTS acct.anilist_activity_media (
              media_id INTEGER PRIMARY KEY,
              title_romaji TEXT NOT NULL,
              title_english TEXT,
@@ -64,7 +64,7 @@ pub(super) fn create_tables(conn: &Connection) -> Result<(), String> {
              episodes INTEGER
          );
 
-         CREATE INDEX IF NOT EXISTS idx_watch_history_anime_episode
+         CREATE INDEX IF NOT EXISTS acct.idx_watch_history_anime_episode
              ON watch_history(anime_id, episode_number);",
     )
     .map_err(|e| e.to_string())
@@ -78,12 +78,7 @@ pub(super) fn clear_tx(conn: &Connection) -> Result<(), String> {
          DELETE FROM anilist_activity_media;",
     )
     .map_err(|e| e.to_string())?;
-    conn.execute(
-        "DELETE FROM app_settings WHERE key = ?1",
-        params![ANILIST_HISTORY_STATE_KEY],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(())
+    super::storage::delete_setting(conn, ANILIST_HISTORY_STATE_KEY)
 }
 
 /// "watched episode" / "rewatched episode" with a parsed range; status-only activities are skipped.
@@ -611,14 +606,7 @@ impl Database {
 }
 
 fn read_state(conn: &Connection) -> Result<AniListHistoryState, String> {
-    let raw: Option<String> = conn
-        .query_row(
-            "SELECT value_json FROM app_settings WHERE key = ?1",
-            params![ANILIST_HISTORY_STATE_KEY],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(|e| e.to_string())?;
+    let raw = super::storage::read_setting(conn, ANILIST_HISTORY_STATE_KEY)?;
     Ok(raw
         .and_then(|v| serde_json::from_str(&v).ok())
         .unwrap_or_default())
@@ -626,12 +614,7 @@ fn read_state(conn: &Connection) -> Result<AniListHistoryState, String> {
 
 fn write_state(conn: &Connection, state: &AniListHistoryState) -> Result<(), String> {
     let json = serde_json::to_string(state).map_err(|e| e.to_string())?;
-    conn.execute(
-        "INSERT OR REPLACE INTO app_settings (key, value_json) VALUES (?1, ?2)",
-        params![ANILIST_HISTORY_STATE_KEY, json],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(())
+    super::storage::write_setting(conn, ANILIST_HISTORY_STATE_KEY, &json)
 }
 
 #[cfg(test)]
@@ -882,14 +865,14 @@ mod tests {
     }
 
     #[test]
-    fn account_switch_and_clear_drop_imported_history() {
+    fn another_account_has_its_own_imported_history() {
         let db = seeded();
         db.set_anilist_history_state(&AniListHistoryState {
             status: ImportStatus::Done,
             ..Default::default()
         })
         .unwrap();
-        db.reset_for_account_switch(&crate::db::ListOwner::new("anilist", 9)).unwrap();
+        db.switch_account(&crate::db::ListOwner::new("anilist", 9)).unwrap();
         assert_eq!(db.anilist_history_counts().unwrap(), (0, 0));
         assert_eq!(db.anilist_history_state().unwrap().status, ImportStatus::Idle);
     }
