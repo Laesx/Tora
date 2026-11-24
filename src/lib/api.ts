@@ -40,6 +40,7 @@ import {
   TorrentFeed,
   TorrentFilter,
   TrackerDescriptor,
+  StoredAccount,
   TrackerState,
   WatchHistoryEntry,
   WatchStats,
@@ -155,6 +156,11 @@ export const toraApi = {
 
   /** Starts signing in to `tracker`; browser flows finish with `tracker-auth-updated` */
   startTrackerSignIn: (tracker: string) => invoke<void>("start_tracker_sign_in", { tracker }),
+  /** Accounts with a list on this computer (never a token) */
+  getStoredAccounts: () => invoke<StoredAccount[]>("get_stored_accounts"),
+  /** Switch to an account with its saved sign-in (`tracker-account-switched` follows) */
+  switchTrackerAccount: (tracker: string, userId: number) =>
+    invoke<AccountInfo>("switch_tracker_account", { tracker, userId }),
 
   // Flushes queued pushes/deletes, then pulls the signed-in user's list from the tracker
   syncTrackerList: () => invoke<SyncSummary>("sync_tracker_list"),

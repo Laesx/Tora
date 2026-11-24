@@ -75,6 +75,18 @@ tracker has it but its data is worse; use AniList when allowed, else the tracker
 
 ## MyAnimeList (API v2)
 
+Adapter: `src-tauri/src/trackers/mal.rs` (tracker id `mal`). Supported features: recommendations; characters,
+staff and source manga through Jikan (partial: missing while Jikan is down). No schedule, next episode, custom
+lists, Following or activity. Unverified on the live API so far: whether an empty `start_date` / `finish_date`
+clears a date (the adapter never sends one).
+
+**Jikan** (`https://api.jikan.moe/v4`, unofficial, reads MAL's site, MAL ids; 3 requests / second, 60 / minute):
+`/anime/{id}/characters` (every character with `role` Main / Supporting, `favorites`, `voice_actors[{person,
+language}]`), `/anime/{id}/staff` (`person`, `positions[]`), `/anime/{id}/relations` (`relation` "Adaptation"
+with `entry[{mal_id, type: "manga", name}]`; light novels are `manga` too). Names are MAL's "Last, First".
+The adapter's parsing was written from the documentation (the API was unreachable on 2026-11-24): save real
+responses to `fixtures/trackers/jikan` when it answers.
+
 - Base `https://api.myanimelist.net/v2`. Public endpoints work with the header `X-MAL-CLIENT-ID` alone.
   No rate-limit headers are sent, and the limits are undocumented: pace conservatively.
 - **App:** client ID `bc3c32c4c1a4c2a7653ae2198ec200e0`, App Type **other** (no client secret; a "web" app

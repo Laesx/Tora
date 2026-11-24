@@ -85,7 +85,9 @@ impl TrackerSyncService {
         let need_meta = stored_meta.as_ref().map_or(true, |m| m.metadata.relations.is_none());
         let max_age = details_max_age(stored_meta.as_ref().map(|m| m.entry.airing_status.as_str()));
         let stale = req.refresh_details || stored_details.as_ref().map_or(true, |(at, _)| now - at >= max_age);
-        let need_details = has_details && stale;
+        // A stored row holding only recommendations (characters never fetched: page 0) still lacks the details
+        let never_fetched = stored_details.as_ref().map_or(true, |(_, d)| d.characters_page == 0);
+        let need_details = has_details && (stale || never_fetched);
         let need_recommendations = req.recommendations
             && (stale || !stored_details.as_ref().is_some_and(|(_, d)| has_recommendations(d)));
         let cached_following = match (&token, req.following && !req.refresh_following) {

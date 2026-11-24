@@ -101,7 +101,7 @@ export const SORT_OPTIONS: SortOption[] = [
   },
 
   { id: "next_airing", label: "Next episode airs", group: "Airing", defaultDir: "asc", value: (a) => a.next_airing_at || null },
-  { id: "average_score", label: "AniList score", group: "Airing", defaultDir: "desc", value: (a) => a.average_score || null },
+  { id: "average_score", label: "Average score", group: "Airing", defaultDir: "desc", value: (a) => a.average_score || null },
   { id: "start_date", label: "Airing start date", group: "Airing", defaultDir: "desc", value: (a) => a.start_date || null },
   {
     id: "season",

@@ -62,7 +62,8 @@ export function useAniListHistoryState(
       status,
       supported,
       enabled,
-      hasData: (status?.activity_count ?? 0) > 0,
+      // Another tracker's account never shows AniList activity (Stats toggle, History sources)
+      hasData: supported && (status?.activity_count ?? 0) > 0,
       version,
       openImport: () => setModalOpen(true),
       start: async () => {

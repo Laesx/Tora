@@ -16,7 +16,55 @@
 
 use super::{accounts, add_column_if_missing, table_exists_in, Database, ListOwner};
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::Serialize;
 use std::path::{Path, PathBuf};
+
+/// An account with a database on this computer (the account list in Settings → Tracker). Never a token.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct StoredAccount {
+    pub tracker: String,
+    pub user_id: i64,
+    /// `None` for an account signed out before names were kept with signed-out accounts
+    pub username: Option<String>,
+    pub avatar_url: Option<String>,
+    /// Its sign-in is stored, so switching to it needs no new sign-in
+    pub signed_in: bool,
+    /// The account database in use
+    pub active: bool,
+    /// Anime on its list
+    pub entries: u32,
+}
+
+/// What an account database says about its account: the stored sign-in, its name, its list size.
+/// `schema`: `acct.` for the attached one, empty for a file opened on its own.
+fn read_account_db(
+    conn: &Connection,
+    schema: &str,
+) -> (Option<accounts::TrackerAccount>, Option<accounts::AccountProfile>, u32) {
+    let value = |key: &str| -> Option<String> {
+        conn.query_row(
+            &format!("SELECT value_json FROM {schema}app_settings WHERE key = ?1"),
+            params![key],
+            |r| r.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+    };
+    let account = value(accounts::TRACKER_ACCOUNT_KEY).and_then(|j| serde_json::from_str(&j).ok());
+    let profile = value(accounts::ACCOUNT_PROFILE_KEY).and_then(|j| serde_json::from_str(&j).ok());
+    let entries = conn
+        .query_row(&format!("SELECT COUNT(*) FROM {schema}anime_entries"), [], |r| r.get::<_, i64>(0))
+        .unwrap_or(0);
+    (account, profile, entries.max(0) as u32)
+}
+
+/// `mal-123456` → (`mal`, 123456); `local` and anything else → `None`.
+fn owner_of_stem(stem: &str) -> Option<ListOwner> {
+    let (tracker, id) = stem.rsplit_once('-')?;
+    let id = id.parse::<i64>().ok()?;
+    (!tracker.is_empty()).then(|| ListOwner::new(tracker, id))
+}
 
 /// SQLite schema name of the attached account database.
 pub const ACCOUNT_SCHEMA: &str = "acct";
@@ -24,8 +72,9 @@ pub const ACCOUNT_SCHEMA: &str = "acct";
 pub const ACCOUNTS_DIR: &str = "accounts";
 
 /// `app_settings` keys that belong to the account (its anime ids, its sign-in), kept in its own file.
-pub const ACCOUNT_SETTING_KEYS: [&str; 7] = [
+pub const ACCOUNT_SETTING_KEYS: [&str; 8] = [
     accounts::TRACKER_ACCOUNT_KEY,
+    accounts::ACCOUNT_PROFILE_KEY,
     super::SCORE_FORMAT_KEY,
     super::activity::ANILIST_HISTORY_STATE_KEY,
     super::settings::RELEASE_PREFERENCES_KEY,
@@ -411,6 +460,73 @@ impl Database {
             if created { " (new)" } else { "" }
         );
         Ok(created)
+    }
+
+    /// Every account with a database on this computer, the active one first, then by tracker and name.
+    pub fn stored_accounts(&self) -> Result<Vec<StoredAccount>, String> {
+        let active = self.list_owner()?;
+        let mut owners: Vec<ListOwner> = active.iter().cloned().collect();
+        if let Some(dir) = &self.accounts_dir {
+            if let Ok(files) = std::fs::read_dir(dir) {
+                for file in files.flatten() {
+                    let path = file.path();
+                    if path.extension().and_then(|e| e.to_str()) != Some("db") {
+                        continue;
+                    }
+                    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                    if let Some(owner) = owner_of_stem(stem).filter(|o| Some(o) != active.as_ref()) {
+                        owners.push(owner);
+                    }
+                }
+            }
+        }
+        let mut out = Vec::with_capacity(owners.len());
+        for owner in owners {
+            let is_active = Some(&owner) == active.as_ref();
+            let (account, profile, entries) = if is_active {
+                let conn = self.reader()?;
+                read_account_db(&conn, "acct.")
+            } else {
+                match self.account_target(Some(&owner)) {
+                    AccountTarget::File(path) => match Connection::open(&path) {
+                        Ok(conn) => read_account_db(&conn, ""),
+                        Err(e) => {
+                            log::warn!(
+                                target: "app",
+                                "reading account database {}: {}",
+                                account_file_stem(Some(&owner)),
+                                e
+                            );
+                            continue;
+                        }
+                    },
+                    AccountTarget::Memory => continue,
+                }
+            };
+            // The stored sign-in must be this account's own
+            let account = account.filter(|a| a.tracker == owner.tracker && a.user_id == owner.user_id);
+            let signed_in = account.as_ref().is_some_and(|a| !a.access_token.trim().is_empty());
+            let (username, avatar_url) = match (account, profile) {
+                (Some(a), _) => (Some(a.username), a.avatar_url),
+                (None, Some(p)) => (Some(p.username), p.avatar_url),
+                (None, None) => (None, None),
+            };
+            out.push(StoredAccount {
+                tracker: owner.tracker,
+                user_id: owner.user_id,
+                username: username.filter(|n| !n.trim().is_empty()),
+                avatar_url,
+                signed_in,
+                active: is_active,
+                entries,
+            });
+        }
+        let first_other = usize::from(active.is_some()).min(out.len());
+        out[first_other..].sort_by(|a, b| {
+            (a.tracker.as_str(), a.username.as_deref().unwrap_or(""))
+                .cmp(&(b.tracker.as_str(), b.username.as_deref().unwrap_or("")))
+        });
+        Ok(out)
     }
 
     /// The account database's name (`anilist-460805`, `local`), for settings backups.

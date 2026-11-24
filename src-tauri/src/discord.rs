@@ -1,5 +1,5 @@
 //! Discord Rich Presence: while a matched episode plays, the user's Discord profile shows
-//! "Watching <anime>" with the cover, the episode, an AniList link and a link to Tora.
+//! "Watching <anime>" with the cover, the episode, a link to its tracker page and a link to Tora.
 //!
 //! Discord IPC is blocking (a named pipe), so one worker thread owns the connection; the media poll
 //! only sends the wanted presence over a channel. The worker skips unchanged presences (Discord rate
@@ -106,6 +106,12 @@ impl DiscordPresence {
     }
 }
 
+/// "View on MyAnimeList" for a MyAnimeList page, "View on AniList" otherwise (the anime's tracker page).
+fn view_on_label(url: &str) -> String {
+    let site = if url.contains("myanimelist.net") { "MyAnimeList" } else { "AniList" };
+    format!("View on {}", site)
+}
+
 fn truncate(s: &str) -> String {
     if s.chars().count() <= MAX_FIELD_CHARS {
         return s.to_string();
@@ -129,8 +135,9 @@ fn set_presence(client: &mut DiscordIpcClient, info: &PresenceInfo) -> Result<()
     let title = truncate(&format!("{:<2}", info.anime.title));
     let state = episode_label(info);
     let mut buttons = Vec::new();
-    if let Some(url) = info.anime.anilist_url.as_deref() {
-        buttons.push(Button::new("View on AniList", url));
+    let label = info.anime.anilist_url.as_deref().map(view_on_label);
+    if let (Some(url), Some(label)) = (info.anime.anilist_url.as_deref(), label.as_deref()) {
+        buttons.push(Button::new(label, url));
     }
     buttons.push(Button::new("Get Tora", TORA_REPO_URL));
 

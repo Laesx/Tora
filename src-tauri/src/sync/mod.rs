@@ -410,6 +410,15 @@ pub fn today_string() -> String {
     chrono::Local::now().format("%Y-%m-%d").to_string()
 }
 
+/// Refresh a token this long before it expires (MAL / Kitsu tokens last 30 days).
+const TOKEN_REFRESH_MARGIN: i64 = 3 * 24 * 3600;
+
+/// The account's token expires within [`TOKEN_REFRESH_MARGIN`] and can be refreshed.
+fn needs_refresh(account: &TrackerAccount, now: i64) -> bool {
+    account.refresh_token.as_deref().is_some_and(|t| !t.trim().is_empty())
+        && account.expires_at.is_some_and(|at| at - now < TOKEN_REFRESH_MARGIN)
+}
+
 /// Whether the account `viewer` (the id the tracker resolved for the token) may read and write the local
 /// list: it must be the stored account's user (when known) and the list owner (when there is one, on the
 /// same tracker).
@@ -618,6 +627,8 @@ pub struct TrackerSyncService {
     page_lock: tokio::sync::Mutex<()>,
     /// Serializes saga walks, so a repeated call reads the rows the first one stored.
     saga_lock: tokio::sync::Mutex<()>,
+    /// One token refresh at a time: refresh tokens rotate, so a second refresh with the old one would fail.
+    token_refresh_lock: tokio::sync::Mutex<()>,
     custom_list_push_delay: Duration,
     /// Latest membership edit per entry: a delayed push that isn't the latest leaves it to that one.
     custom_list_edits: Mutex<HashMap<i64, u64>>,
@@ -648,6 +659,7 @@ impl TrackerSyncService {
             following_cache: Mutex::new(HashMap::new()),
             page_lock: tokio::sync::Mutex::new(()),
             saga_lock: tokio::sync::Mutex::new(()),
+            token_refresh_lock: tokio::sync::Mutex::new(()),
             custom_list_push_delay: CUSTOM_LIST_PUSH_DELAY,
             custom_list_edits: Mutex::new(HashMap::new()),
             custom_list_edit_seq: AtomicU64::new(0),
@@ -697,9 +709,60 @@ impl TrackerSyncService {
             .map_err(|e| e.to_string())?
     }
 
-    /// The signed-in account (`None` when signed out).
+    /// The signed-in account (`None` when signed out). A token about to expire is refreshed first
+    /// ([`TOKEN_REFRESH_MARGIN`]), so every caller gets one that works.
     async fn current_account(&self) -> Result<Option<TrackerAccount>, String> {
-        self.blocking(|db| db.tracker_account()).await
+        let account = self.blocking(|db| db.tracker_account()).await?;
+        match account {
+            Some(a) if needs_refresh(&a, chrono::Utc::now().timestamp()) => self.refresh_tokens(a).await,
+            other => Ok(other),
+        }
+    }
+
+    /// Trade the account's refresh token for new tokens and store them. Never fails the caller: when the
+    /// tracker refuses, the stored account is returned and the request that uses it reports the sign-in
+    /// problem the usual way (`tracker-auth-invalid`).
+    async fn refresh_tokens(&self, stale: TrackerAccount) -> Result<Option<TrackerAccount>, String> {
+        let _turn = self.token_refresh_lock.lock().await;
+        // Another call may have refreshed it (or another account signed in) while this one waited
+        let Some(account) = self.blocking(|db| db.tracker_account()).await? else {
+            return Ok(None);
+        };
+        let same = |a: &TrackerAccount, b: &TrackerAccount| a.tracker == b.tracker && a.user_id == b.user_id;
+        let now = chrono::Utc::now().timestamp();
+        if !same(&account, &stale) || !needs_refresh(&account, now) {
+            return Ok(Some(account));
+        }
+        let (Some(refresh), Ok(tracker)) = (account.refresh_token.clone(), self.tracker_by_id(&account.tracker)) else {
+            return Ok(Some(account));
+        };
+        let name = tracker.descriptor().name;
+        match self.limiter(&tracker).run(|| tracker.auth().refresh_tokens(&refresh)).await {
+            Ok(tokens) => {
+                let mut fresh = account.clone();
+                fresh.access_token = tokens.access_token;
+                fresh.refresh_token = tokens.refresh_token.or(fresh.refresh_token);
+                fresh.expires_at = tokens.expires_at;
+                let to_store = fresh.clone();
+                // Only over the same account: a sign-in that switched accounts meanwhile keeps its own
+                let stored = self
+                    .blocking(move |db| match db.tracker_account()? {
+                        Some(current) if same(&current, &to_store) => db.set_tracker_account(&to_store).map(|_| true),
+                        _ => Ok(false),
+                    })
+                    .await?;
+                if stored {
+                    log::info!(target: "sync", "{} token refreshed", name);
+                    Ok(Some(fresh))
+                } else {
+                    self.blocking(|db| db.tracker_account()).await
+                }
+            }
+            Err(e) => {
+                log::warn!(target: "sync", "refreshing the {} token failed: {}", name, e);
+                Ok(Some(account))
+            }
+        }
     }
 
     async fn current_token(&self) -> Result<Option<String>, String> {
@@ -1378,30 +1441,77 @@ impl TrackerSyncService {
                 profile.user_id,
                 if outcome.new_account { ", new account database" } else { "" }
             );
-            if let Ok(mut last) = self.last_synced_at.lock() {
-                *last = None;
-            }
-            let matched = self
-                .active_session
-                .lock()
-                .ok()
-                .and_then(|guard| guard.as_ref().and_then(|s| s.matched_anime_id));
-            if let Some(id) = matched {
-                self.unmatch_active_session(&[id]);
-            }
-            self.emit(
-                EVENT_ACCOUNT_SWITCHED,
-                json!({
-                    "previous_tracker": outcome.previous_owner.as_ref().map(|o| o.tracker.clone()),
-                    "previous_user_id": outcome.previous_owner.as_ref().map(|o| o.user_id),
-                    "tracker": tracker,
-                    "user_id": profile.user_id,
-                    "username": profile.username,
-                    "new_account": outcome.new_account,
-                }),
-            );
+            self.announce_account_switch(&outcome, tracker, profile.user_id, &profile.username);
         }
         Ok(outcome)
+    }
+
+    /// Switch to an account whose database is on this computer and whose sign-in is still stored, without
+    /// signing in again (Settings → Tracker). The current account keeps its data and its sign-in.
+    pub async fn switch_to_stored_account(&self, tracker: &str, user_id: i64) -> Result<SignInOutcome, String> {
+        let _op = self.op_lock.lock().await;
+        let name = self.tracker_by_id(tracker)?.descriptor().name;
+        let owner = ListOwner::new(tracker, user_id);
+        let wanted = owner.clone();
+        let stored = self.blocking(|db| db.stored_accounts()).await?;
+        let Some(target) = stored.into_iter().find(|a| a.tracker == wanted.tracker && a.user_id == wanted.user_id) else {
+            return Err(format!("There is no {} account {} on this computer", name, user_id));
+        };
+        if target.active {
+            return Ok(SignInOutcome {
+                previous_owner: Some(owner),
+                account: self.blocking(|db| db.tracker_account()).await?.map(|a| a.info()),
+                ..Default::default()
+            });
+        }
+        if !target.signed_in {
+            return Err(format!("This {} account was signed out: sign in to it again", name));
+        }
+        let outcome = self
+            .blocking(move |db| {
+                let previous = db.list_owner()?;
+                let new_account = db.switch_account(&owner)?;
+                db.rematch_from_index()?;
+                let account = db.tracker_account()?;
+                Ok(SignInOutcome {
+                    account_switched: previous.is_some(),
+                    previous_owner: previous,
+                    new_account,
+                    account: account.map(|a| a.info()),
+                })
+            })
+            .await?;
+        let username = outcome.account.as_ref().map(|a| a.username.clone()).unwrap_or_default();
+        log::info!(target: "sync", "switched to {} {} ({:?} before)", tracker, user_id, outcome.previous_owner);
+        self.announce_account_switch(&outcome, tracker, user_id, &username);
+        Ok(outcome)
+    }
+
+    /// After another account's database became the active one: forget the last sync time and the playing
+    /// session's match (both were the previous account's), and tell the frontend to reload everything.
+    fn announce_account_switch(&self, outcome: &SignInOutcome, tracker: &str, user_id: i64, username: &str) {
+        if let Ok(mut last) = self.last_synced_at.lock() {
+            *last = None;
+        }
+        let matched = self
+            .active_session
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().and_then(|s| s.matched_anime_id));
+        if let Some(id) = matched {
+            self.unmatch_active_session(&[id]);
+        }
+        self.emit(
+            EVENT_ACCOUNT_SWITCHED,
+            json!({
+                "previous_tracker": outcome.previous_owner.as_ref().map(|o| o.tracker.clone()),
+                "previous_user_id": outcome.previous_owner.as_ref().map(|o| o.user_id),
+                "tracker": tracker,
+                "user_id": user_id,
+                "username": username,
+                "new_account": outcome.new_account,
+            }),
+        );
     }
 
     /// Fetch the signed-in account's profile again and store its name and avatar (the tokens and the list
@@ -1477,6 +1587,8 @@ impl TrackerSyncService {
         }
         let progress_guard = InProgressGuard(&self.in_progress);
         self.emit(EVENT_SYNC_STARTED, json!({ "reason": reason }));
+        // Refreshes a token about to expire, so the account read under the lock below has a working one
+        let _ = self.current_account().await;
 
         let op = self.op_lock.lock().await;
         // Re-read under the lock: a sign-in may have switched the account while this pull was waiting.
@@ -1633,11 +1745,12 @@ impl TrackerSyncService {
             .map_err(|m| fail(TrackerError::Api(format!("Failed to merge the {} list: {}", tracker_name, m))))?;
         let merge_ms = phase.elapsed().as_millis();
 
-        // Heavy metadata (synopsis, genres, studios, …) only for entries new to the local list.
-        // Best effort: a failure leaves the light metadata in place and never fails the sync.
+        // Heavy metadata (synopsis, genres, studios, …) only for entries new to the local list, and only
+        // when the list didn't already carry it. Best effort: a failure leaves the light metadata in place
+        // and never fails the sync.
         let phase = Instant::now();
         let mut details_written = 0usize;
-        if !stats.new_ids.is_empty() {
+        if !stats.new_ids.is_empty() && !tracker.list().list_has_details() {
             let mut details: Vec<AnimeEntry> = Vec::with_capacity(stats.new_ids.len());
             for chunk in stats.new_ids.chunks(MEDIA_DETAILS_CHUNK) {
                 match self
@@ -2500,6 +2613,10 @@ mod tests {
         batch_calls: Mutex<Vec<Vec<i64>>>,
         /// Replaces AniList's feature list (a tracker with fewer features).
         features: Option<Vec<crate::trackers::FeatureSupport>>,
+        /// Refresh tokens passed to every `refresh_tokens` call.
+        refresh_calls: Mutex<Vec<String>>,
+        /// `refresh_tokens` fails with this.
+        refresh_error: Mutex<Option<TrackerError>>,
     }
 
     impl Tracker for MockTracker {
@@ -2531,6 +2648,21 @@ mod tests {
         }
         fn viewer_id<'a>(&'a self, _token: &'a str) -> BoxFuture<'a, Result<i64, TrackerError>> {
             Box::pin(async move { Ok(self.viewer_id) })
+        }
+        fn refresh_tokens<'a>(&'a self, refresh_token: &'a str) -> BoxFuture<'a, Result<AccessTokens, TrackerError>> {
+            Box::pin(async move {
+                let mut calls = self.refresh_calls.lock().unwrap();
+                calls.push(refresh_token.to_string());
+                if let Some(e) = self.refresh_error.lock().unwrap().clone() {
+                    return Err(e);
+                }
+                // Rotates: each refresh hands out a new refresh token
+                Ok(AccessTokens {
+                    access_token: format!("access-{}", calls.len()),
+                    refresh_token: Some(format!("refresh-{}", calls.len())),
+                    expires_at: Some(chrono::Utc::now().timestamp() + 30 * 86_400),
+                })
+            })
         }
     }
 
@@ -3802,6 +3934,60 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[tokio::test]
+    async fn a_stored_account_is_switched_to_without_signing_in_again() {
+        let dir = std::env::temp_dir().join(format!("tora-sync-stored-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let db = Arc::new(Database::open(&dir.join("tora_library.db")).unwrap());
+        let mock = Arc::new(MockTracker {
+            viewer_id: 7,
+            ..Default::default()
+        });
+        let (svc, events) = service(db.clone(), mock.clone());
+        svc.sign_in("anilist", AccessTokens::access_only("token-a"), &profile(42, "alice")).await.unwrap();
+        db.upsert_anime_entry(&test_entry(1, "Alpha")).unwrap();
+        svc.sign_in("mal", AccessTokens::access_only("token-m"), &profile(7, "bob")).await.unwrap();
+        db.upsert_anime_entry(&test_entry(5, "Bob's anime")).unwrap();
+        db.upsert_anime_entry(&test_entry(6, "Bob's other")).unwrap();
+
+        // Both accounts are listed, the active one first, with their list sizes and no tokens
+        let stored = db.stored_accounts().unwrap();
+        let summary: Vec<_> = stored
+            .iter()
+            .map(|a| (a.tracker.as_str(), a.user_id, a.username.as_deref(), a.signed_in, a.active, a.entries))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![("mal", 7, Some("bob"), true, true, 2), ("anilist", 42, Some("alice"), true, false, 1)]
+        );
+
+        // Back to Alice with her stored sign-in: her list, her token, the app told to reload
+        let outcome = svc.switch_to_stored_account("anilist", 42).await.unwrap();
+        assert!(outcome.account_switched && !outcome.new_account);
+        assert_eq!(outcome.account.unwrap().username, "alice");
+        assert_eq!(db.tracker_account().unwrap().unwrap().access_token, "token-a");
+        assert_eq!(db.list_owner().unwrap(), Some(crate::db::ListOwner::new("anilist", 42)));
+        assert!(db.get_anime_entry_by_id(1).is_ok() && db.get_anime_entry_by_id(5).is_err());
+        let last = events.lock().unwrap().last().cloned().unwrap();
+        assert_eq!((last.0.as_str(), last.1["username"].as_str()), (EVENT_ACCOUNT_SWITCHED, Some("alice")));
+        // The active account again: nothing to do
+        assert!(!svc.switch_to_stored_account("anilist", 42).await.unwrap().account_switched);
+
+        // Signed out: still listed by name, but switching to it needs a new sign-in
+        svc.sign_out().await.unwrap();
+        svc.switch_to_stored_account("mal", 7).await.unwrap();
+        let alice = db.stored_accounts().unwrap().into_iter().find(|a| a.user_id == 42).unwrap();
+        assert_eq!((alice.username.as_deref(), alice.signed_in), (Some("alice"), false));
+        let err = svc.switch_to_stored_account("anilist", 42).await.unwrap_err();
+        assert!(err.contains("signed out"), "{err}");
+        assert!(svc.switch_to_stored_account("anilist", 99).await.is_err());
+        assert_eq!(db.list_owner().unwrap(), Some(crate::db::ListOwner::new("mal", 7)));
+
+        drop(svc);
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn manual_progress_increases_are_logged_once_per_episode() {
         let db = Database::open_in_memory().unwrap();
@@ -4011,6 +4197,41 @@ mod tests {
         .unwrap();
         assert_eq!(svc.refresh_history("manual").await.unwrap(), 0);
         assert!(mock.activity_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_token_about_to_expire_is_refreshed_once_and_its_rotated_refresh_token_kept() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let mock = Arc::new(MockTracker::default());
+        let (svc, _events) = service(db.clone(), mock.clone());
+        let now = chrono::Utc::now().timestamp();
+        let mut stored = account(1, "old-access");
+        stored.refresh_token = Some("refresh-0".into());
+        stored.expires_at = Some(now + 86_400);
+        db.set_tracker_account(&stored).unwrap();
+
+        // Two callers at once: one refresh, both get the new token
+        let (a, b) = tokio::join!(svc.current_token(), svc.current_token());
+        assert_eq!((a.unwrap(), b.unwrap()), (Some("access-1".into()), Some("access-1".into())));
+        assert_eq!(*mock.refresh_calls.lock().unwrap(), vec!["refresh-0".to_string()]);
+        let fresh = db.tracker_account().unwrap().unwrap();
+        assert_eq!(fresh.refresh_token.as_deref(), Some("refresh-1"));
+        assert!(fresh.expires_at.unwrap() > now + 29 * 86_400);
+        assert_eq!((fresh.user_id, fresh.username.as_str()), (1, stored.username.as_str()));
+
+        // Far from expiry, or nothing to refresh with: left alone
+        assert_eq!(svc.current_token().await.unwrap().as_deref(), Some("access-1"));
+        let mut no_refresh = account(1, "plain");
+        no_refresh.expires_at = Some(now);
+        db.set_tracker_account(&no_refresh).unwrap();
+        assert_eq!(svc.current_token().await.unwrap().as_deref(), Some("plain"));
+        assert_eq!(mock.refresh_calls.lock().unwrap().len(), 1);
+
+        // A refused refresh keeps the stored account (its requests then report the sign-in problem)
+        *mock.refresh_error.lock().unwrap() = Some(TrackerError::Unauthorized("revoked".into()));
+        db.set_tracker_account(&stored).unwrap();
+        assert_eq!(svc.current_token().await.unwrap().as_deref(), Some("old-access"));
+        assert_eq!(db.tracker_account().unwrap().unwrap(), stored);
     }
 
     fn saga_media(id: i64, relations: &[(i64, &str)]) -> SeasonalAnime {

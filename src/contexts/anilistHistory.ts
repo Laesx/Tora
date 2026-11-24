@@ -8,7 +8,7 @@ export interface AniListHistoryApi {
   supported: boolean;
   /** `AppSettings.anilist_history_enabled`, while the tracker supports it */
   enabled: boolean;
-  /** Imported activity exists (shown even after the setting was turned off) */
+  /** Imported activity exists (shown even after the setting was turned off), while the tracker supports it */
   hasData: boolean;
   /** Bumps whenever stored AniList activity changed, so History / Stats reload */
   version: number;

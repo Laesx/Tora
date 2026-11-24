@@ -294,7 +294,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ animeList, refreshKey,
           History
         </h1>
         <div className="flex flex-wrap items-center gap-2">
-          {importing && (
+          {anilist.supported && importing && (
             <button
               onClick={anilist.openImport}
               title="AniList history import"
@@ -308,7 +308,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ animeList, refreshKey,
               AniList import {Math.round(importProgress(status) * 100)}%
             </button>
           )}
-          {!showSources && !importing && (
+          {anilist.supported && !showSources && !importing && (
             <button
               onClick={anilist.openImport}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-bg-secondary border border-border-subtle hover:bg-bg-tertiary text-xs font-semibold text-text-secondary hover:text-text-primary transition"

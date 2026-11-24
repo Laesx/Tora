@@ -1,4 +1,4 @@
-//! Trackers: the list services Tora syncs with (AniList today; MyAnimeList and Kitsu next).
+//! Trackers: the list services Tora syncs with (AniList and MyAnimeList; Kitsu later).
 //!
 //! A tracker is one [`Tracker`] object made of parts, so callers ask only for what they use:
 //! - [`TrackerAuth`]: who a token belongs to;
@@ -11,9 +11,11 @@
 //! translates its tracker's values. `docs/trackers.md` lists what each tracker supports.
 
 pub mod anilist;
+pub mod mal;
 
 use crate::db::AnimeEntry;
 use crate::trackers::anilist::AniListPlugin;
+use crate::trackers::mal::MalPlugin;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -35,6 +37,10 @@ pub enum AuthMethod {
     /// The browser opens `authorize_url`; the tracker redirects to Tora's local listener with the access
     /// token in the URL fragment (OAuth implicit grant: AniList).
     BrowserToken { authorize_url: String },
+    /// OAuth authorization code with PKCE (`plain`): the browser opens `authorize_url` with `{challenge}`
+    /// and `{state}` filled in; the tracker redirects to `redirect_path` on Tora's local listener with
+    /// `code` and `state`, and [`TrackerAuth::exchange_code`] trades the code for tokens (MyAnimeList).
+    BrowserCode { authorize_url: String, redirect_path: String },
 }
 
 /// URL templates of a tracker's public pages: `{id}` is replaced by the id, `{name}` by the URL-encoded
@@ -632,10 +638,28 @@ pub trait TrackerAuth: Send + Sync {
 
     /// User id of the account `token` belongs to (implementations cache it per token).
     fn viewer_id<'a>(&'a self, token: &'a str) -> BoxFuture<'a, Result<i64, TrackerError>>;
+
+    /// [`AuthMethod::BrowserCode`]: trade the authorization `code` for tokens (`verifier`: the PKCE code
+    /// verifier the sign-in started with).
+    fn exchange_code<'a>(&'a self, _code: &'a str, _verifier: &'a str) -> BoxFuture<'a, Result<AccessTokens, TrackerError>> {
+        unsupported("This tracker", "signing in with a code")
+    }
+
+    /// New tokens for a refresh token (trackers whose tokens expire). The refresh token may rotate: the
+    /// returned one replaces it.
+    fn refresh_tokens<'a>(&'a self, _refresh_token: &'a str) -> BoxFuture<'a, Result<AccessTokens, TrackerError>> {
+        unsupported("This tracker", "refreshing tokens")
+    }
 }
 
 /// The signed-in user's list.
 pub trait ListSync: Send + Sync {
+    /// The list already carries each anime's full metadata, so new entries need no
+    /// [`Catalog::fetch_media_details`] after a pull (MyAnimeList sends it with the list).
+    fn list_has_details(&self) -> bool {
+        false
+    }
+
     /// Fetch the authenticated viewer's full anime list. Media carry only the "light" fields
     /// (titles, synonyms, format, status, episodes, season, score, cover, next airing); heavy metadata
     /// (synopsis, genres, studios, banner, trailer, source, duration, site url, MAL id) may be left at its
@@ -782,6 +806,7 @@ impl TrackerRegistry {
     pub fn new() -> Self {
         let mut registry = Self { trackers: HashMap::new() };
         registry.register(Arc::new(AniListPlugin::new()));
+        registry.register(Arc::new(MalPlugin::new()));
         registry
     }
 
@@ -814,13 +839,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_knows_anilist_and_nothing_else() {
+    fn registry_knows_anilist_and_mal_and_nothing_else() {
         let registry = TrackerRegistry::new();
         assert!(registry.get(DEFAULT_TRACKER).is_some());
+        assert!(registry.get("mal").is_some());
         // An unknown id is never answered by another tracker
-        assert!(registry.get("myanimelist").is_none());
+        assert!(registry.get("kitsu").is_none());
         let ids: Vec<String> = registry.descriptors().into_iter().map(|d| d.id).collect();
-        assert_eq!(ids, vec!["anilist"]);
+        assert_eq!(ids, vec!["anilist", "mal"]);
     }
 
     #[test]

@@ -27,7 +27,6 @@ import {
   AppSettings,
   ProcessMemory,
   RelationsInfo,
-  TrackerDescriptor,
 } from "@/lib/types";
 import { ACCENT_SWATCHES, THEME_PRESETS, applyThemeToDocument } from "@/lib/theme";
 import { formatBytes } from "@/lib/format";
@@ -41,7 +40,7 @@ import { AniListHistorySettings } from "@/features/settings/AniListHistorySettin
 import { SettingsBackupsPanel } from "./SettingsBackups";
 import { useToast } from "@/contexts/toast";
 import { useTracker } from "@/contexts/tracker";
-import { TrackerSupportTable } from "./TrackerSupportTable";
+import { TrackerSettings } from "./TrackerSettings";
 import { logError } from "@/lib/log";
 
 export type SettingsSection =
@@ -150,6 +149,7 @@ const CREDITS: { name: string; role: string; license?: string; url: string }[] =
   { name: "Anisthesia", role: "Media player detection", license: "MIT", url: "https://github.com/erengy/anisthesia" },
   { name: "anime-relations", role: "Sequel episode redirection", license: "CC0-1.0", url: "https://github.com/erengy/anime-relations" },
   { name: "AniList", role: "List sync, metadata, seasons & schedule", url: "https://anilist.co" },
+  { name: "MyAnimeList", role: "List sync, metadata & seasons", url: "https://myanimelist.net" },
   { name: "Nyaa, SubsPlease & other RSS feeds", role: "Torrent feeds and search", url: "https://nyaa.si" },
   { name: "Tauri", role: "Desktop app framework", license: "MIT / Apache-2.0", url: "https://tauri.app" },
   { name: "React & Tailwind CSS", role: "User interface", license: "MIT", url: "https://react.dev" },
@@ -180,17 +180,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   updateChecking,
   onOpenChangelog,
 }) => {
-  const [trackers, setTrackers] = useState<TrackerDescriptor[]>([]);
-  const { tracker: activeTracker, account, supports } = useTracker();
+  const { supports } = useTracker();
   const [section, setSection] = useState<SettingsSection>(sectionRequest?.section ?? "appearance");
 
   useEffect(() => {
     if (sectionRequest) setSection(sectionRequest.section);
   }, [sectionRequest]);
-
-  useEffect(() => {
-    toraApi.getTrackers().then(setTrackers).catch(logError("settings", "Loading trackers failed"));
-  }, []);
 
   const handleSelectTheme = async (themeId: string, defaultAccent?: string) => {
     const nextAccent = defaultAccent || settings.accent_color;
@@ -442,44 +437,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
         {section === "tracker" && (
           <>
-            {/* The trackers Tora can sync with: the active one is the signed-in account's (else the list owner's) */}
-            <div className="bg-bg-secondary border border-border-subtle rounded-2xl p-5 space-y-5">
-              <div>
-                <h2 className="text-base font-bold text-text-primary flex items-center gap-2">
-                  <Plug className="w-5 h-5 text-accent" />
-                  Tracker
-                </h2>
-                <p className="text-xs text-text-secondary mt-0.5">
-                  The service your list syncs with. Sign in from the sidebar.
-                </p>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                {trackers.map((t) => {
-                  const isActive = activeTracker?.id === t.id;
-                  return (
-                    <div
-                      key={t.id}
-                      className={`p-4 rounded-xl border space-y-2 ${isActive ? "border-accent bg-accent/10" : "border-border-subtle bg-bg-primary"}`}
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-bold text-text-primary">{t.name}</span>
-                        {isActive && (
-                          <span className="px-2 py-0.5 rounded text-[10px] font-semibold uppercase bg-emerald-500/20 text-emerald-400">
-                            active
-                          </span>
-                        )}
-                      </div>
-                      <p className="text-[11px] text-text-muted leading-relaxed">
-                        {isActive && account ? `Signed in as @${account.username}` : isActive ? "Signed out" : "Not in use"}
-                      </p>
-                    </div>
-                  );
-                })}
-              </div>
-
-              <TrackerSupportTable trackers={trackers} activeId={activeTracker?.id ?? null} />
-            </div>
+            <TrackerSettings />
 
             {supports("activity_history") && <AniListHistorySettings settings={settings} />}
           </>
@@ -1047,7 +1005,7 @@ const AboutSection: React.FC<{
           ))}
         </div>
         <p className="text-[11px] text-text-muted">
-          Tora is not affiliated with AniList, Taiga or any torrent site.
+          Tora is not affiliated with AniList, MyAnimeList, Taiga or any torrent site.
         </p>
       </div>
 

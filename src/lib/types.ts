@@ -829,7 +829,10 @@ export interface ProcessMemory {
 }
 
 /** How a tracker signs a user in (`AuthMethod` in Rust). */
-export type TrackerAuthMethod = { kind: "browser_token"; authorize_url: string };
+export type TrackerAuthMethod =
+  | { kind: "browser_token"; authorize_url: string }
+  /** Authorization code + PKCE, finished on the local listener at `redirect_path` (MyAnimeList) */
+  | { kind: "browser_code"; authorize_url: string; redirect_path: string };
 
 /**
  * URL templates of a tracker's public pages: `{id}` is replaced by the id, `{name}` by the URL-encoded name
@@ -885,6 +888,21 @@ export interface AccountInfo {
   user_id: number;
   username: string;
   avatar_url: string | null;
+}
+
+/** An account with a list on this computer (`get_stored_accounts`; never a token). */
+export interface StoredAccount {
+  tracker: string;
+  user_id: number;
+  /** null for an account signed out before names were kept */
+  username: string | null;
+  avatar_url: string | null;
+  /** Its sign-in is saved: switching needs no new sign-in */
+  signed_in: boolean;
+  /** The account in use */
+  active: boolean;
+  /** Anime on its list */
+  entries: number;
 }
 
 /** `get_tracker_state`: the active tracker (the account's, else the list owner's) and the signed-in account. */

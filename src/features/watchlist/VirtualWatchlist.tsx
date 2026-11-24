@@ -34,6 +34,7 @@ import { useToast } from "@/contexts/toast";
 import { useAnimeActions } from "@/contexts/animeActions";
 import { useScoreFormat } from "@/contexts/scoreFormat";
 import { useCustomLists } from "@/contexts/customLists";
+import { useTracker } from "@/contexts/tracker";
 import { formatScore, SCORE_SCALES } from "@/lib/scores";
 import { useScrollViewport, visibleRange } from "@/hooks/virtual";
 import { useNow } from "@/hooks/useNow";
@@ -623,8 +624,8 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
         </p>
         <p className="text-xs text-text-muted">
           {q
-            ? "Try fewer letters, or look it up on AniList from the Search tab."
-            : "Use the Seasons or Search tab to add shows or sync your AniList account in Settings."}
+            ? "Try fewer letters, or look it up from the Search tab."
+            : "Use the Seasons or Search tab to add shows, or sign in to your tracker in Settings → Tracker."}
         </p>
       </div>
     );
@@ -691,7 +692,7 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
             {(anime.average_score || anime.user_score > 0) && (
               <span className="shrink-0 px-1.5 py-0.5 rounded-md bg-black/75 text-[10px] font-mono font-bold flex items-center gap-1.5">
                 {anime.average_score ? (
-                  <span title="AniList average score" className="flex items-center gap-1 text-amber-400">
+                  <span title="Average score" className="flex items-center gap-1 text-amber-400">
                     <Star className="w-2.5 h-2.5 fill-amber-400" />
                     {anime.average_score}%
                   </span>
@@ -955,7 +956,7 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
         return (
           <td key={column.id} className={`${cls} text-[11px] font-mono`}>
             {anime.average_score ? (
-              <span title="AniList average score" className="text-amber-400">
+              <span title="Average score" className="text-amber-400">
                 <Star className="inline-block w-2.5 h-2.5 mr-1 -mt-0.5 fill-amber-400" />
                 {anime.average_score}%
               </span>
@@ -1444,13 +1445,14 @@ function GroupHeading({ group }: { group: WatchlistGroup }) {
 }
 
 /**
- * Tiny amber dot marking an entry with a local change still queued for AniList.
+ * Tiny amber dot marking an entry with a local change still queued for the tracker.
  */
 function PendingSyncDot({ className = "" }: { className?: string }) {
+  const { name } = useTracker();
   return (
     <span
-      title="Waiting to sync to AniList"
-      aria-label="Waiting to sync to AniList"
+      title={`Waiting to sync to ${name}`}
+      aria-label={`Waiting to sync to ${name}`}
       className={`w-2 h-2 rounded-full bg-amber-400 shrink-0 ${className}`}
     />
   );

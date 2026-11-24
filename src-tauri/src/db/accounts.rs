@@ -12,6 +12,9 @@ use serde_json::Value;
 
 /// `app_settings` key holding the signed-in [`TrackerAccount`] (absent when signed out).
 pub(crate) const TRACKER_ACCOUNT_KEY: &str = "tracker_account";
+/// `app_settings` key holding the account's name and avatar ([`AccountProfile`]), kept after signing out so
+/// the account list can still name it.
+pub(crate) const ACCOUNT_PROFILE_KEY: &str = "tracker_profile";
 /// `app_settings` key holding the user id the local list belongs to (a bare integer).
 pub(crate) const LIST_OWNER_KEY: &str = "list_owner_user_id";
 /// `app_settings` key holding the tracker of [`LIST_OWNER_KEY`]; absent on lists from before other
@@ -59,6 +62,14 @@ impl TrackerAccount {
     pub fn known_user_id(&self) -> Option<i64> {
         (self.user_id != 0).then_some(self.user_id)
     }
+}
+
+/// An account's name and avatar, without its sign-in ([`ACCOUNT_PROFILE_KEY`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccountProfile {
+    pub username: String,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
 }
 
 /// What the frontend knows about the signed-in account.
@@ -163,8 +174,14 @@ impl Database {
 
     pub fn set_tracker_account(&self, account: &TrackerAccount) -> Result<(), String> {
         let json = serde_json::to_string(account).map_err(|e| e.to_string())?;
+        let profile = serde_json::to_string(&AccountProfile {
+            username: account.username.clone(),
+            avatar_url: account.avatar_url.clone(),
+        })
+        .map_err(|e| e.to_string())?;
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        write_key(&conn, TRACKER_ACCOUNT_KEY, &json)
+        write_key(&conn, TRACKER_ACCOUNT_KEY, &json)?;
+        write_key(&conn, ACCOUNT_PROFILE_KEY, &profile)
     }
 
     pub fn clear_tracker_account(&self) -> Result<(), String> {

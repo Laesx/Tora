@@ -4908,6 +4908,7 @@ dependencies = [
  "chrono",
  "dirs 7.0.0",
  "discord-rich-presence",
+ "getrandom 0.2.17",
  "log",
  "once_cell",
  "quick-xml 0.37.5",

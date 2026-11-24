@@ -5,6 +5,7 @@ pub mod discord;
 pub mod library;
 pub mod logging;
 pub mod memory;
+pub mod sign_in;
 pub mod trackers;
 pub mod sync;
 pub mod torrents;
@@ -286,6 +287,31 @@ async fn get_tracker_state(state: State<'_, AppState>) -> Result<TrackerState, S
         tracker,
         account: account.map(|a| a.info()),
     })
+}
+
+/// Every account with a database on this computer (never a token): Settings → Tracker's account list.
+#[tauri::command]
+async fn get_stored_accounts(state: State<'_, AppState>) -> Result<Vec<crate::db::storage::StoredAccount>, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || db.stored_accounts())
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Switch to an account whose sign-in is stored on this computer (no new sign-in), then sync it.
+#[tauri::command]
+async fn switch_tracker_account(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    tracker: String,
+    user_id: i64,
+) -> Result<AccountInfo, String> {
+    let outcome = state.sync.switch_to_stored_account(&tracker, user_id).await?;
+    let account = outcome.account.ok_or_else(|| "That account has no stored sign-in".to_string())?;
+    if outcome.account_switched || outcome.new_account {
+        after_sign_in(&app, state.sync.clone(), &account);
+    }
+    Ok(account)
 }
 
 /// Fetch the signed-in account's name and avatar again (the list and tokens stay as they are).
@@ -1886,6 +1912,48 @@ async fn handle_oauth_http_stream(
         None => (full_path, ""),
     };
 
+    // Authorization-code trackers (MyAnimeList) redirect here with `code` and `state`
+    let redirect_paths: Vec<String> = trackers
+        .descriptors()
+        .into_iter()
+        .filter_map(|d| match d.auth {
+            AuthMethod::BrowserCode { redirect_path, .. } => Some(redirect_path),
+            _ => None,
+        })
+        .collect();
+    match sign_in::take(path, &redirect_paths) {
+        sign_in::Callback::NotOurs => {}
+        sign_in::Callback::Stale => {
+            let page = sign_in::result_page(
+                false,
+                "This sign-in link has expired",
+                "Start signing in again from Tora (Settings → Tracker).",
+            );
+            write_html(&mut stream, "400 Bad Request", &page).await;
+            return;
+        }
+        sign_in::Callback::Pending(pending) => {
+            let name = trackers.get(&pending.tracker).map(|t| t.descriptor().name).unwrap_or_default();
+            match finish_code_sign_in(&pending, query, &trackers, &sync).await {
+                Ok(account) => {
+                    let page = sign_in::result_page(
+                        true,
+                        &format!("Signed in as @{}", account.username),
+                        &format!("Your {} account is linked to Tora. You can close this tab.", name),
+                    );
+                    write_html(&mut stream, "200 OK", &page).await;
+                    after_sign_in(&app_handle, sync, &account);
+                }
+                Err(err) => {
+                    log::warn!(target: "sync", "{} sign-in failed: {}", pending.tracker, err);
+                    let page = sign_in::result_page(false, "Sign-in failed", &err);
+                    write_html(&mut stream, "400 Bad Request", &page).await;
+                }
+            }
+            return;
+        }
+    }
+
     // AniList's browser-token flow: the callback page below reads the token from the URL fragment and
     // sends it here
     if path.starts_with("/AniSync/token") || query.contains("access_token=") {
@@ -1918,18 +1986,7 @@ async fn handle_oauth_http_stream(
                     );
                     let _ = stream.write_all(resp.as_bytes()).await;
                     let _ = stream.shutdown().await;
-
-                    let _ = app_handle.emit("tracker-auth-updated", &account);
-                    if let Some(win) = app_handle.get_webview_window("main") {
-                        let _ = win.unminimize();
-                        let _ = win.set_focus();
-                    }
-
-                    // Two-way sync with the newly linked account in the background. The service emits
-                    // `tracker-sync-started` and `tracker-list-synced` (SyncSummary) / `tracker-sync-failed`.
-                    tokio::spawn(async move {
-                        let _ = sync.pull("post_auth").await;
-                    });
+                    after_sign_in(&app_handle, sync, &account);
                     return;
                 }
                 Err(err) => {
@@ -1960,6 +2017,67 @@ async fn handle_oauth_http_stream(
     let _ = stream.write_all(headers.as_bytes()).await;
     let _ = stream.write_all(body).await;
     let _ = stream.shutdown().await;
+}
+
+async fn write_html(stream: &mut tokio::net::TcpStream, status: &str, page: &str) {
+    let head = format!(
+        "HTTP/1.1 {}
+Content-Type: text/html; charset=utf-8
+Cache-Control: no-store
+Connection: close
+Content-Length: {}
+
+",
+        status,
+        page.len()
+    );
+    let _ = stream.write_all(head.as_bytes()).await;
+    let _ = stream.write_all(page.as_bytes()).await;
+    let _ = stream.shutdown().await;
+}
+
+/// The tracker's redirect of a code sign-in: trade the code for tokens and sign the account in.
+async fn finish_code_sign_in(
+    pending: &sign_in::PendingSignIn,
+    query: &str,
+    trackers: &TrackerRegistry,
+    sync: &TrackerSyncService,
+) -> Result<AccountInfo, String> {
+    let tracker = trackers
+        .get(&pending.tracker)
+        .ok_or_else(|| format!("Unknown tracker `{}`", pending.tracker))?;
+    let name = tracker.descriptor().name;
+    if let Some(error) = extract_query_param(query, "error") {
+        return Err(if error == "access_denied" {
+            format!("{} sign-in was cancelled.", name)
+        } else {
+            extract_query_param(query, "message")
+                .or_else(|| extract_query_param(query, "hint"))
+                .unwrap_or(error)
+        });
+    }
+    // The state ties the redirect to the sign-in Tora started (no other page can sign an account in)
+    if extract_query_param(query, "state").as_deref() != Some(pending.state.as_str()) {
+        return Err("The sign-in answer doesn't match the sign-in Tora started. Try again.".into());
+    }
+    let code = extract_query_param(query, "code").ok_or_else(|| format!("{} sent no authorization code.", name))?;
+    let tokens = tracker.auth().exchange_code(&code, &pending.verifier).await?;
+    let profile = tracker.auth().profile(&tokens.access_token).await?;
+    let outcome = sync.sign_in(&pending.tracker, tokens, &profile).await?;
+    outcome.account.ok_or_else(|| "Sign-in stored no account".to_string())
+}
+
+/// Tell the app, bring its window forward and sync the newly linked account in the background (the service
+/// emits `tracker-sync-started` and `tracker-list-synced` / `tracker-sync-failed`).
+fn after_sign_in(app_handle: &tauri::AppHandle, sync: Arc<TrackerSyncService>, account: &AccountInfo) {
+    let _ = app_handle.emit("tracker-auth-updated", account);
+    if let Some(win) = app_handle.get_webview_window("main") {
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+    }
+    tokio::spawn(async move {
+        let _ = sync.pull("post_auth").await;
+    });
 }
 
 fn ensure_oauth_callback_listener(
@@ -2017,6 +2135,19 @@ async fn start_tracker_sign_in(
                 state.oauth_listener_active.clone(),
             );
             open_external_url(authorize_url).await
+        }
+        AuthMethod::BrowserCode {
+            authorize_url,
+            redirect_path,
+        } => {
+            ensure_oauth_callback_listener(
+                app.clone(),
+                state.trackers.clone(),
+                state.sync.clone(),
+                state.oauth_listener_active.clone(),
+            );
+            let url = sign_in::begin(&descriptor.id, &authorize_url, &redirect_path)?;
+            open_external_url(url).await
         }
     }
 }
@@ -2265,6 +2396,8 @@ pub fn run() {
             delete_anime_entry,
             get_trackers,
             get_tracker_state,
+            get_stored_accounts,
+            switch_tracker_account,
             refresh_tracker_profile,
             sync_tracker_list,
             get_sync_status,
