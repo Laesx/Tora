@@ -1,0 +1,27 @@
+{
+  "id": 1234567,
+  "name": "tora_test_user",
+  "gender": null,
+  "location": "",
+  "joined_at": "2020-01-01T00:00:00+00:00",
+  "picture": "https://cdn.myanimelist.net/images/userimages/1234567.jpg",
+  "anime_statistics": {
+    "num_items_watching": 52,
+    "num_items_completed": 654,
+    "num_items_on_hold": 2,
+    "num_items_dropped": 215,
+    "num_items_plan_to_watch": 890,
+    "num_items": 1813,
+    "num_days_watched": 127.64,
+    "num_days_watching": 5.83,
+    "num_days_completed": 107.74,
+    "num_days_on_hold": 0.14,
+    "num_days_dropped": 13.94,
+    "num_days": 127.65,
+    "num_episodes": 7623,
+    "num_times_rewatched": 1,
+    "mean_score": 7.51
+  },
+  "time_zone": "Europe/Madrid",
+  "is_supporter": false
+}
