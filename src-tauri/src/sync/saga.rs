@@ -270,15 +270,30 @@ pub(crate) fn build_saga(root: i64, rows: &HashMap<i64, SeasonalAnime>) -> SagaG
         }
     }
 
+    // Recaps: anime another one calls its summary or compilation. AniList often also chains them between
+    // the seasons they retell (Overlord's two 2017 movies: season 1 → movie → movie → season 2), so a
+    // prequel / sequel link between a recap and an anime that is not one counts as a summary link: the
+    // recap hangs off what it retells instead of sitting in the story. Recaps chained together stay a chain.
+    let is_recap_label = |t: &Option<String>| matches!(t.as_deref(), Some("SUMMARY" | "COMPILATION"));
+    let recaps: HashSet<i64> = says
+        .iter()
+        .flat_map(|(&(a, b), (a_says, b_says))| {
+            [is_recap_label(a_says).then_some(b), is_recap_label(b_says).then_some(a)]
+        })
+        .flatten()
+        .collect();
     let mut edges: Vec<SagaEdge> = says
         .into_iter()
         .map(|((a, b), (a_says, b_says))| {
-            let kind = [&a_says, &b_says]
+            let mut kind = [&a_says, &b_says]
                 .into_iter()
                 .flatten()
                 .map(|t| link_kind(t))
                 .min()
                 .unwrap_or(SagaLinkKind::Weak);
+            if kind == SagaLinkKind::Chain && recaps.contains(&a) != recaps.contains(&b) {
+                kind = SagaLinkKind::Summary;
+            }
             SagaEdge { a, b, a_says, b_says, kind }
         })
         .collect();
@@ -746,6 +761,37 @@ mod tests {
         let end_box = g.nodes.iter().find(|n| n.media.id == 90).unwrap();
         assert!(!end_box.walked && end_box.media.relation_type.is_empty());
         assert_eq!(end_box.media.year, Some(2015));
+    }
+
+    /// Overlord: season 1 (1) names movies 10 and 11 its summaries, yet the movies are chained between
+    /// the seasons (1 → 10 → 11 → 2 by their own links). They hang off season 1, out of the story.
+    #[test]
+    fn summary_movies_chained_between_seasons_hang_off_what_they_retell() {
+        let overlord = rows(vec![
+            media(
+                1,
+                "2015-07-07",
+                100,
+                vec![
+                    rel(2, "SEQUEL", "ANIME", None),
+                    rel(10, "SUMMARY", "ANIME", None),
+                    rel(11, "SUMMARY", "ANIME", None),
+                ],
+            ),
+            media(2, "2018-01-09", 80, vec![rel(1, "PREQUEL", "ANIME", None), rel(11, "PREQUEL", "ANIME", None), rel(3, "SEQUEL", "ANIME", None)]),
+            media(3, "2018-07-10", 70, vec![rel(2, "PREQUEL", "ANIME", None)]),
+            media(10, "2017-02-25", 20, vec![rel(1, "PARENT", "ANIME", None), rel(11, "SEQUEL", "ANIME", None)]),
+            media(11, "2017-03-11", 15, vec![rel(1, "PARENT", "ANIME", None), rel(10, "PREQUEL", "ANIME", None), rel(2, "SEQUEL", "ANIME", None)]),
+        ]);
+        for root in [1, 2, 10, 11] {
+            let g = build_saga(root, &overlord);
+            assert_eq!(heads(&g), vec![vec![1, 2, 3]], "from {root}");
+            assert_eq!(g.lines[0].columns[0].satellites, vec![10, 11]);
+            let edge = |a, b| g.edges.iter().find(|e| e.a == a && e.b == b).unwrap().kind;
+            assert_eq!(edge(2, 11), SagaLinkKind::Summary);
+            // The two recaps keep their own order
+            assert_eq!(edge(10, 11), SagaLinkKind::Chain);
+        }
     }
 
     #[test]
