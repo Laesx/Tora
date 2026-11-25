@@ -562,6 +562,7 @@ impl TrackerSyncService {
     /// with one batched request per ring for rows that are missing or old (at most `MAX_SAGA_REQUESTS`).
     pub async fn saga(&self, root: i64, req: SagaRequest) -> Result<SagaGraph, String> {
         let _turn = self.saga_lock.lock().await;
+        let epoch = self.db.account_epoch();
         let started = Instant::now();
         let now = chrono::Utc::now().timestamp();
         let expand: HashSet<i64> = req.expand.iter().copied().collect();
@@ -604,7 +605,7 @@ impl TrackerSyncService {
             }
             if !fetched.is_empty() {
                 let to_store = fetched.clone();
-                self.blocking(move |db| db.put_media_metadata_many(now, &to_store)).await?;
+                self.blocking_for(epoch, move |db| db.put_media_metadata_many(now, &to_store)).await?;
             }
             for (id, (_, item)) in stored {
                 rows.entry(id).or_insert(item);

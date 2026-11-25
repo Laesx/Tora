@@ -278,6 +278,8 @@ export const App: React.FC = () => {
   const showShortcutHints = useModifierHint("Control");
   const showAltKeyHints = useModifierHint("Alt");
   const [isAuthorizing, setIsAuthorizing] = useState(false);
+  // When the last account switch was announced: the sign-in event right after it adds no toast of its own
+  const accountSwitchedAt = useRef(0);
   const [libraryRefreshTick, setLibraryRefreshTick] = useState(0);
   const isSignedIn = Boolean(trackerState?.account);
   // Stats / History reload only when what they show can change (not on sync flags or metadata)
@@ -370,7 +372,17 @@ export const App: React.FC = () => {
       if (account && (!account.avatar_url || !account.username || account.user_id === 0)) {
         toraApi
           .refreshTrackerProfile()
-          .then(setAccount)
+          // Only onto the same account (null: it changed meanwhile, nothing was written)
+          .then((fresh) => {
+            if (!fresh) return;
+            setTrackerState((prev) =>
+              prev?.account &&
+              prev.account.tracker === fresh.tracker &&
+              (prev.account.user_id === fresh.user_id || prev.account.user_id === 0)
+                ? { ...prev, account: fresh }
+                : prev
+            );
+          })
           .catch(() => { });
       }
 
@@ -404,7 +416,8 @@ export const App: React.FC = () => {
       setIsAuthorizing(false);
       // The active tracker follows the account
       reloadTrackerState();
-      if (account.username) showToast(`Signed in as @${account.username}!`, "success");
+      const switched = Date.now() - accountSwitchedAt.current < 5000;
+      if (account.username && !switched) showToast(`Signed in as @${account.username}!`, "success");
     },
     settingsChanged: setSettings,
     syncStarted: sync.onStarted,
@@ -417,11 +430,10 @@ export const App: React.FC = () => {
       showToast(`${trackerName} session expired or was revoked — please sign in again`, "error");
       reloadTrackerState();
     },
-    // A different account signed in: the previous account's list was wiped and the new account's list is
-    // imported next (it arrives through tracker-list-synced)
     // Another account's data is now the active one (the previous account's stays on this device, as it
     // was): load all of it, then the sync that follows sends its delta
     accountSwitched: ({ username, new_account }) => {
+      accountSwitchedAt.current = Date.now();
       stepper.cancel();
       nav.clear();
       list.clear();

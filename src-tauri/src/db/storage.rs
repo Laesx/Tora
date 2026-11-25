@@ -69,6 +69,9 @@ fn owner_of_stem(stem: &str) -> Option<ListOwner> {
     (!tracker.is_empty()).then(|| ListOwner::new(tracker, id))
 }
 
+/// [`Database::for_account`]'s error: another account database was attached since the work started.
+pub const ACCOUNT_CHANGED: &str = "Another account was switched to meanwhile";
+
 /// SQLite schema name of the attached account database.
 pub const ACCOUNT_SCHEMA: &str = "acct";
 /// Folder of the account databases, next to the device database.
@@ -337,11 +340,18 @@ fn columns(conn: &Connection, schema: &str, table: &str) -> Result<Vec<String>, 
 pub(crate) fn split_legacy(conn: &mut Connection, target: &AccountTarget) -> Result<(), String> {
     let start = std::time::Instant::now();
     if let AccountTarget::File(path) = target {
-        // Only a move that didn't finish can have left a file here: `main` is still the original
-        for file in sidecars(path) {
-            if file.exists() {
-                std::fs::remove_file(&file).map_err(|e| format!("{}: {}", file.display(), e))?;
+        // A file here is from a move that didn't finish, or this build's own file after an older Tora put
+        // the list back into `main`: never deleted, kept aside (`<name>.db.replaced-<time>`, not listed)
+        if path.exists() {
+            let mut aside = path.as_os_str().to_owned();
+            aside.push(format!(".replaced-{}", chrono::Local::now().format("%Y%m%d-%H%M%S")));
+            let aside = PathBuf::from(aside);
+            for (from, to) in sidecars(path).iter().zip(sidecars(&aside).iter()) {
+                if from.exists() {
+                    std::fs::rename(from, to).map_err(|e| format!("{}: {}", from.display(), e))?;
+                }
             }
+            log::warn!(target: "app", "the list is in the device database again: the account file was kept as {}", aside.display());
         }
     }
     attach_account(conn, target, true)?;
@@ -415,10 +425,13 @@ impl Database {
     /// made before any sign-in becomes the first account's. Returns whether the account's database is new.
     /// The caller rematches the library: matches point at the previous account's anime ids.
     pub fn switch_account(&self, owner: &ListOwner) -> Result<bool, String> {
+        // Held for the whole switch: work started for the previous account waits, then sees the new epoch
+        let mut epoch = self.account_epoch.write().map_err(|e| e.to_string())?;
         let current = self.list_owner()?;
         if current.as_ref() == Some(owner) {
             return Ok(false);
         }
+        let previous = self.account_target(current.as_ref());
         let target = self.account_target(Some(owner));
         let created = {
             let conn = self.conn.lock().map_err(|e| e.to_string())?;
@@ -430,31 +443,67 @@ impl Database {
             if let Some(r) = reader.as_deref() {
                 detach_account(r)?;
             }
-            let created = match &target {
-                AccountTarget::File(path) => {
-                    if current.is_none() && !path.exists() {
-                        if let AccountTarget::File(local) = self.account_target(None) {
-                            if local.exists() {
-                                for (from, to) in sidecars(&local).iter().zip(sidecars(path).iter()) {
-                                    if from.exists() {
-                                        std::fs::rename(from, to).map_err(|e| e.to_string())?;
+            // Files moved by this switch (the list from before any sign-in), moved back if it fails
+            let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
+            let attempt = (|| -> Result<bool, String> {
+                let created = match &target {
+                    AccountTarget::File(path) => {
+                        if current.is_none() && !path.exists() {
+                            if let AccountTarget::File(local) = self.account_target(None) {
+                                if local.exists() {
+                                    for (from, to) in sidecars(&local).iter().zip(sidecars(path).iter()) {
+                                        if from.exists() {
+                                            std::fs::rename(from, to).map_err(|e| e.to_string())?;
+                                            moved.push((to.clone(), from.clone()));
+                                        }
                                     }
                                 }
                             }
                         }
+                        !path.exists()
                     }
-                    !path.exists()
+                    AccountTarget::Memory => true,
+                };
+                attach_account(&conn, &target, true)?;
+                create_account_schema(&conn)?;
+                if let Some(r) = reader.as_deref() {
+                    attach_account(r, &target, false)?;
                 }
-                AccountTarget::Memory => true,
-            };
-            attach_account(&conn, &target, true)?;
-            create_account_schema(&conn)?;
-            accounts::write_owner(&conn, owner)?;
-            if let Some(r) = reader.as_deref() {
-                attach_account(r, &target, false)?;
+                // Last: the owner only changes once both connections have the new file
+                accounts::write_owner(&conn, owner)?;
+                Ok(created)
+            })();
+            match attempt {
+                Ok(created) => created,
+                Err(e) => {
+                    // Back to the previous account's file, so the app keeps working with it
+                    let _ = detach_account(&conn);
+                    if let Some(r) = reader.as_deref() {
+                        let _ = detach_account(r);
+                    }
+                    for (from, to) in moved.iter().rev() {
+                        let _ = std::fs::rename(from, to);
+                    }
+                    let restored = attach_account(&conn, &previous, true).and_then(|_| match reader.as_deref() {
+                        Some(r) => attach_account(r, &previous, false),
+                        None => Ok(()),
+                    });
+                    log::error!(
+                        target: "app",
+                        "switching to account database {} failed: {}{}",
+                        account_file_stem(Some(owner)),
+                        e,
+                        match &restored {
+                            Ok(()) => String::new(),
+                            Err(r) => format!("; the previous one could not be attached again: {}", r),
+                        }
+                    );
+                    return Err(format!("Couldn't open that account's data: {}", e));
+                }
             }
-            created
         };
+        *epoch += 1;
+        drop(epoch);
         self.bump_matcher_generation();
         log::info!(
             target: "app",
@@ -463,6 +512,22 @@ impl Database {
             if created { " (new)" } else { "" }
         );
         Ok(created)
+    }
+
+    /// The attached account database's epoch: pass it to [`Database::for_account`] from work that writes
+    /// after waiting on the network.
+    pub fn account_epoch(&self) -> u64 {
+        self.account_epoch.read().map(|e| *e).unwrap_or_else(|e| *e.into_inner())
+    }
+
+    /// Run `write` only if the account database is still the one of `epoch` (no switch since), holding off
+    /// switches while it runs. Otherwise [`ACCOUNT_CHANGED`].
+    pub fn for_account<T>(&self, epoch: u64, write: impl FnOnce(&Database) -> Result<T, String>) -> Result<T, String> {
+        let current = self.account_epoch.read().map_err(|e| e.to_string())?;
+        if *current != epoch {
+            return Err(ACCOUNT_CHANGED.into());
+        }
+        write(self)
     }
 
     /// Every account with a database on this computer, the active one first, then by tracker and name.
@@ -608,6 +673,77 @@ mod tests {
         // Reopened: the active account's database is attached again
         let db = Database::open(&dir.join("tora_library.db")).unwrap();
         assert!(db.get_anime_entry_by_id(1).is_ok());
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn work_for_one_account_never_writes_into_another() {
+        let dir = temp_dir("epoch");
+        let db = Database::open(&dir.join("tora_library.db")).unwrap();
+        db.switch_account(&ListOwner::new("anilist", 7)).unwrap();
+        let epoch = db.account_epoch();
+        assert_eq!(db.for_account(epoch, |_| Ok(1)).unwrap(), 1);
+        db.switch_account(&ListOwner::new("mal", 99)).unwrap();
+        assert_eq!(db.for_account(epoch, |_| Ok(1)).unwrap_err(), ACCOUNT_CHANGED);
+        assert!(db.for_account(db.account_epoch(), |_| Ok(())).is_ok());
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_switch_keeps_the_previous_account() {
+        let dir = temp_dir("failed-switch");
+        let db = Database::open(&dir.join("tora_library.db")).unwrap();
+        let anilist = ListOwner::new("anilist", 7);
+        db.switch_account(&anilist).unwrap();
+        db.upsert_anime_entry(&test_entry(1, "Frieren")).unwrap();
+        let epoch = db.account_epoch();
+        // A folder where the file should be: SQLite can't open it
+        std::fs::create_dir_all(dir.join("accounts").join("mal-99.db")).unwrap();
+        assert!(db.switch_account(&ListOwner::new("mal", 99)).is_err());
+        assert_eq!(db.list_owner().unwrap(), Some(anilist));
+        assert_eq!(db.account_epoch(), epoch);
+        assert!(db.get_anime_entry_by_id(1).is_ok(), "the previous list is still attached");
+        assert_eq!(db.list_anime_entries().unwrap().len(), 1, "on the reader too");
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_existing_account_file_is_kept_aside_when_the_list_comes_back() {
+        let dir = temp_dir("re-split");
+        let accounts_dir = dir.join("accounts");
+        std::fs::create_dir_all(&accounts_dir).unwrap();
+        {
+            // This build's file, then an older Tora that put a list back into `main`
+            let conn = Connection::open(accounts_dir.join("anilist-7.db")).unwrap();
+            conn.execute_batch("CREATE TABLE marker (x INTEGER); INSERT INTO marker VALUES (42);").unwrap();
+            let main = Connection::open(dir.join("tora_library.db")).unwrap();
+            main.execute_batch(
+                "CREATE TABLE app_settings (key TEXT PRIMARY KEY, value_json TEXT NOT NULL);
+                 CREATE TABLE anime_entries (id INTEGER PRIMARY KEY, anilist_id INTEGER UNIQUE,
+                     title_romaji TEXT NOT NULL);
+                 INSERT INTO anime_entries (id, anilist_id, title_romaji) VALUES (21, 21, 'One Piece');
+                 INSERT INTO app_settings VALUES ('list_owner_user_id', '7');",
+            )
+            .unwrap();
+        }
+        let db = Database::open(&dir.join("tora_library.db")).unwrap();
+        assert!(db.get_anime_entry_by_id(21).is_ok());
+        let kept: Vec<PathBuf> = std::fs::read_dir(&accounts_dir)
+            .unwrap()
+            .flatten()
+            .map(|f| f.path())
+            .filter(|p| p.to_string_lossy().contains("anilist-7.db.replaced-"))
+            .filter(|p| !p.to_string_lossy().ends_with("-wal") && !p.to_string_lossy().ends_with("-shm"))
+            .collect();
+        assert_eq!(kept.len(), 1, "the old file is kept aside");
+        let old = Connection::open(&kept[0]).unwrap();
+        let marker: i64 = old.query_row("SELECT x FROM marker", [], |r| r.get(0)).unwrap();
+        assert_eq!(marker, 42);
+        assert_eq!(db.stored_accounts().unwrap().len(), 1, "never listed as an account");
+        drop(old);
         drop(db);
         let _ = std::fs::remove_dir_all(&dir);
     }

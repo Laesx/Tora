@@ -22,7 +22,8 @@
 //! Edits and deletes are always queued (`sync_pending` / tombstones), signed in or not; they are only sent
 //! while signed in, so changes made while signed out reach the tracker on the owner's next sign-in. Without
 //! an account `pull` fails with "Not signed in". The local list belongs to one account
-//! (`Database::list_owner`): a different account signing in wipes it ([`TrackerSyncService::sign_in`]).
+//! (`Database::list_owner`): a different account signing in switches to that account's own database, and
+//! the previous one stays on this computer as it was ([`TrackerSyncService::sign_in`]).
 
 use crate::db::{
     AccountInfo, AnimeEntry, BatchAnimeUpdatePatch, CustomListChange, CustomListsState, Database, ListOwner,
@@ -709,6 +710,18 @@ impl TrackerSyncService {
             .map_err(|e| e.to_string())?
     }
 
+    /// [`Self::blocking`] for a write made after waiting on the tracker: refused with
+    /// [`ACCOUNT_CHANGED`](crate::db::storage::ACCOUNT_CHANGED) when another account was switched to since
+    /// `epoch` ([`Database::account_epoch`], read before the work resolved its tracker or token), so one
+    /// account's data never lands in another's database.
+    async fn blocking_for<T, F>(&self, epoch: u64, f: F) -> Result<T, String>
+    where
+        F: FnOnce(&Database) -> Result<T, String> + Send + 'static,
+        T: Send + 'static,
+    {
+        self.blocking(move |db| db.for_account(epoch, f)).await
+    }
+
     /// The signed-in account (`None` when signed out). A token about to expire is refreshed first
     /// ([`TOKEN_REFRESH_MARGIN`]), so every caller gets one that works.
     async fn current_account(&self) -> Result<Option<TrackerAccount>, String> {
@@ -795,6 +808,18 @@ impl TrackerSyncService {
     /// Whether the active tracker has `feature` (false when it can't be resolved).
     pub async fn supports(&self, feature: TrackerFeature) -> bool {
         self.require_feature(feature).await.is_ok()
+    }
+
+    /// The profile of `token`'s account on `tracker`, through its rate limiter (sign-in).
+    pub async fn fetch_profile(&self, tracker: &str, token: &str) -> Result<TrackerUserProfile, TrackerError> {
+        let tracker = self.tracker_by_id(tracker)?;
+        self.limiter(&tracker).run(|| tracker.auth().profile(token)).await
+    }
+
+    /// Trade a sign-in's authorization code for tokens, through `tracker`'s rate limiter.
+    pub async fn exchange_code(&self, tracker: &str, code: &str, verifier: &str) -> Result<AccessTokens, TrackerError> {
+        let tracker = self.tracker_by_id(tracker)?;
+        self.limiter(&tracker).run(|| tracker.auth().exchange_code(code, verifier)).await
     }
 
     /// Every registered tracker's descriptor.
@@ -1050,7 +1075,7 @@ impl TrackerSyncService {
         };
         let token = account.access_token.trim().to_string();
         let tracker = self.tracker_by_id(&account.tracker)?;
-        let viewer = tracker.auth().viewer_id(&token).await?;
+        let viewer = self.limiter(&tracker).run(|| tracker.auth().viewer_id(&token)).await?;
         if !owns_list(&account, owner.as_ref(), viewer) {
             return Err(format!(
                 "The signed-in {} account doesn't own this list; sign in again",
@@ -1514,7 +1539,8 @@ impl TrackerSyncService {
     /// Fetch the signed-in account's profile again and store its name and avatar (the tokens and the list
     /// are untouched). Fills in an account migrated without a user id. Returns the updated account.
     pub async fn refresh_profile(&self) -> Result<Option<AccountInfo>, String> {
-        let Some(mut account) = self.current_account().await? else {
+        let epoch = self.db.account_epoch();
+        let Some(account) = self.current_account().await? else {
             return Ok(None);
         };
         let tracker = self.tracker_by_id(&account.tracker)?;
@@ -1529,12 +1555,23 @@ impl TrackerSyncService {
                 tracker.descriptor().name
             ));
         }
-        account.user_id = profile.user_id;
-        account.username = profile.username;
-        account.avatar_url = profile.avatar_url;
-        let info = account.info();
-        self.blocking(move |db| db.set_tracker_account(&account)).await?;
-        Ok(Some(info))
+        // Written onto the account stored now (a token refresh meanwhile keeps its new tokens), only while it
+        // is still this one: never into another account's database, never over another sign-in
+        let tracker_id = account.tracker.clone();
+        self.blocking_for(epoch, move |db| {
+            let Some(mut current) = db.tracker_account()? else {
+                return Ok(None);
+            };
+            if current.tracker != tracker_id || current.known_user_id().is_some_and(|id| id != profile.user_id) {
+                return Ok(None);
+            }
+            current.user_id = profile.user_id;
+            current.username = profile.username;
+            current.avatar_url = profile.avatar_url;
+            db.set_tracker_account(&current)?;
+            Ok(Some(current.info()))
+        })
+        .await
     }
 
     /// Send queued deletions and changes one last time, then forget the account and its tokens. The list
@@ -1659,7 +1696,11 @@ impl TrackerSyncService {
         let tracker = self.tracker_by_id(&account.tracker).map_err(fail)?;
         let tracker_name = tracker.descriptor().name;
         // Resolve the token's account BEFORE anything is sent with it (cached per token by the tracker).
-        let viewer = tracker.auth().viewer_id(token).await.map_err(fail)?;
+        let viewer = self
+            .limiter(&tracker)
+            .run(|| tracker.auth().viewer_id(token))
+            .await
+            .map_err(fail)?;
         if !owns_list(account, owner.as_ref(), viewer) {
             // Without an owner yet, the list is meant for the stored account
             let expected = owner
@@ -1846,12 +1887,16 @@ impl TrackerSyncService {
         }
         let db = self.db.clone();
         let emit = self.emit.clone();
+        // The ids are this account's: after a switch they would name another list's anime
+        let epoch = self.db.account_epoch();
         tokio::spawn(async move {
             let started = Instant::now();
             let count = ids.len();
             let targets = ids.clone();
-            let result =
-                tokio::task::spawn_blocking(move || db.match_unmatched_episodes_for_ids(&targets)).await;
+            let result = tokio::task::spawn_blocking(move || {
+                db.for_account(epoch, |db| db.match_unmatched_episodes_for_ids(&targets))
+            })
+            .await;
             match result {
                 Ok(Ok(matched)) => {
                     log::info!(
@@ -1873,6 +1918,10 @@ impl TrackerSyncService {
                             serde_json::to_value(&summary).unwrap_or(Value::Null),
                         );
                     }
+                }
+                // The switch rematched the whole library for the new account already
+                Ok(Err(e)) if e == crate::db::storage::ACCOUNT_CHANGED => {
+                    log::info!(target: "sync", "matching after sync skipped: {}", e)
                 }
                 Ok(Err(e)) => log::warn!(target: "sync", "matching local files after sync failed: {}", e),
                 Err(e) => log::error!(target: "sync", "matching task panicked: {}", e),
@@ -1939,8 +1988,7 @@ pub fn season_cache_is_stale(past: bool, fetched_at: i64, now: i64) -> bool {
 }
 
 impl TrackerSyncService {
-    /// Search the active tracker's catalog (one request, not rate limited: the Search view sends one per
-    /// submitted query).
+    /// Search the active tracker's catalog (one request per submitted query, through its rate limiter).
     pub async fn search_anime(
         &self,
         query: &str,
@@ -1948,7 +1996,10 @@ impl TrackerSyncService {
         year: Option<u32>,
     ) -> Result<Vec<AnimeEntry>, String> {
         let tracker = self.tracker().await?;
-        Ok(tracker.catalog().search_anime(query, season, year).await?)
+        Ok(self
+            .limiter(&tracker)
+            .run(|| tracker.catalog().search_anime(query, season, year))
+            .await?)
     }
 
     /// Every anime of a season. Serves the cached snapshot unless `force_refresh` or none exists;
@@ -1961,6 +2012,7 @@ impl TrackerSyncService {
         force_refresh: bool,
     ) -> Result<SeasonResult, String> {
         use chrono::Datelike;
+        let epoch = self.db.account_epoch();
 
         let season = season.trim().to_uppercase();
         if season_index(&season, year).is_none() {
@@ -2023,7 +2075,7 @@ impl TrackerSyncService {
 
         let fetched_at = chrono::Utc::now().timestamp();
         let (key, to_store) = (season.clone(), items.clone());
-        self.blocking(move |db| db.put_season_cache(&key, year, fetched_at, &to_store))
+        self.blocking_for(epoch, move |db| db.put_season_cache(&key, year, fetched_at, &to_store))
             .await?;
 
         Ok(SeasonResult {
@@ -2039,6 +2091,7 @@ impl TrackerSyncService {
     /// Stored metadata of one media (as written by season fetches). Only when none is stored yet is it
     /// fetched once (through the rate limiter) and stored; it is never refreshed here — season refreshes do that.
     pub async fn media_metadata(&self, anilist_id: i64) -> Result<Option<SeasonalAnime>, String> {
+        let epoch = self.db.account_epoch();
         let stored = self
             .blocking(move |db| db.get_media_metadata(anilist_id))
             .await?
@@ -2063,7 +2116,7 @@ impl TrackerSyncService {
         };
         let fetched_at = chrono::Utc::now().timestamp();
         let to_store = item.clone();
-        self.blocking(move |db| db.put_media_metadata(fetched_at, &to_store))
+        self.blocking_for(epoch, move |db| db.put_media_metadata(fetched_at, &to_store))
             .await?;
         Ok(Some(item))
     }
@@ -2110,6 +2163,7 @@ impl TrackerSyncService {
         if to <= from || to - from > MAX_SCHEDULE_RANGE_SECS {
             return Err(format!("Invalid airing schedule range {}..{}", from, to));
         }
+        let epoch = self.db.account_epoch();
         let now = chrono::Utc::now().timestamp();
 
         if !force_refresh {
@@ -2163,7 +2217,7 @@ impl TrackerSyncService {
 
         let fetched_at = chrono::Utc::now().timestamp();
         let to_store = items.clone();
-        self.blocking(move |db| db.put_airing_schedule_cache(from, to, fetched_at, &to_store))
+        self.blocking_for(epoch, move |db| db.put_airing_schedule_cache(from, to, fetched_at, &to_store))
             .await?;
 
         Ok(AiringScheduleResult {

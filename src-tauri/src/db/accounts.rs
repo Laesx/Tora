@@ -159,6 +159,26 @@ pub(crate) fn migrate_account_out_of_settings(tx: &Transaction) -> Result<(), St
     Ok(())
 }
 
+/// The account's name and avatar under [`ACCOUNT_PROFILE_KEY`] when only the sign-in has them (an account
+/// moved out of the settings): signing out keeps the name for the account list. Idempotent.
+pub(crate) fn backfill_account_profile(tx: &Transaction) -> Result<(), String> {
+    if read_key(tx, ACCOUNT_PROFILE_KEY)?.is_some() {
+        return Ok(());
+    }
+    let Some(account) = read_key(tx, TRACKER_ACCOUNT_KEY)?.and_then(|j| serde_json::from_str::<TrackerAccount>(&j).ok())
+    else {
+        return Ok(());
+    };
+    if account.username.trim().is_empty() {
+        return Ok(());
+    }
+    let profile = AccountProfile {
+        username: account.username,
+        avatar_url: account.avatar_url,
+    };
+    write_key(tx, ACCOUNT_PROFILE_KEY, &serde_json::to_string(&profile).map_err(|e| e.to_string())?)
+}
+
 impl Database {
     /// The signed-in account, if any (unreadable JSON reads as signed out).
     pub fn tracker_account(&self) -> Result<Option<TrackerAccount>, String> {
@@ -226,6 +246,7 @@ mod tests {
         let mut conn = db.conn.lock().unwrap();
         let tx = conn.transaction().unwrap();
         migrate_account_out_of_settings(&tx).unwrap();
+        backfill_account_profile(&tx).unwrap();
         tx.commit().unwrap();
     }
 
@@ -262,6 +283,12 @@ mod tests {
         }
         assert_eq!(main["theme"], "sakura");
         assert_eq!(db.get_settings().unwrap().theme, "sakura");
+        // Signed out later, the account list still names it
+        db.clear_tracker_account().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let profile: AccountProfile = serde_json::from_str(&read_key(&conn, ACCOUNT_PROFILE_KEY).unwrap().unwrap()).unwrap();
+        assert_eq!(profile.username, "neko");
+        drop(conn);
         assert_eq!(db.active_tracker_id().unwrap(), "anilist");
     }
 

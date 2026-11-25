@@ -1543,6 +1543,9 @@ pub struct Database {
     backup_dir: Option<PathBuf>,
     /// Folder of the account databases (`storage`); `None` for in-memory test databases.
     accounts_dir: Option<PathBuf>,
+    /// Which account database is attached: bumped by every switch, which holds it for writing. Work that
+    /// started for one account writes through [`Database::for_account`], so it never lands in another's.
+    account_epoch: RwLock<u64>,
 }
 
 /// AniList ids of the demo entries the removed seed used to insert.
@@ -2255,6 +2258,7 @@ fn run_data_migrations(conn: &mut Connection) -> Result<(), String> {
 
     // After the owner migration (`migrate_legacy_owner`), which reads `anilist_user_id` from the settings
     accounts::migrate_account_out_of_settings(&tx)?;
+    accounts::backfill_account_profile(&tx)?;
 
     tx.commit().map_err(|e| e.to_string())
 }
@@ -2541,6 +2545,7 @@ impl Database {
             matcher_generation,
             backup_dir: None,
             accounts_dir,
+            account_epoch: RwLock::new(0),
         };
         db.init_schema()?;
         db.migrate_legacy_torrent_rules()?;

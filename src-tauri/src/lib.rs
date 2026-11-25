@@ -1937,14 +1937,20 @@ async fn handle_oauth_http_stream(
             _ => None,
         })
         .collect();
-    match sign_in::take(path, &redirect_paths) {
+    let state = extract_query_param(query, "state");
+    match sign_in::take(path, state.as_deref(), &redirect_paths) {
         sign_in::Callback::NotOurs => {}
         sign_in::Callback::Stale => {
-            let page = sign_in::result_page(
-                false,
-                "This sign-in link has expired",
-                "Start signing in again from Tora (Settings → Tracker).",
-            );
+            // A refusal may come back without the state
+            let page = if extract_query_param(query, "error").as_deref() == Some("access_denied") {
+                sign_in::result_page(false, "Sign-in was cancelled", "You can close this tab.")
+            } else {
+                sign_in::result_page(
+                    false,
+                    "This sign-in link has expired",
+                    "Start signing in again from Tora (Settings → Tracker).",
+                )
+            };
             write_html(&mut stream, "400 Bad Request", &page).await;
             return;
         }
@@ -1978,7 +1984,7 @@ async fn handle_oauth_http_stream(
                 let tracker = trackers
                     .get("anilist")
                     .ok_or_else(|| "AniList is not available".to_string())?;
-                let profile = tracker.auth().profile(&token).await?;
+                let profile = sync.fetch_profile(&tracker.descriptor().id, &token).await?;
 
                 // Keeps the list for the same account; a different account wipes the previous one's list.
                 let outcome = sync.sign_in("anilist", AccessTokens::access_only(&token), &profile).await?;
@@ -2077,8 +2083,8 @@ async fn finish_code_sign_in(
         return Err("The sign-in answer doesn't match the sign-in Tora started. Try again.".into());
     }
     let code = extract_query_param(query, "code").ok_or_else(|| format!("{} sent no authorization code.", name))?;
-    let tokens = tracker.auth().exchange_code(&code, &pending.verifier).await?;
-    let profile = tracker.auth().profile(&tokens.access_token).await?;
+    let tokens = sync.exchange_code(&pending.tracker, &code, &pending.verifier).await?;
+    let profile = sync.fetch_profile(&pending.tracker, &tokens.access_token).await?;
     let outcome = sync.sign_in(&pending.tracker, tokens, &profile).await?;
     outcome.account.ok_or_else(|| "Sign-in stored no account".to_string())
 }

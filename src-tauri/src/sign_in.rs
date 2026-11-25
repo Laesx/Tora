@@ -48,21 +48,24 @@ pub fn begin(tracker: &str, authorize_url: &str, redirect_path: &str) -> Result<
 
 /// What a request to the listener is, for a code sign-in.
 pub enum Callback {
-    /// The redirect of the pending sign-in (taken: a code is used once).
+    /// The redirect of the pending sign-in, with its state (taken: a code is used once).
     Pending(PendingSignIn),
-    /// A redirect path with no pending sign-in (expired, already used, or started by another app run).
+    /// A redirect path with no pending sign-in for it (expired, already used, started by another app run,
+    /// or another sign-in's state: that one stays pending).
     Stale,
     /// Not a code sign-in redirect.
     NotOurs,
 }
 
-/// Match a listener request path against the pending sign-in; `redirect_paths` are every tracker's.
-pub fn take(path: &str, redirect_paths: &[String]) -> Callback {
+/// Match a listener request (path + its `state` parameter) against the pending sign-in; `redirect_paths`
+/// are every tracker's. Only the request carrying the pending sign-in's state takes it, so a stray one (an
+/// old sign-in tab reloaded) can't cancel it.
+pub fn take(path: &str, state: Option<&str>, redirect_paths: &[String]) -> Callback {
     let Ok(mut guard) = PENDING.lock() else {
         return Callback::NotOurs;
     };
     match guard.as_ref() {
-        Some(p) if p.redirect_path == path => {
+        Some(p) if p.redirect_path == path && state == Some(p.state.as_str()) => {
             let pending = guard.take().expect("checked above");
             if pending.started.elapsed() > PENDING_TTL {
                 Callback::Stale
@@ -135,7 +138,11 @@ mod tests {
     fn a_sign_in_is_matched_once_and_only_on_its_path() {
         let paths = vec!["/mal/callback".to_string()];
         let url = begin("mal", "https://x/authorize?c={challenge}&s={state}", "/mal/callback").unwrap();
-        let pending = match take("/mal/callback", &paths) {
+        let state = url.rsplit("s=").next().unwrap().to_string();
+        // Another sign-in's answer (an old tab reloaded) leaves this one pending
+        assert!(matches!(take("/mal/callback", Some("old"), &paths), Callback::Stale));
+        assert!(matches!(take("/mal/callback", None, &paths), Callback::Stale));
+        let pending = match take("/mal/callback", Some(&state), &paths) {
             Callback::Pending(p) => p,
             _ => panic!("the pending sign-in"),
         };
@@ -144,11 +151,12 @@ mod tests {
         assert_eq!((pending.verifier.len(), pending.state.len()), (96, 32));
         assert!(pending.verifier.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
         // Used once
-        assert!(matches!(take("/mal/callback", &paths), Callback::Stale));
-        assert!(matches!(take("/AniSync/token", &paths), Callback::NotOurs));
+        assert!(matches!(take("/mal/callback", Some(&state), &paths), Callback::Stale));
+        assert!(matches!(take("/AniSync/token", None, &paths), Callback::NotOurs));
         // A new sign-in replaces the old one, with new secrets
-        begin("mal", "{challenge}{state}", "/mal/callback").unwrap();
-        let again = match take("/mal/callback", &paths) {
+        let url = begin("mal", "{challenge}|{state}", "/mal/callback").unwrap();
+        let state = url.rsplit('|').next().unwrap().to_string();
+        let again = match take("/mal/callback", Some(&state), &paths) {
             Callback::Pending(p) => p,
             _ => panic!("the pending sign-in"),
         };

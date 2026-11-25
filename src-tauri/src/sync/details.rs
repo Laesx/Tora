@@ -68,6 +68,7 @@ impl TrackerSyncService {
     /// serialized, so a second identical call is served by the first one's results.
     pub async fn anime_page(&self, anilist_id: i64, mut req: AnimePageRequest) -> Result<AnimePageData, String> {
         let _turn = self.page_lock.lock().await;
+        let epoch = self.db.account_epoch();
         // Only what the tracker has is asked for (the page hides the rest)
         let features = self.tracker().await.map_err(|e| e.to_string())?.descriptor();
         req.recommendations &= features.supports(TrackerFeature::Recommendations);
@@ -135,7 +136,7 @@ impl TrackerSyncService {
 
         if let Some(media) = fetched.media {
             let to_store = media.clone();
-            self.blocking(move |db| db.put_media_metadata(now, &to_store)).await?;
+            self.blocking_for(epoch, move |db| db.put_media_metadata(now, &to_store)).await?;
             data.media = Some(media);
         } else if parts.metadata && data.media.is_none() {
             // AniList has no such media
@@ -172,7 +173,7 @@ impl TrackerSyncService {
         };
         if let Some((fetched_at, details)) = details {
             let to_store = details.clone();
-            self.blocking(move |db| db.put_media_details(anilist_id, fetched_at, &to_store)).await?;
+            self.blocking_for(epoch, move |db| db.put_media_details(anilist_id, fetched_at, &to_store)).await?;
             data.details = Some(details);
         }
 
@@ -197,6 +198,7 @@ impl TrackerSyncService {
 
     /// Fetches the next page of characters, appends it to the stored details and returns them.
     pub async fn load_more_characters(&self, anilist_id: i64) -> Result<MediaDetails, String> {
+        let epoch = self.db.account_epoch();
         let Some((fetched_at, mut details)) = self.blocking(move |db| db.get_media_details(anilist_id)).await? else {
             return Err("No stored details for this anime".into());
         };
@@ -217,7 +219,7 @@ impl TrackerSyncService {
         details.characters_has_more = page.has_more;
         let to_store = details.clone();
         // Keeps the first fetch's time: the age rule is about the whole set
-        self.blocking(move |db| db.put_media_details(anilist_id, fetched_at, &to_store)).await?;
+        self.blocking_for(epoch, move |db| db.put_media_details(anilist_id, fetched_at, &to_store)).await?;
         Ok(details)
     }
 }

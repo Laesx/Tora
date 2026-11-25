@@ -9,6 +9,7 @@
 //! `anilist-history-updated` `{ added }` when a refresh stored new activity.
 
 use super::{TrackerSyncService, EVENT_AUTH_INVALID};
+use crate::db::storage::ACCOUNT_CHANGED;
 use crate::db::{AniListHistoryState, AniListHistoryStatus, ImportStatus};
 use crate::trackers::{ActivityPage, ActivityPageQuery, Tracker, TrackerError, TrackerFeature, ACTIVITY_PAGE_SIZE};
 use serde_json::{json, Value};
@@ -42,6 +43,18 @@ impl Drop for RunningGuard<'_> {
 enum Stop {
     Paused,
     Failed(String),
+    /// Another account was switched to: its database must not get this one's activity or state. The
+    /// import stays `Running` in its own account's file and resumes on a start with that account.
+    Switched,
+}
+
+/// [`Stop::Switched`] for the account-changed refusal, [`Stop::Failed`] otherwise.
+fn stop_for(error: String) -> Stop {
+    if error == ACCOUNT_CHANGED {
+        Stop::Switched
+    } else {
+        Stop::Failed(error)
+    }
 }
 
 impl TrackerSyncService {
@@ -127,7 +140,7 @@ impl TrackerSyncService {
             .ok_or_else(|| TrackerError::Unauthorized("Not signed in".into()))?;
         let token = account.access_token.trim().to_string();
         let tracker = self.tracker_by_id(&account.tracker)?;
-        let viewer = tracker.auth().viewer_id(&token).await?;
+        let viewer = self.limiter(&tracker).run(|| tracker.auth().viewer_id(&token)).await?;
         let owner = self.blocking(|db| db.list_owner()).await.map_err(TrackerError::Api)?;
         if !super::owns_list(&account, owner.as_ref(), viewer) {
             return Err(TrackerError::Api(format!(
@@ -174,13 +187,15 @@ impl TrackerSyncService {
         }
     }
 
-    async fn save_history_state(&self, state: &AniListHistoryState) -> Result<(), String> {
+    async fn save_history_state(&self, epoch: u64, state: &AniListHistoryState) -> Result<(), String> {
         let state = state.clone();
-        self.blocking(move |db| db.set_anilist_history_state(&state)).await
+        self.blocking_for(epoch, move |db| db.set_anilist_history_state(&state)).await
     }
 
     async fn run_history_import(self: &Arc<Self>) {
         let started = Instant::now();
+        // Read with the state: everything this run writes must go to the same account's database
+        let epoch = self.db.account_epoch();
         let mut state = match self.blocking(|db| db.anilist_history_state()).await {
             Ok(s) => s,
             Err(e) => {
@@ -198,7 +213,7 @@ impl TrackerSyncService {
             .started_at
             .get_or_insert_with(|| chrono::Utc::now().timestamp());
 
-        let outcome = self.import_pages(&mut state).await;
+        let outcome = self.import_pages(epoch, &mut state).await;
         let read = state.fetched - fetched_before;
         match outcome {
             Ok(()) => {
@@ -214,10 +229,17 @@ impl TrackerSyncService {
                     log::warn!(target: "sync", "history refresh after the import failed: {}", e);
                 }
             }
+            Err(Stop::Switched) => {
+                log::info!(
+                    target: "sync",
+                    "AniList history import stopped by an account switch after {} activities",
+                    state.fetched
+                );
+            }
             Err(stop) => {
                 state.status = ImportStatus::Paused;
                 state.last_error = match stop {
-                    Stop::Paused => None,
+                    Stop::Paused | Stop::Switched => None,
                     Stop::Failed(m) => Some(m),
                 };
                 match &state.last_error {
@@ -233,7 +255,7 @@ impl TrackerSyncService {
                         state.fetched
                     ),
                 }
-                if let Err(e) = self.save_history_state(&state).await {
+                if let Err(e) = self.save_history_state(epoch, &state).await {
                     log::error!(target: "sync", "saving the history import state failed: {}", e);
                 }
             }
@@ -242,7 +264,7 @@ impl TrackerSyncService {
 
     /// Walk pages below `state.cursor` until the oldest activity, storing each page with the state that
     /// follows it. `Ok` = reached the end (state saved as Done).
-    async fn import_pages(&self, state: &mut AniListHistoryState) -> Result<(), Stop> {
+    async fn import_pages(&self, epoch: u64, state: &mut AniListHistoryState) -> Result<(), Stop> {
         let failed = |e: TrackerError, svc: &Self| {
             if matches!(e, TrackerError::Unauthorized(_)) {
                 svc.emit(EVENT_AUTH_INVALID, json!({ "message": e.to_string() }));
@@ -250,7 +272,7 @@ impl TrackerSyncService {
             Stop::Failed(e.to_string())
         };
         let (token, user_id, tracker) = self.history_account().await.map_err(|e| failed(e, self))?;
-        self.save_history_state(state).await.map_err(Stop::Failed)?;
+        self.save_history_state(epoch, state).await.map_err(stop_for)?;
         self.emit_history_status().await;
 
         if state.earliest_at.is_none() {
@@ -312,9 +334,9 @@ impl TrackerSyncService {
             let items = page.items;
             let snapshot = state.clone();
             let stored = self
-                .blocking(move |db| db.store_anilist_activities(&items, Some(&snapshot)))
+                .blocking_for(epoch, move |db| db.store_anilist_activities(&items, Some(&snapshot)))
                 .await
-                .map_err(Stop::Failed)?;
+                .map_err(stop_for)?;
             log::debug!(
                 target: "sync",
                 "history page: {} episode activities stored, cursor {:?}",
@@ -366,6 +388,7 @@ impl TrackerSyncService {
 
     async fn refresh_history_inner(&self, reason: &str) -> Result<usize, String> {
         let started = Instant::now();
+        let epoch = self.db.account_epoch();
         let (token, user_id, tracker) = self.history_account().await.map_err(|e| e.to_string())?;
         let newest = self.blocking(|db| db.newest_anilist_activity_at()).await?;
         let since = newest.unwrap_or_else(|| chrono::Utc::now().timestamp()) - REFRESH_OVERLAP_SECS;
@@ -391,7 +414,7 @@ impl TrackerSyncService {
             }
             let items = page.items;
             added += self
-                .blocking(move |db| db.store_anilist_activities(&items, None))
+                .blocking_for(epoch, move |db| db.store_anilist_activities(&items, None))
                 .await?;
             if !more {
                 break;
@@ -399,7 +422,7 @@ impl TrackerSyncService {
         }
         let mut state = self.blocking(|db| db.anilist_history_state()).await?;
         state.last_refreshed_at = Some(chrono::Utc::now().timestamp());
-        self.save_history_state(&state).await?;
+        self.save_history_state(epoch, &state).await?;
         log::info!(
             target: "sync",
             "history refresh({}): {} page(s), +{} in {}ms",
