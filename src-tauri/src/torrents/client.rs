@@ -396,7 +396,148 @@ pub fn is_process_running(_exe_name: &str) -> bool {
     false
 }
 
+/// Starts the torrent app as a child of the desktop shell (Explorer), as if opened from the Start menu, so it
+/// is its own app: Task Manager no longer lists it under Tora, and it never joins a job Tora runs in. The
+/// app gets Explorer's token (not elevated when Tora is) and starts in its own folder. Falls back to an
+/// ordinary child process when there is no shell to borrow.
 fn spawn(exe: &Path, inv: &Invocation) -> Result<(), String> {
+    #[cfg(windows)]
+    match spawn_under_shell(exe, inv) {
+        Ok(()) => return Ok(()),
+        Err(e) => log::debug!(target: "torrents", "starting {} under the shell failed ({}), starting it directly", exe.display(), e),
+    }
+    spawn_child(exe, inv)
+}
+
+/// A Windows command line for `exe` + `args` (the quoting `CommandLineToArgvW` and the C runtime undo).
+#[cfg(any(windows, test))]
+fn command_line(exe: &Path, args: &[String]) -> String {
+    fn push_quoted(out: &mut String, arg: &str) {
+        if !arg.is_empty() && !arg.contains([' ', '\t', '\n', '\x0b', '"']) {
+            out.push_str(arg);
+            return;
+        }
+        out.push('"');
+        let mut backslashes = 0usize;
+        for c in arg.chars() {
+            match c {
+                '\\' => backslashes += 1,
+                '"' => {
+                    out.extend(std::iter::repeat('\\').take(backslashes * 2 + 1));
+                    out.push('"');
+                    backslashes = 0;
+                }
+                _ => {
+                    out.extend(std::iter::repeat('\\').take(backslashes));
+                    out.push(c);
+                    backslashes = 0;
+                }
+            }
+        }
+        out.extend(std::iter::repeat('\\').take(backslashes * 2));
+        out.push('"');
+    }
+    // The program name is never unescaped: quote it whole.
+    let mut line = format!("\"{}\"", exe.display());
+    for arg in args {
+        line.push(' ');
+        push_quoted(&mut line, arg);
+    }
+    line
+}
+
+#[cfg(windows)]
+fn spawn_under_shell(exe: &Path, inv: &Invocation) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
+    use windows_sys::Win32::System::Threading::{
+        CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList, OpenProcess,
+        UpdateProcThreadAttribute, CREATE_NO_WINDOW, EXTENDED_STARTUPINFO_PRESENT, PROCESS_CREATE_PROCESS,
+        PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_PARENT_PROCESS, STARTUPINFOEXW,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetShellWindow, GetWindowThreadProcessId};
+
+    fn wide(s: &std::ffi::OsStr) -> Vec<u16> {
+        s.encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    unsafe {
+        let shell = GetShellWindow();
+        if shell.is_null() {
+            return Err("no shell window".into());
+        }
+        let mut shell_pid = 0u32;
+        GetWindowThreadProcessId(shell, &mut shell_pid);
+        if shell_pid == 0 {
+            return Err("no shell process".into());
+        }
+        let parent: HANDLE = OpenProcess(PROCESS_CREATE_PROCESS, 0, shell_pid);
+        if parent.is_null() {
+            return Err(format!("OpenProcess error {}", GetLastError()));
+        }
+
+        let mut size = 0usize;
+        InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut size);
+        // usize-aligned storage for the opaque attribute list.
+        let mut storage = vec![0usize; size.div_ceil(std::mem::size_of::<usize>()).max(1)];
+        let list = storage.as_mut_ptr().cast::<std::ffi::c_void>();
+        if InitializeProcThreadAttributeList(list, 1, 0, &mut size) == 0 {
+            let err = GetLastError();
+            CloseHandle(parent);
+            return Err(format!("InitializeProcThreadAttributeList error {}", err));
+        }
+
+        let result = (|| {
+            if UpdateProcThreadAttribute(
+                list,
+                0,
+                PROC_THREAD_ATTRIBUTE_PARENT_PROCESS as usize,
+                (&parent as *const HANDLE).cast(),
+                std::mem::size_of::<HANDLE>(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            ) == 0
+            {
+                return Err(format!("UpdateProcThreadAttribute error {}", GetLastError()));
+            }
+            let mut info: STARTUPINFOEXW = std::mem::zeroed();
+            info.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+            info.lpAttributeList = list;
+            let app = wide(exe.as_os_str());
+            let mut line: Vec<u16> = command_line(exe, &inv.args).encode_utf16().chain(std::iter::once(0)).collect();
+            let dir = exe.parent().filter(|d| !d.as_os_str().is_empty()).map(|d| wide(d.as_os_str()));
+            let mut flags = EXTENDED_STARTUPINFO_PRESENT;
+            if inv.hidden {
+                flags |= CREATE_NO_WINDOW;
+            }
+            let mut process: PROCESS_INFORMATION = std::mem::zeroed();
+            if CreateProcessW(
+                app.as_ptr(),
+                line.as_mut_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                flags,
+                std::ptr::null(),
+                dir.as_ref().map_or(std::ptr::null(), |d| d.as_ptr()),
+                &info.StartupInfo,
+                &mut process,
+            ) == 0
+            {
+                return Err(format!("CreateProcessW error {}", GetLastError()));
+            }
+            CloseHandle(process.hThread);
+            CloseHandle(process.hProcess);
+            Ok(())
+        })();
+
+        DeleteProcThreadAttributeList(list);
+        CloseHandle(parent);
+        result
+    }
+}
+
+fn spawn_child(exe: &Path, inv: &Invocation) -> Result<(), String> {
     let mut cmd = Command::new(exe);
     cmd.args(&inv.args);
     #[cfg(windows)]
@@ -510,6 +651,28 @@ pub async fn launch(app: &DetectedApp, category: &str, groups: Vec<(Option<Strin
 mod tests {
     use super::*;
     use crate::db::test_entry;
+
+    #[test]
+    fn command_line_quotes_like_the_c_runtime() {
+        let exe = Path::new("C:\\Program Files\\qBittorrent\\qbittorrent.exe");
+        let args: Vec<String> = [
+            "--skip-dialog=true",
+            "--save-path=D:\\Anime\\Kaguya-sama Love Is War",
+            "",
+            "say \"hi\"",
+            "D:\\ends with\\",
+            "a\\\\b",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            command_line(exe, &args),
+            "\"C:\\Program Files\\qBittorrent\\qbittorrent.exe\" --skip-dialog=true \
+             \"--save-path=D:\\Anime\\Kaguya-sama Love Is War\" \"\" \"say \\\"hi\\\"\" \
+             \"D:\\ends with\\\\\" a\\\\b"
+        );
+    }
 
     #[test]
     fn kind_from_exe_name() {
