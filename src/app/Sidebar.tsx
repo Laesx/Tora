@@ -1,5 +1,5 @@
 import React, { useCallback, useRef, useState } from "react";
-import { ArrowLeft, ArrowRight, ChevronsUpDown, Keyboard, LogIn, Search, Settings } from "lucide-react";
+import { ArrowLeft, ArrowRight, ChevronsUpDown, ExternalLink, Keyboard, LogIn, Search, Settings } from "lucide-react";
 import { useTracker } from "@/contexts/tracker";
 import { AccountAvatar, AccountMenu } from "./AccountMenu";
 import { useStoredAccounts } from "./useStoredAccounts";
@@ -210,7 +210,7 @@ const NavList: React.FC<{
   );
 };
 
-/** The signed-in account (opens its profile, signs out), or the sign-in button for the active tracker. */
+/** The signed-in account (avatar → profile, the rest → account menu), or the sign-in button for the active tracker. */
 const AccountCard: React.FC<{
   isAuthorizing: boolean;
   onSignIn: () => void;
@@ -221,7 +221,7 @@ const AccountCard: React.FC<{
   const { account, name } = useTracker();
   // Loaded here, not in the menu: the menu then opens at its full size at once
   const stored = useStoredAccounts();
-  const cardRef = useRef<HTMLButtonElement | null>(null);
+  const cardRef = useRef<HTMLDivElement | null>(null);
   const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null);
   const toggleMenu = () => {
     const rect = cardRef.current?.getBoundingClientRect();
@@ -231,27 +231,46 @@ const AccountCard: React.FC<{
   };
   const closeMenu = useCallback(() => setMenuAt(null), []);
   if (account) {
+    // The avatar opens the profile on the tracker's site; the rest of the card (left or right click) the switcher
     return (
       <>
-        <button
+        <div
           ref={cardRef}
-          onClick={toggleMenu}
-          // The menu closes on any press outside it: this one toggles it instead of reopening at once
-          onMouseDown={(e) => menuAt && e.stopPropagation()}
-          aria-haspopup="menu"
-          aria-expanded={menuAt !== null}
-          title="Accounts"
-          className={`w-full flex items-center gap-2.5 p-2 rounded-xl bg-bg-primary border text-left group cursor-pointer transition ${menuAt ? "border-accent" : "border-border-subtle hover:border-accent/50"}`}
+          className={`w-full flex items-center rounded-xl bg-bg-primary border transition ${menuAt ? "border-accent" : "border-border-subtle hover:border-accent/50"}`}
         >
-          <AccountAvatar avatarUrl={account.avatar_url} name={account.username} tracker={account.tracker} />
-          <div className="min-w-0 flex-1 pl-1">
-            <div className="text-xs font-bold text-text-primary group-hover:text-accent transition truncate">
-              {account.username || `${name} user`}
+          <button
+            onClick={onOpenProfile}
+            title={`View profile on ${name}`}
+            className="shrink-0 p-2 pr-1 rounded-l-xl cursor-pointer group/avatar"
+          >
+            <AccountAvatar avatarUrl={account.avatar_url} name={account.username} tracker={account.tracker}>
+              <span className="absolute inset-0 rounded-full bg-black/35 opacity-0 group-hover/avatar:opacity-100 group-focus-visible/avatar:opacity-100 transition flex items-center justify-center text-white">
+                <ExternalLink className="w-3.5 h-3.5 drop-shadow" />
+              </span>
+            </AccountAvatar>
+          </button>
+          <button
+            onClick={toggleMenu}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              toggleMenu();
+            }}
+            // The menu closes on any press outside it: this one toggles it instead of reopening at once
+            onMouseDown={(e) => menuAt && e.stopPropagation()}
+            aria-haspopup="menu"
+            aria-expanded={menuAt !== null}
+            title="Switch account"
+            className="min-w-0 flex-1 flex items-center gap-2.5 p-2 pl-2.5 rounded-r-xl text-left group cursor-pointer"
+          >
+            <div className="min-w-0 flex-1">
+              <div className="text-xs font-bold text-text-primary group-hover:text-accent transition truncate">
+                {account.username || `${name} user`}
+              </div>
+              <div className="text-[10px] text-text-muted truncate">{name}</div>
             </div>
-            <div className="text-[10px] text-text-muted truncate">{name}</div>
-          </div>
-          <ChevronsUpDown className="w-4 h-4 text-text-muted group-hover:text-accent transition shrink-0" />
-        </button>
+            <ChevronsUpDown className="w-4 h-4 text-text-muted group-hover:text-accent transition shrink-0" />
+          </button>
+        </div>
         {menuAt && (
           <AccountMenu
             anchor={menuAt}

@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from "react";
-import { ExternalLink, Loader2, LogIn, LogOut, Plus, Settings, User } from "lucide-react";
+import { ExternalLink, Loader2, LogIn, LogOut, Settings, User } from "lucide-react";
 import { StoredAccount } from "@/lib/types";
 import { trackerShortName } from "@/lib/trackers";
 import { useTracker } from "@/contexts/tracker";
@@ -12,10 +12,12 @@ export const AccountAvatar: React.FC<{
   name: string | null;
   tracker: string;
   size?: "sm" | "md";
-}> = ({ avatarUrl, name, tracker, size = "md" }) => {
+  /** Drawn over the picture, under the tracker chip (a hover overlay) */
+  children?: React.ReactNode;
+}> = ({ avatarUrl, name, tracker, size = "md", children }) => {
   const box = size === "md" ? "w-9 h-9" : "w-7 h-7";
   return (
-    <span className={`relative shrink-0 ${box}`}>
+    <span className={`relative block shrink-0 ${box}`}>
       {avatarUrl ? (
         <img src={avatarUrl} alt="" className={`${box} rounded-full object-cover border border-border-subtle bg-bg-tertiary`} />
       ) : (
@@ -25,6 +27,7 @@ export const AccountAvatar: React.FC<{
           {name ? name.charAt(0).toUpperCase() : <User className="w-3.5 h-3.5" />}
         </span>
       )}
+      {children}
       <span className="absolute -bottom-1 -right-1.5 px-1 rounded bg-bg-tertiary border border-border-subtle text-[8px] leading-[12px] font-bold text-text-secondary">
         {trackerShortName(tracker)}
       </span>
@@ -39,7 +42,7 @@ const accountLabel = (a: StoredAccount) => (a.username ? `@${a.username}` : `Acc
 
 /**
  * The sidebar account card's menu: the account in use, the other accounts on this computer (switch with their
- * saved sign-in), adding an account per tracker, and the profile / Settings / sign-out actions. `stored` is loaded
+ * saved sign-in), and the profile / Settings / sign-out actions (accounts are added in Settings → Tracker). `stored` is loaded
  * by the always-mounted card, so the menu opens at its full size instead of growing as requests come back.
  */
 export const AccountMenu: React.FC<{
@@ -51,7 +54,7 @@ export const AccountMenu: React.FC<{
   onSignOut: () => void;
 }> = ({ anchor, stored, onClose, onOpenProfile, onManageAccounts, onSignOut }) => {
   const { account, name } = useTracker();
-  const { trackers, accounts, busy, trackerName, signIn, switchTo } = stored;
+  const { accounts, busy, trackerName, signIn, switchTo } = stored;
   const listRef = useRef<HTMLDivElement | null>(null);
   const current = accounts.find((a) => a.active);
   const others = accounts.filter((a) => !a.active);
@@ -149,26 +152,6 @@ export const AccountMenu: React.FC<{
             })}
           </div>
         )}
-
-        <div className="border-t border-border-subtle pt-1">
-          {trackers.map((t) => (
-            <button
-              key={t.id}
-              data-menu-item
-              role="menuitem"
-              disabled={busy !== null}
-              onClick={run(() => void signIn(t.id))}
-              className={itemClass}
-            >
-              {busy === t.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
-              Add {t.name} account
-            </button>
-          ))}
-          <p className="px-2.5 pb-1 text-[10px] text-text-muted leading-snug">
-            Signs in whoever is logged in on the tracker's site in your browser: log out there first to add another
-            account of the same tracker.
-          </p>
-        </div>
 
         <div className="border-t border-border-subtle pt-1">
           {account && (
