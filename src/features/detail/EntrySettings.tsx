@@ -1,4 +1,5 @@
 import React from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import { FolderOpen, Save, Tag, Trash2 } from "lucide-react";
 import { AnimeEntry } from "@/lib/types";
 import { toraApi } from "@/lib/api";
@@ -32,23 +33,17 @@ export const EntrySettings: React.FC<{
     handleSave,
   } = editor;
 
-  const hasFolder = Boolean(
-    customFolder.trim() || anime.custom_folder?.trim() || localFiles.length > 0 || anime.local_episode_count > 0
-  );
-
-  const handleOpenFolder = async () => {
+  const handleBrowseFolder = async () => {
     try {
-      const target = customFolder.trim() || anime.custom_folder?.trim();
-      if (target) {
-        await toraApi.revealInExplorer(target);
-        return;
-      }
-      const files = localFiles.length > 0 ? localFiles : await toraApi.getLocalEpisodes(anime.id);
-      if (files.length > 0) {
-        await toraApi.revealInExplorer(files[0].file_path);
-        return;
-      }
-      showToast(`No local folder linked for "${titleOf(anime)}"`, "error");
+      const current = customFolder.trim() || anime.custom_folder?.trim();
+      const fileDir = localFiles[0]?.file_path.replace(/[\\/][^\\/]*$/, "");
+      const picked = await open({
+        directory: true,
+        multiple: false,
+        title: `Select the folder of "${titleOf(anime)}"`,
+        defaultPath: current || fileDir || undefined,
+      });
+      if (picked && typeof picked === "string") setCustomFolder(picked);
     } catch (e: any) {
       showToast(String(e), "error");
     }
@@ -85,10 +80,9 @@ export const EntrySettings: React.FC<{
             />
             <button
               type="button"
-              onClick={handleOpenFolder}
-              disabled={!hasFolder}
-              title={hasFolder ? "Open folder in Explorer" : "No folder available"}
-              className="self-stretch px-2.5 flex items-center justify-center rounded-lg bg-bg-tertiary hover:bg-bg-elevated border border-border-subtle hover:border-accent text-text-secondary hover:text-text-primary transition shrink-0 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:border-border-subtle disabled:hover:bg-bg-tertiary disabled:hover:text-text-secondary"
+              onClick={handleBrowseFolder}
+              title="Choose folder…"
+              className="self-stretch px-2.5 flex items-center justify-center rounded-lg bg-bg-tertiary hover:bg-bg-elevated border border-border-subtle hover:border-accent text-text-secondary hover:text-text-primary transition shrink-0"
             >
               <FolderOpen className="w-4 h-4" />
             </button>
