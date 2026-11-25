@@ -5,12 +5,12 @@
 <h1 align="center">Tora (虎)</h1>
 
 <p align="center">
-  A fast desktop anime manager inspired by <a href="https://github.com/erengy/taiga">Taiga</a>.
+  A fast Anilist/MAL desktop anime manager inspired by <a href="https://github.com/erengy/taiga">Taiga</a>.
 </p>
 
 > [!WARNING]
 > 
-> Only AniList is supported for now, and only on Windows.
+> Only support for Windows now (MacOS and Linux are in the works).
 > 
 > The initial list download will take long (upwards of a minute or so) since it has to pull a lot of details.
 
