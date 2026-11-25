@@ -115,3 +115,13 @@ pnpm tauri build   # installer
 
 - [Taiga](https://github.com/erengy/taiga), [Anisthesia](https://github.com/erengy/anisthesia), [Anitomy](https://github.com/erengy/anitomy) and [anime-relations](https://github.com/erengy/anime-relations) by erengy.
 - Built with [Tauri](https://tauri.app) and React.
+
+## License
+
+Tora is free software under the [GNU General Public License v3.0 or later](LICENSE). Its episode recognition ports parts of [Taiga](https://github.com/erengy/taiga) (GPL-3.0-or-later).
+
+Bundled third-party code keeps its own license:
+
+- [Anitomy](https://github.com/erengy/anitomy) (`src-tauri/vendor/anitomy`): [MPL-2.0](src-tauri/vendor/anitomy/LICENSE)
+- [Anisthesia](https://github.com/erengy/anisthesia) (`src-tauri/vendor/anisthesia`): [MIT](src-tauri/vendor/anisthesia/LICENSE)
+- [anime-relations](https://github.com/erengy/anime-relations) (`src-tauri/vendor/anime-relations`): [CC0-1.0](src-tauri/vendor/anime-relations/LICENSE)

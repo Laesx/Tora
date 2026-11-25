@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.9.0",
   "description": "Tora - Fast, modern anime library manager & tracker (Taiga clone)",
+  "license": "GPL-3.0-or-later",
   "type": "module",
   "scripts": {
     "dev": "vite",
