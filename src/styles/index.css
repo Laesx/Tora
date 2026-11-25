@@ -176,6 +176,21 @@
   color: rgb(var(--text-primary));
 }
 
+/* Screenshots: GitHub wraps each one in a link to the full-size file (opens in the browser) */
+.release-notes img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0.5rem 0;
+  border-radius: 0.5rem;
+  border: 1px solid rgb(var(--border-subtle));
+}
+
+.release-notes a:has(> img) {
+  display: inline-block;
+  cursor: zoom-in;
+}
+
 /* The anime page sheet slides in over the main area */
 @keyframes tora-sheet-in {
   from {
