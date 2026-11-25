@@ -166,7 +166,7 @@ export const CharactersSection: React.FC<{
           <button
             onClick={onRefresh}
             disabled={loading}
-            title="Fetch characters, staff and recommendations again"
+            title="Refresh"
             className="p-1.5 rounded-lg text-text-muted hover:text-text-primary hover:bg-bg-tertiary transition disabled:opacity-50"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />

@@ -87,7 +87,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               onClick={onVersionClick}
               disabled={updateChecking}
               className={`relative text-[10px] leading-4 font-mono px-1.5 rounded bg-accent/15 text-accent hover:bg-accent/25 transition cursor-pointer disabled:cursor-default ${updateChecking ? "animate-pulse" : ""}`}
-              title={updateDot ? "What's new: open the changelog" : updateChecking ? "Checking for updates…" : "Check for updates"}
+              title={updateDot ? "What's new" : updateChecking ? "Checking for updates…" : "Check for updates"}
             >
               v{version || "…"}
               {updateDot && (
@@ -296,9 +296,9 @@ const AccountCard: React.FC<{
           <div className="text-xs font-bold text-text-primary group-hover:text-accent transition">
             {isAuthorizing ? `Waiting for ${name}...` : `Sign in with ${name}`}
           </div>
-          <div className="text-[10px] text-text-muted truncate">
-            {isAuthorizing ? "Authorize in browser or click to retry" : "Click to authorize & sync your list"}
-          </div>
+          {isAuthorizing && (
+            <div className="text-[10px] text-text-muted truncate">Continue in browser, or click to retry</div>
+          )}
         </div>
       </button>
   );

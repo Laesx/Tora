@@ -397,7 +397,7 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
         });
       apply(hidden);
       const subject = targets.length === 1 ? `"${titleOf(targets[0])}"` : `${targets.length} anime`;
-      showToast(hidden ? `Marked ${subject} as not interested` : `Brought back ${subject}`, "info");
+      showToast(hidden ? `Marked ${subject} as not interested` : `Restored ${subject}`, "info");
       toraApi.setNotInterested(ids, hidden).catch((err) => {
         apply(!hidden);
         showToast(String(err), "error");
@@ -762,7 +762,7 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
             <button
               onClick={() => loadSeason(selected, true)}
               disabled={busy}
-              title={`Refetch this season from ${tracker.name}`}
+              title={`Refresh from ${tracker.name}`}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-bg-primary border border-border-subtle hover:border-accent/60 text-xs font-medium text-text-primary transition disabled:opacity-60"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${busy ? "animate-spin" : ""}`} />
@@ -834,7 +834,7 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
             {(
               [
                 { id: "grid", icon: LayoutGrid, title: "Poster grid (Alt+Q)", key: "Q" },
-                { id: "extended", icon: Rows, title: "Extended info: synopsis, tags, prequel (Alt+W)", key: "W" },
+                { id: "extended", icon: Rows, title: "Extended view (Alt+W)", key: "W" },
               ] as const
             ).map(({ id, icon: Icon, title, key }) => (
               <button
@@ -899,7 +899,6 @@ export const SeasonsView: React.FC<SeasonsViewProps> = ({
             <button
               key={name}
               onClick={() => removeTag(name)}
-              title="Remove this filter"
               className={`px-2 py-1 rounded-full text-[11px] font-semibold flex items-center gap-1 transition ${includeSet.has(name)
                 ? "bg-emerald-500/20 text-emerald-400"
                 : "bg-rose-500/20 text-rose-400"

@@ -123,7 +123,7 @@ const ReleaseRow: React.FC<{
             </span>
           </>
         ) : (
-          <span className="w-[88px] text-center text-text-muted" title="This feed doesn't report seeders / leechers">
+          <span className="w-[88px] text-center text-text-muted" title="Seeders/leechers not reported">
             —
           </span>
         )}
@@ -262,7 +262,7 @@ export const ReleaseCard: React.FC<ReleaseCardProps> = ({
       </div>
 
       {visible.length === 0 ? (
-        <div className="px-4 py-4 text-xs text-text-muted">No releases in this feed yet.</div>
+        <div className="px-4 py-4 text-xs text-text-muted">No releases found.</div>
       ) : (
         <div className="divide-y divide-border-subtle/60">
           {renderRows(primary)}

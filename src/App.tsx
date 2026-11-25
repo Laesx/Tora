@@ -324,7 +324,7 @@ export const App: React.FC = () => {
   const handleScrobbled = (session: DetectedMediaSession) => {
     void list.refreshEntries([session.matched_anime_id!]);
     showToast(
-      `Updated: ${session.matched_anime_title || session.parsed.anime_title} Episode ${session.parsed.episode_number ?? ""}!`,
+      `Updated: ${session.matched_anime_title || session.parsed.anime_title} Episode ${session.parsed.episode_number ?? ""}`,
       "success"
     );
   };
@@ -427,7 +427,7 @@ export const App: React.FC = () => {
     syncError: ({ operation, title, message }) =>
       showToast(`${trackerName} ${operation} failed for "${title}": ${message} — will retry on next sync`, "error"),
     authInvalid: () => {
-      showToast(`${trackerName} session expired or was revoked — please sign in again`, "error");
+      showToast(`${trackerName} session expired — sign in again`, "error");
       reloadTrackerState();
     },
     // Another account's data is now the active one (the previous account's stays on this device, as it
@@ -545,7 +545,7 @@ export const App: React.FC = () => {
     try {
       setIsAuthorizing(true);
       await toraApi.startTrackerSignIn(trackerState.tracker.id);
-      showToast(`Opened ${trackerName} in your browser — click Authorize to sign in`, "info");
+      showToast(`Finish signing in to ${trackerName} in your browser`, "info");
     } catch (err) {
       setIsAuthorizing(false);
       showToast(String(err), "error");
@@ -560,7 +560,7 @@ export const App: React.FC = () => {
       setIsAuthorizing(false);
       showToast(
         unsent > 0
-          ? `Signed out of ${trackerName}. ${plural(unsent, "change")} couldn't be sent; ${unsent === 1 ? "it" : "they"} will be sent next time this account signs in.`
+          ? `Signed out of ${trackerName} (${plural(unsent, "unsent change")} saved for next sign-in)`
           : `Signed out of ${trackerName}`,
         unsent > 0 ? "error" : "info"
       );
@@ -596,7 +596,7 @@ export const App: React.FC = () => {
     onSavedInBackground: (updated) => list.setAnimeList((prev) => prev.map((a) => (a.id === updated.id ? updated : a))),
     onDeleted: (deletedId) => {
       list.applyDelta([], [deletedId]);
-      showToast("Removed anime from library", "info");
+      showToast("Removed from list", "info");
     },
   };
 
@@ -1055,7 +1055,7 @@ export const App: React.FC = () => {
                         onSavedInBackground={(updated) => list.setAnimeList((prev) => prev.map((a) => (a.id === updated.id ? updated : a)))}
                         onDeleted={(deletedId) => {
                           list.applyDelta([], [deletedId]);
-                          showToast("Removed anime from library", "info");
+                          showToast("Removed from list", "info");
                         }}
                       />
                     )}

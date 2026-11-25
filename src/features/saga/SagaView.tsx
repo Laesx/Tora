@@ -350,7 +350,7 @@ export const SagaView: React.FC<{
                 <button
                   key={o}
                   onClick={() => setPrefs({ order: o })}
-                  title={o === "story" ? "Prequel → sequel, side stories under their anime" : "The same lines by air date, side stories still under their anime"}
+                  title={o === "story" ? "Chronological story order" : "Sorted by air date"}
                   className={`px-2.5 py-1 rounded-md transition ${
                     prefs.order === o ? "bg-bg-primary text-text-primary shadow" : "text-text-muted hover:text-text-primary"
                   }`}
@@ -494,7 +494,7 @@ export const SagaView: React.FC<{
                   />
                   {c.badge !== undefined && (
                     <span
-                      title={prefs.order === "story" ? `Number ${c.badge} of this line in story order` : `Number ${c.badge} of this line by release date`}
+                      title={`#${c.badge} in ${prefs.order} order`}
                       className="absolute -top-2 -left-2 min-w-[20px] h-5 px-1 rounded-full bg-accent text-white text-[10px] font-bold flex items-center justify-center shadow"
                     >
                       {c.badge}
@@ -509,7 +509,7 @@ export const SagaView: React.FC<{
                     <button
                       type="button"
                       onClick={() => expand(c.id)}
-                      title="Also show what this anime links to"
+                      title="Expand loose links"
                       className="absolute -bottom-2 right-3 flex items-center gap-0.5 px-1.5 py-px rounded-full border border-border-subtle bg-bg-tertiary text-[10px] font-semibold text-text-secondary hover:border-accent hover:text-accent transition"
                     >
                       <Plus className="w-3 h-3" />
@@ -566,7 +566,7 @@ export const SagaView: React.FC<{
             <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
             {graph.error || error ? (
               <>
-                {tracker.name} couldn't be reached: showing what's stored.
+                Couldn't reach {tracker.name} — showing cached data.
                 <button onClick={refresh} className="font-semibold text-accent hover:underline">
                   Retry
                 </button>
@@ -579,7 +579,7 @@ export const SagaView: React.FC<{
                 </button>
               </>
             ) : (
-              <>This saga is large: {graph.unwalked} more linked anime left unexplored.</>
+              <>{graph.unwalked} more linked anime hidden</>
             )}
           </div>
         )}
@@ -675,10 +675,7 @@ const Legend: React.FC = () => (
       );
     })}
     <p className="pt-1 text-[10px] text-text-muted leading-snug">
-      Anime with a “Links” button are only linked loosely (shared characters, other links, a spin-off’s own
-      side branches): it shows what they link to.
-      Each prequel / sequel chain is a line; alternative versions and other series get lines of their own
-      below the main one. Drag to move, wheel to zoom, Shift+wheel to move sideways.
+      Drag to pan · Wheel to zoom · Shift+wheel to pan sideways. Click + Links on a card to expand loose connections.
     </p>
   </div>
 );

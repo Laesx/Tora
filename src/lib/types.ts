@@ -1080,5 +1080,4 @@ export interface ThemePreset {
   previewBg: string;
   previewCard: string;
   defaultAccent: string;
-  description: string;
 }

@@ -157,7 +157,7 @@ export function buildAnimeActions(
     },
     {
       id: "step-up",
-      label: "Increment Episode (+1)",
+      label: "Next Episode (+1)",
       icon: Plus,
       iconClass: "text-emerald-400",
       hint: progress,
@@ -167,7 +167,7 @@ export function buildAnimeActions(
     },
     {
       id: "step-down",
-      label: "Decrement Episode (−1)",
+      label: "Previous Episode (−1)",
       icon: Minus,
       hint: progress,
       disabled: anime.user_progress <= 0,
@@ -214,7 +214,6 @@ export function buildAnimeActions(
       label: "Open Full Page",
       icon: Maximize2,
       iconClass: "text-accent",
-      hint: "characters, staff, history",
       run: () => h.openAnimePage(anime),
     },
     {
@@ -222,7 +221,6 @@ export function buildAnimeActions(
       label: "View Saga",
       icon: Network,
       iconClass: "text-accent",
-      hint: "the whole franchise",
       run: () => h.openSaga(anime),
     },
     {
@@ -230,7 +228,6 @@ export function buildAnimeActions(
       label: "Quick Edit...",
       icon: Pencil,
       iconClass: "text-accent",
-      hint: "score, notes, dates",
       run: () => h.openQuickEdit(anime),
     },
     {

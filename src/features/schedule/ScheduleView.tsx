@@ -80,7 +80,7 @@ const WATCHING = ["CURRENT", "REPEATING"];
 
 const LIST_STATUS_OPTIONS: { id: ListStatusFilter; label: string }[] = [
   { id: "all", label: "All" },
-  { id: "watching", label: "Only Watching" },
+  { id: "watching", label: "Watching" },
 ];
 
 /** One anime in a slot: several episodes released at once (a whole season drop) share one card. */
@@ -396,8 +396,8 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({
             disabled={busy}
             title={
               result
-                ? `Refetch this week from AniList • Updated ${formatDateTime(new Date(result.fetched_at * 1000))}`
-                : "Refetch this week from AniList"
+                ? `Refresh · Updated ${formatDateTime(new Date(result.fetched_at * 1000))}`
+                : "Refresh"
             }
             className="p-2 rounded-xl bg-bg-secondary hover:bg-bg-tertiary border border-border-subtle text-text-secondary hover:text-text-primary transition disabled:opacity-60"
           >
@@ -418,7 +418,7 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({
           </button>
           <button
             onClick={() => updatePrefs({ layout: "agenda" })}
-            title="Days stacked vertically"
+            title="Agenda view"
             className={`p-1.5 rounded-lg transition ${prefs.layout === "agenda" ? "bg-accent text-white" : "text-text-muted hover:text-text-primary"}`}
           >
             <Rows3 className="w-3.5 h-3.5" />
@@ -523,10 +523,10 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({
       {!loading && !switching && result && visible.length === 0 && breaks.length === 0 && (
         <div className="text-center text-xs text-text-muted">
           {scoped.length > 0
-            ? "Every airing this week is hidden by the format / country filters."
+            ? "No airings match the active filters."
             : prefs.scope === "list"
               ? "Nothing on your list airs this week."
-              : "AniList has no airings for this week."}
+              : "No airings scheduled for this week."}
           {prefs.scope === "list" && scoped.length === 0 && (
             <button onClick={() => setScope("all")} className="ml-1.5 font-semibold text-accent hover:underline">
               Show all anime
@@ -753,7 +753,7 @@ const ScheduleCard: React.FC<{
                 e.stopPropagation();
                 handlers.onPlay(entry, nextEp);
               }}
-              title={`Episode ${nextEp} is in your library — click to play`}
+              title={`Play episode ${nextEp}`}
               className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 hover:bg-emerald-500/25 text-[10px] font-semibold transition"
             >
               <Play className="w-2.5 h-2.5 fill-current" />

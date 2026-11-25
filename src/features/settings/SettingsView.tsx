@@ -20,7 +20,14 @@ import {
   ScrollText,
   Copy,
   Monitor,
+  Type,
+  Hourglass,
+  ListChecks,
+  Radar,
+  Play,
 } from "lucide-react";
+import { open } from "@tauri-apps/plugin-dialog";
+import { Segmented, SettingGroup, SettingRow, SettingsCard, ToggleRow } from "./SettingRow";
 import {
   AnimeEntry,
   AppInfo,
@@ -72,74 +79,44 @@ type SystemOptionKey =
   | "start_hidden";
 
 // Settings -> System: tray and startup (indented rows need every setting in `needs` on)
-const SYSTEM_OPTIONS: { key: SystemOptionKey; label: string; hint: string; needs: SystemOptionKey[] }[] = [
-  {
-    key: "tray_icon_enabled",
-    label: "Show icon in the system tray",
-    hint: "Click it to open Tora; its menu shows what's playing, toggles detection and quits",
-    needs: [],
-  },
-  {
-    key: "minimize_to_tray",
-    label: "Minimize to tray",
-    hint: "Minimizing hides the window instead of leaving it on the taskbar",
-    needs: ["tray_icon_enabled"],
-  },
-  {
-    key: "close_to_tray",
-    label: "Close to tray",
-    hint: "The close button hides the window and keeps detection running; quit from the tray menu",
-    needs: ["tray_icon_enabled"],
-  },
-  {
-    key: "start_with_windows",
-    label: "Start with Windows",
-    hint: "Open Tora when you sign in to Windows",
-    needs: [],
-  },
-  {
-    key: "start_hidden",
-    label: "Start in the tray",
-    hint: "When started with Windows, stay in the tray instead of opening the window",
-    needs: ["start_with_windows", "tray_icon_enabled"],
-  },
+const SYSTEM_OPTIONS: { key: SystemOptionKey; label: string; needs: SystemOptionKey[] }[] = [
+  { key: "tray_icon_enabled", label: "Show icon in the system tray", needs: [] },
+  { key: "minimize_to_tray", label: "Minimize to tray", needs: ["tray_icon_enabled"] },
+  { key: "close_to_tray", label: "Close to tray", needs: ["tray_icon_enabled"] },
+  { key: "start_with_windows", label: "Start with Windows", needs: [] },
+  { key: "start_hidden", label: "Start in the tray", needs: ["start_with_windows", "tray_icon_enabled"] },
 ];
 
 // Settings -> Playback: automatic list update options (off in manual mode)
-const UPDATE_OPTIONS: { key: "update_wait_for_close" | "update_require_focus"; label: string; hint: string }[] = [
+const UPDATE_OPTIONS: { key: "update_wait_for_close" | "update_require_focus"; label: string; hint?: string }[] = [
   {
     key: "update_wait_for_close",
     label: "Wait for the media player to close",
-    hint: "Update once the player closes or moves to another file, not when the delay ends",
+    hint: "Update when playback ends or switches files",
   },
   {
     key: "update_require_focus",
     label: "Media player must be in focus",
-    hint: "The delay only counts down while the player is the active window",
   },
 ];
 
-// Settings -> Playback: what detection reacts to and when it opens Now Playing
-const DETECTION_OPTIONS: {
-  key: "recognition_library_only" | "now_playing_focus_matched" | "now_playing_focus_unmatched";
+// Settings -> Playback: "Open Now Playing when…"
+const NOW_PLAYING_FOCUS_OPTIONS: {
+  key: "now_playing_focus_matched" | "now_playing_focus_unmatched";
   label: string;
-  hint: string;
 }[] = [
-  {
-    key: "recognition_library_only",
-    label: "Only detect files in my library",
-    hint: "Videos outside your library folders (and streams) are ignored, as if nothing were playing",
-  },
-  {
-    key: "now_playing_focus_matched",
-    label: "Open Now Playing when an episode is recognized",
-    hint: "Otherwise the playing banner shows on the tab you're on",
-  },
-  {
-    key: "now_playing_focus_unmatched",
-    label: "Open Now Playing when a file isn't recognized",
-    hint: "So you can link it to an anime right away",
-  },
+  { key: "now_playing_focus_matched", label: "An episode is recognized" },
+  { key: "now_playing_focus_unmatched", label: "A file isn't recognized" },
+];
+
+const UPDATE_MODES: { id: AppSettings["update_mode"]; label: string }[] = [
+  { id: "auto", label: "Automatic" },
+  { id: "manual", label: "Manual" },
+];
+
+const OPEN_ANIME_OPTIONS: { id: AppSettings["open_anime_with"]; label: string }[] = [
+  { id: "page", label: "Anime page" },
+  { id: "quick_edit", label: "Quick edit" },
 ];
 
 // Settings -> About: what Tora is built on (links open in the browser)
@@ -224,6 +201,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     await onUpdateSettings({ ...settings, players: settings.players.map((p) => ({ ...p, enabled })) });
   };
 
+  const browseMediaPlayer = async () => {
+    const picked = await open({
+      multiple: false,
+      directory: false,
+      title: "Select your media player",
+      filters: [{ name: "Applications", extensions: ["exe"] }],
+    });
+    if (picked && typeof picked === "string") await onUpdateSettings({ ...settings, custom_media_player_path: picked });
+  };
+
   return (
     <div className="flex h-full min-h-0">
       {/* Section Navigation */}
@@ -247,125 +234,79 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       <div key={section} className="flex-1 min-w-0 overflow-y-auto [scrollbar-gutter:stable] p-6 space-y-6">
         {section === "appearance" && (
           <>
-            {/* Theme & Aesthetic Section */}
-            <div className="bg-bg-secondary border border-border-subtle rounded-2xl p-5 space-y-5">
-              <div>
-                <h2 className="text-base font-bold text-text-primary flex items-center gap-2">
-                  <Palette className="w-5 h-5 text-accent" />
-                  Appearance
-                </h2>
-              </div>
-
-              {/* Theme Presets Grid */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            <SettingsCard icon={Palette} title="Theme">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5 py-3">
                 {THEME_PRESETS.map((preset) => {
                   const active = settings.theme === preset.id;
                   return (
                     <button
                       key={preset.id}
-                      onClick={() =>
-                        handleSelectTheme(preset.id, preset.defaultAccent)
-                      }
-                      className={`text-left p-3.5 rounded-xl border transition flex items-start gap-3 ${active
+                      onClick={() => handleSelectTheme(preset.id, preset.defaultAccent)}
+                      className={`text-left px-3 py-2.5 rounded-xl border transition flex items-center gap-3 ${active
                         ? "border-accent bg-accent/10 shadow-sm"
                         : "border-border-subtle bg-bg-primary hover:border-text-muted"
                         }`}
                     >
                       <div
-                        className="w-10 h-10 rounded-lg border border-white/15 shrink-0 flex items-center justify-center shadow-inner"
+                        className="w-8 h-8 rounded-lg border border-white/15 shrink-0 flex items-center justify-center shadow-inner"
                         style={{ backgroundColor: preset.previewBg }}
                       >
-                        <div
-                          className="w-4 h-4 rounded-full"
-                          style={{ backgroundColor: preset.defaultAccent }}
-                        />
+                        <div className="w-3.5 h-3.5 rounded-full" style={{ backgroundColor: preset.defaultAccent }} />
                       </div>
-                      <div className="min-w-0">
-                        <div className="text-xs font-bold text-text-primary flex items-center gap-1.5">
-                          <span>{preset.name}</span>
-                          {active && (
-                            <CheckCircle2 className="w-3.5 h-3.5 text-accent" />
-                          )}
-                        </div>
-                        <p className="text-[11px] text-text-muted line-clamp-2 mt-0.5">
-                          {preset.description}
-                        </p>
-                      </div>
+                      <span className="min-w-0 flex-1 truncate text-xs font-bold text-text-primary">{preset.name}</span>
+                      {active && <CheckCircle2 className="w-3.5 h-3.5 text-accent shrink-0" />}
                     </button>
                   );
                 })}
               </div>
 
-              {/* Title Language */}
-              <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-border-subtle">
-                <div>
-                  <div className="text-xs font-semibold text-text-secondary flex items-center gap-1.5">
-                    <Languages className="w-3.5 h-3.5 text-accent" />
-                    Title language
-                  </div>
-                  <p className="text-[11px] text-text-muted mt-0.5">
-                    Used everywhere in Tora. Anime without an English or Native title show Romaji; torrent searches always use Romaji.
-                  </p>
+              <SettingRow label="Accent color">
+                <div className="flex flex-wrap items-center gap-2">
+                  {ACCENT_SWATCHES.map((sw) => {
+                    const active = settings.accent_color.toLowerCase() === sw.hex.toLowerCase();
+                    return (
+                      <button
+                        key={sw.hex}
+                        onClick={() => handleSelectAccent(sw.hex)}
+                        title={sw.name}
+                        aria-label={sw.name}
+                        aria-pressed={active}
+                        className={`w-6 h-6 rounded-full transition ring-offset-2 ring-offset-bg-secondary ${active ? "ring-2 ring-text-primary" : "hover:scale-110"
+                          }`}
+                        style={{ backgroundColor: sw.hex }}
+                      />
+                    );
+                  })}
+                  <span className="w-px h-5 bg-border-subtle mx-1" />
+                  <input
+                    type="color"
+                    title="Custom color"
+                    aria-label="Custom color"
+                    value={settings.accent_color}
+                    onChange={(e) => handleSelectAccent(e.target.value)}
+                    className={`w-7 h-7 rounded-md cursor-pointer bg-transparent border-0 p-0 ring-offset-2 ring-offset-bg-secondary ${ACCENT_SWATCHES.some((sw) => sw.hex.toLowerCase() === settings.accent_color.toLowerCase())
+                      ? ""
+                      : "ring-2 ring-text-primary"
+                      }`}
+                  />
                 </div>
-                <div className="flex items-center bg-bg-primary p-1 rounded-xl border border-border-subtle">
-                  {TITLE_LANGUAGES.map((l) => (
-                    <button
-                      key={l.id}
-                      onClick={() => onUpdateSettings({ ...settings, title_language: l.id })}
-                      className={`px-3 py-1 rounded-lg text-xs font-semibold transition ${(settings.title_language ?? "romaji") === l.id
-                          ? "bg-accent text-white"
-                          : "text-text-secondary hover:text-text-primary"
-                        }`}
-                    >
-                      {l.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
+              </SettingRow>
+            </SettingsCard>
 
-              {/* What opens an anime */}
-              <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-border-subtle">
-                <div>
-                  <div className="text-xs font-semibold text-text-secondary flex items-center gap-1.5">
-                    <MousePointerClick className="w-3.5 h-3.5 text-accent" />
-                    Double-click and Enter open
-                  </div>
-                  <p className="text-[11px] text-text-muted mt-0.5">
-                    In the watchlist, Seasons, Search, Schedule and the palette. Space and Ctrl+click open the other one;
-                    Torrents, History and Stats always open quick edit.
-                  </p>
-                </div>
-                <div className="flex items-center bg-bg-primary p-1 rounded-xl border border-border-subtle">
-                  {(
-                    [
-                      { id: "page", label: "Anime page" },
-                      { id: "quick_edit", label: "Quick edit" },
-                    ] as const
-                  ).map((o) => (
-                    <button
-                      key={o.id}
-                      onClick={() => onUpdateSettings({ ...settings, open_anime_with: o.id })}
-                      className={`px-3 py-1 rounded-lg text-xs font-semibold transition ${(settings.open_anime_with ?? "page") === o.id
-                          ? "bg-accent text-white"
-                          : "text-text-secondary hover:text-text-primary"
-                        }`}
-                    >
-                      {o.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
+            <SettingsCard icon={Type} title="Display">
+              <SettingRow icon={Languages} label="Title language" hint="Falls back to Romaji; torrent searches always use Romaji.">
+                <Segmented
+                  value={settings.title_language ?? "romaji"}
+                  options={TITLE_LANGUAGES}
+                  onChange={(id) => onUpdateSettings({ ...settings, title_language: id })}
+                />
+              </SettingRow>
 
-              <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-border-subtle">
-                <div>
-                  <div className="text-xs font-semibold text-text-secondary flex items-center gap-1.5">
-                    <CalendarDays className="w-3.5 h-3.5 text-accent" />
-                    Date format
-                  </div>
-                  <p className="text-[11px] text-text-muted mt-0.5">
-                    Auto follows your Windows region{systemDateLocale() ? ` (${systemDateLocale()})` : ""}, including its month names.
-                  </p>
-                </div>
+              <SettingRow
+                icon={CalendarDays}
+                label="Date format"
+                hint={`Auto uses your Windows region${systemDateLocale() ? ` (${systemDateLocale()})` : ""}.`}
+              >
                 <select
                   value={settings.date_locale ?? ""}
                   onChange={(e) => onUpdateSettings({ ...settings, date_locale: e.target.value })}
@@ -377,67 +318,34 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     </option>
                   ))}
                 </select>
-              </div>
+              </SettingRow>
 
-              <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-border-subtle">
-                <div>
-                  <div className="text-xs font-semibold text-text-secondary flex items-center gap-1.5">
-                    <Clock className="w-3.5 h-3.5 text-accent" />
-                    Clock
-                  </div>
-                  <p className="text-[11px] text-text-muted mt-0.5">Auto uses the clock of the date format above.</p>
-                </div>
-                <div className="flex items-center bg-bg-primary p-1 rounded-xl border border-border-subtle">
-                  {TIME_FORMATS.map((f) => (
-                    <button
-                      key={f.id}
-                      onClick={() => onUpdateSettings({ ...settings, time_format: f.id })}
-                      className={`px-3 py-1 rounded-lg text-xs font-semibold transition ${(settings.time_format ?? "auto") === f.id
-                          ? "bg-accent text-white"
-                          : "text-text-secondary hover:text-text-primary"
-                        }`}
-                    >
-                      {f.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
+              <SettingRow icon={Clock} label="Clock">
+                <Segmented
+                  value={settings.time_format ?? "auto"}
+                  options={TIME_FORMATS}
+                  onChange={(id) => onUpdateSettings({ ...settings, time_format: id })}
+                />
+              </SettingRow>
 
-              {/* Accent Swatches */}
-              <div className="flex flex-wrap items-center justify-between gap-4 pt-2 border-t border-border-subtle">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-xs font-semibold text-text-secondary mr-2">
-                    Accent Color:
-                  </span>
-                  {ACCENT_SWATCHES.map((sw) => (
-                    <button
-                      key={sw.hex}
-                      onClick={() => handleSelectAccent(sw.hex)}
-                      className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs border transition ${settings.accent_color.toLowerCase() === sw.hex.toLowerCase()
-                        ? "border-text-primary bg-bg-tertiary font-semibold text-text-primary"
-                        : "border-border-subtle bg-bg-primary text-text-secondary"
-                        }`}
-                    >
-                      <span
-                        className="w-3 h-3 rounded-full"
-                        style={{ backgroundColor: sw.hex }}
-                      />
-                      {sw.name}
-                    </button>
-                  ))}
-                </div>
+              <ToggleRow
+                icon={Hourglass}
+                label="Skip openings and endings in time left"
+                hint="Subtracts 3 min per full-length episode"
+                checked={settings.skip_op_ed}
+                onChange={(checked) => onUpdateSettings({ ...settings, skip_op_ed: checked })}
+              />
+            </SettingsCard>
 
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-text-secondary">Custom:</span>
-                  <input
-                    type="color"
-                    value={settings.accent_color}
-                    onChange={(e) => handleSelectAccent(e.target.value)}
-                    className="w-8 h-8 rounded cursor-pointer bg-transparent border-0"
-                  />
-                </div>
-              </div>
-            </div>
+            <SettingsCard icon={MousePointerClick} title="Behavior">
+              <SettingRow label="Double-click and Enter open" hint="Space or Ctrl+click opens the other view.">
+                <Segmented
+                  value={settings.open_anime_with ?? "page"}
+                  options={OPEN_ANIME_OPTIONS}
+                  onChange={(id) => onUpdateSettings({ ...settings, open_anime_with: id })}
+                />
+              </SettingRow>
+            </SettingsCard>
           </>
         )}
 
@@ -461,143 +369,105 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
         {section === "playback" && (
           <>
-            {/* Playback & Recognition Timing */}
-            <div className="bg-bg-secondary border border-border-subtle rounded-2xl p-5 space-y-4">
-              <h2 className="text-sm font-bold text-text-primary flex items-center gap-2">
-                <Tv className="w-4 h-4 text-accent" />
-                Playback & Recognition Preferences
-              </h2>
+            <SettingsCard icon={ListChecks} title="List updates">
+              <SettingRow label="Update mode" hint="Manual: confirm in Now Playing">
+                <Segmented
+                  value={settings.update_mode}
+                  options={UPDATE_MODES}
+                  onChange={(id) => onUpdateSettings({ ...settings, update_mode: id })}
+                />
+              </SettingRow>
 
-              <div className="space-y-3 text-xs">
-                <div>
-                  <label className="block text-[11px] text-text-muted mb-1">List Update</label>
-                  <select
-                    value={settings.update_mode}
-                    onChange={(e) =>
-                      onUpdateSettings({ ...settings, update_mode: e.target.value as AppSettings["update_mode"] })
-                    }
-                    className="w-full px-3 py-2 rounded-xl bg-bg-primary border border-border-subtle text-text-primary cursor-pointer"
-                  >
-                    <option value="auto">Automatic: update the list after the delay</option>
-                    <option value="manual">Manual: offer an Update button in Now Playing</option>
-                  </select>
-                </div>
+              <SettingRow label="Update after" indent disabled={isManualUpdate}>
+                <input
+                  type="number"
+                  min={2}
+                  max={600}
+                  disabled={isManualUpdate}
+                  value={settings.recognition_delay_seconds}
+                  onChange={(e) =>
+                    onUpdateSettings({
+                      ...settings,
+                      recognition_delay_seconds: Math.max(2, Number(e.target.value)),
+                    })
+                  }
+                  className="w-20 px-2.5 py-1.5 rounded-xl bg-bg-primary border border-border-subtle font-mono text-xs text-text-primary text-right focus:outline-none focus:border-accent disabled:cursor-not-allowed"
+                />
+                <span className="text-xs text-text-secondary">seconds</span>
+              </SettingRow>
 
-                <div className={isManualUpdate ? "opacity-50" : ""}>
-                  <label className="block text-[11px] text-text-muted mb-1">
-                    Delay Before Updating Progress (Seconds)
-                  </label>
-                  <input
-                    type="number"
-                    min={2}
-                    max={600}
-                    disabled={isManualUpdate}
-                    value={settings.recognition_delay_seconds}
-                    onChange={(e) =>
-                      onUpdateSettings({
-                        ...settings,
-                        recognition_delay_seconds: Math.max(
-                          2,
-                          Number(e.target.value)
-                        ),
-                      })
-                    }
-                    className="w-full px-3 py-2 rounded-xl bg-bg-primary border border-border-subtle font-mono text-text-primary disabled:cursor-not-allowed"
-                  />
-                </div>
+              {UPDATE_OPTIONS.map(({ key, label, hint }) => (
+                <ToggleRow
+                  key={key}
+                  label={label}
+                  hint={hint}
+                  indent
+                  disabled={isManualUpdate}
+                  checked={settings[key]}
+                  onChange={(checked) => onUpdateSettings({ ...settings, [key]: checked })}
+                />
+              ))}
+            </SettingsCard>
 
-                {UPDATE_OPTIONS.map(({ key, label, hint }) => (
-                  <label
+            <SettingsCard icon={Radar} title="Detection">
+              <ToggleRow
+                label="Detect media players"
+                checked={settings.recognition_enabled}
+                onChange={(checked) => onUpdateSettings({ ...settings, recognition_enabled: checked })}
+              />
+              <ToggleRow
+                label="Only detect files in my library"
+                hint="Ignore streams and videos outside library folders"
+                indent
+                disabled={!settings.recognition_enabled}
+                checked={settings.recognition_library_only}
+                onChange={(checked) => onUpdateSettings({ ...settings, recognition_library_only: checked })}
+              />
+              <SettingGroup label="Open Now Playing when…" indent disabled={!settings.recognition_enabled}>
+                {NOW_PLAYING_FOCUS_OPTIONS.map(({ key, label }) => (
+                  <ToggleRow
                     key={key}
-                    className={`flex items-start gap-2.5 ${isManualUpdate ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}`}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={settings[key]}
-                      disabled={isManualUpdate}
-                      onChange={(e) => onUpdateSettings({ ...settings, [key]: e.target.checked })}
-                      className="rounded accent-accent w-4 h-4 mt-0.5 cursor-pointer disabled:cursor-not-allowed"
-                    />
-                    <span>
-                      <span className="font-semibold text-text-primary">{label}</span>
-                      <span className="block text-[11px] text-text-muted">{hint}</span>
-                    </span>
-                  </label>
-                ))}
-
-                {DETECTION_OPTIONS.map(({ key, label, hint }) => (
-                  <label key={key} className="flex items-start gap-2.5 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={settings[key]}
-                      onChange={(e) => onUpdateSettings({ ...settings, [key]: e.target.checked })}
-                      className="rounded accent-accent w-4 h-4 mt-0.5 cursor-pointer"
-                    />
-                    <span>
-                      <span className="font-semibold text-text-primary">{label}</span>
-                      <span className="block text-[11px] text-text-muted">{hint}</span>
-                    </span>
-                  </label>
-                ))}
-
-                <label className="flex items-start gap-2.5 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={settings.discord_presence_enabled}
-                    onChange={(e) => onUpdateSettings({ ...settings, discord_presence_enabled: e.target.checked })}
-                    className="rounded accent-accent w-4 h-4 mt-0.5 cursor-pointer"
+                    label={label}
+                    compact
+                    disabled={!settings.recognition_enabled}
+                    checked={settings[key]}
+                    onChange={(checked) => onUpdateSettings({ ...settings, [key]: checked })}
                   />
-                  <span>
-                    <span className="font-semibold text-text-primary">Discord Rich Presence</span>
-                    <span className="block text-[11px] text-text-muted">
-                      Show the anime and episode you're watching on your Discord profile
-                    </span>
-                  </span>
-                </label>
+                ))}
+              </SettingGroup>
+            </SettingsCard>
 
-                <label className="flex items-start gap-2.5 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={settings.skip_op_ed}
-                    onChange={(e) => onUpdateSettings({ ...settings, skip_op_ed: e.target.checked })}
-                    className="rounded accent-accent w-4 h-4 mt-0.5 cursor-pointer"
-                  />
-                  <span>
-                    <span className="font-semibold text-text-primary">Skip openings and endings in time left</span>
-                    <span className="block text-[11px] text-text-muted">
-                      Time-left estimates leave out ~3 min per episode (episodes of 20 min or more)
-                    </span>
-                  </span>
-                </label>
-
-                <div>
-                  <label className="block text-[11px] text-text-muted mb-1">
-                    Custom Media Player Executable (Blank = System Default)
-                  </label>
+            <SettingsCard icon={Play} title="While playing">
+              <ToggleRow
+                label="Discord Rich Presence"
+                checked={settings.discord_presence_enabled}
+                onChange={(checked) => onUpdateSettings({ ...settings, discord_presence_enabled: checked })}
+              />
+              <SettingRow label="Open episodes with" stacked>
+                <div className="flex items-center gap-2">
                   <input
                     type="text"
                     value={settings.custom_media_player_path}
-                    onChange={(e) =>
-                      onUpdateSettings({
-                        ...settings,
-                        custom_media_player_path: e.target.value,
-                      })
-                    }
-                    placeholder="e.g. C:\Program Files\mpv\mpv.exe"
-                    className="w-full px-3 py-2 rounded-xl bg-bg-primary border border-border-subtle font-mono text-text-primary"
+                    onChange={(e) => onUpdateSettings({ ...settings, custom_media_player_path: e.target.value })}
+                    placeholder="System default"
+                    className="flex-1 min-w-0 px-3 py-2 rounded-xl bg-bg-primary border border-border-subtle font-mono text-xs text-text-primary focus:outline-none focus:border-accent"
                   />
+                  <button
+                    onClick={() => void browseMediaPlayer()}
+                    className="px-3 py-2 rounded-xl bg-bg-tertiary hover:bg-bg-elevated border border-border-subtle text-text-primary text-xs font-semibold flex items-center gap-1.5 shrink-0"
+                  >
+                    <FolderOpen className="w-3.5 h-3.5" /> Browse…
+                  </button>
                 </div>
-              </div>
-            </div>
+              </SettingRow>
+            </SettingsCard>
 
             {/* Anisthesia Media Players Registry */}
-            <div className="bg-bg-secondary border border-border-subtle rounded-2xl p-5 space-y-3">
-              <div className="flex items-center justify-between gap-3">
-                <h2 className="text-sm font-bold text-text-primary flex items-center gap-2">
-                  <Cpu className="w-4 h-4 text-accent" />
-                  Supported Media Players ({settings.players.filter((p) => p.enabled).length}/{settings.players.length})
-                </h2>
-                <div className="flex items-center gap-1.5">
+            <SettingsCard
+              icon={Cpu}
+              title={`Supported Media Players (${settings.players.filter((p) => p.enabled).length}/${settings.players.length})`}
+              actions={
+                <>
                   <button
                     onClick={() => handleSetAllPlayers(true)}
                     disabled={settings.players.every((p) => p.enabled)}
@@ -612,33 +482,21 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   >
                     Deselect all
                   </button>
-                </div>
-              </div>
-
-              <div className="divide-y divide-border-subtle max-h-96 overflow-y-auto pr-1">
+                </>
+              }
+            >
+              <div className="divide-y divide-border-subtle max-h-96 overflow-y-auto pr-1 mb-2">
                 {settings.players.map((player) => (
-                  <div
+                  <ToggleRow
                     key={player.id}
-                    className="py-2.5 flex items-center justify-between gap-3 text-xs"
-                  >
-                    <div>
-                      <div className="font-semibold text-text-primary">
-                        {player.name}
-                      </div>
-                      <div className="font-mono text-[11px] text-text-muted">
-                        {player.executables.join(", ")}
-                      </div>
-                    </div>
-                    <input
-                      type="checkbox"
-                      checked={player.enabled}
-                      onChange={() => handleTogglePlayer(player.id)}
-                      className="rounded accent-accent w-4 h-4 cursor-pointer"
-                    />
-                  </div>
+                    label={player.name}
+                    hint={<span className="font-mono">{player.executables.join(", ")}</span>}
+                    checked={player.enabled}
+                    onChange={() => handleTogglePlayer(player.id)}
+                  />
                 ))}
               </div>
-            </div>
+            </SettingsCard>
           </>
         )}
 
@@ -647,35 +505,18 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         )}
 
         {section === "system" && (
-          <div className="bg-bg-secondary border border-border-subtle rounded-2xl p-5 space-y-4">
-            <h2 className="text-sm font-bold text-text-primary flex items-center gap-2">
-              <Monitor className="w-4 h-4 text-accent" />
-              Tray & Startup
-            </h2>
-            <div className="space-y-3 text-xs">
-              {SYSTEM_OPTIONS.map(({ key, label, hint, needs }) => {
-                const disabled = needs.some((k) => !settings[k]);
-                return (
-                  <label
-                    key={key}
-                    className={`flex items-start gap-2.5 ${needs.length ? "pl-6" : ""} ${disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}`}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={settings[key]}
-                      disabled={disabled}
-                      onChange={(e) => onUpdateSettings({ ...settings, [key]: e.target.checked })}
-                      className="rounded accent-accent w-4 h-4 mt-0.5 cursor-pointer disabled:cursor-not-allowed"
-                    />
-                    <span>
-                      <span className="font-semibold text-text-primary">{label}</span>
-                      <span className="block text-[11px] text-text-muted">{hint}</span>
-                    </span>
-                  </label>
-                );
-              })}
-            </div>
-          </div>
+          <SettingsCard icon={Monitor} title="Tray & Startup">
+            {SYSTEM_OPTIONS.map(({ key, label, needs }) => (
+              <ToggleRow
+                key={key}
+                label={label}
+                indent={needs.length > 0}
+                disabled={needs.some((k) => !settings[k])}
+                checked={settings[key]}
+                onChange={(checked) => onUpdateSettings({ ...settings, [key]: checked })}
+              />
+            ))}
+          </SettingsCard>
         )}
 
         {section === "diagnostics" && (
@@ -704,13 +545,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   );
 };
 
-const MEMORY_GROUPS: [ProcessMemory["kind"], string, string][] = [
-  ["core", "Core", "tora.exe: library, matcher, sync, torrents"],
-  ["renderer", "Renderer", "Page: JS heap, DOM, decoded images"],
-  ["gpu", "GPU", "Compositor layers and textures"],
-  ["browser", "WebView browser", "WebView2 host process"],
-  ["utility", "Utility", "Network, storage and other services"],
-  ["other", "Other", "Other WebView2 processes"],
+const MEMORY_GROUPS: [ProcessMemory["kind"], string][] = [
+  ["core", "Core"],
+  ["renderer", "Renderer"],
+  ["gpu", "GPU"],
+  ["browser", "WebView browser"],
+  ["utility", "Utility"],
+  ["other", "Other"],
 ];
 
 /** Chromium's non-standard JS heap counters (WebView2 has them) */
@@ -749,9 +590,9 @@ const MemoryPanel: React.FC = () => {
 
   const sum = (list: ProcessMemory[], key: "private_working_set" | "private_bytes") =>
     list.reduce((n, p) => n + p[key], 0);
-  const groups = MEMORY_GROUPS.map(([kind, label, hint]) => {
+  const groups = MEMORY_GROUPS.map(([kind, label]) => {
     const list = processes?.filter((p) => p.kind === kind) ?? [];
-    return { kind, label: list.length > 1 ? `${label} (${list.length})` : label, hint, list };
+    return { kind, label: list.length > 1 ? `${label} (${list.length})` : label, list };
   }).filter((g) => g.list.length > 0);
 
   return (
@@ -767,10 +608,6 @@ const MemoryPanel: React.FC = () => {
           Refresh
         </button>
       </div>
-      <p className="text-[11px] text-text-muted">
-        Memory is what Task Manager shows for each process (private working set); committed includes pages
-        Windows moved to disk.
-      </p>
       {processes && (
         <table className="w-full text-xs">
           <thead>
@@ -782,10 +619,8 @@ const MemoryPanel: React.FC = () => {
           </thead>
           <tbody className="text-text-primary">
             {groups.map((g) => (
-              <tr key={g.kind} title={`${g.hint}\nPID ${g.list.map((p) => p.pid).join(", ")}`}>
-                <td className="py-1">
-                  {g.label} <span className="text-text-muted">· {g.hint}</span>
-                </td>
+              <tr key={g.kind} title={`PID ${g.list.map((p) => p.pid).join(", ")}`}>
+                <td className="py-1">{g.label}</td>
                 <td className="py-1 text-right font-mono">{formatBytes(sum(g.list, "private_working_set"))}</td>
                 <td className="py-1 text-right font-mono text-text-secondary">
                   {formatBytes(sum(g.list, "private_bytes"))}
@@ -836,7 +671,7 @@ const LogsPanel: React.FC = () => {
       <h3 className="text-sm font-bold text-text-primary">Logs</h3>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
-          <div className="text-[11px] text-text-muted">Log folder (tora.log, last 5 kept, 5 MB each)</div>
+          <div className="text-[11px] text-text-muted">Log folder</div>
           <div className="text-xs font-mono text-text-primary break-all">{info?.log_dir ?? "..."}</div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
@@ -905,7 +740,7 @@ const AboutSection: React.FC<{
             Tora <span className="text-sm font-mono font-semibold text-text-muted">v{version ?? "..."}</span>
           </h2>
           <p className="text-xs text-text-secondary mt-0.5">
-            A fast anime library manager and episode tracker for Windows.
+            Anime library manager and episode tracker
           </p>
           {tauriVersion && <p className="text-[11px] text-text-muted mt-1">Tauri {tauriVersion}</p>}
         </div>
@@ -915,23 +750,13 @@ const AboutSection: React.FC<{
         <h3 className="text-sm font-bold text-text-primary">Updates</h3>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="min-w-0 space-y-1">
-            <div className="text-[11px] text-text-muted">
-              App updates come from{" "}
-              <button
-                onClick={() => openUrl("https://github.com/Laesx/Tora/releases")}
-                className="text-accent hover:underline cursor-pointer"
-              >
-                GitHub releases
-              </button>
-              ; episode relations from erengy/anime-relations.
-            </div>
             <div className="text-xs text-text-primary">
               Anime relations{" "}
               <span className="font-mono">{relations?.last_modified || "..."}</span>
               {relations && (
                 <span className="text-[11px] text-text-muted">
                   {" "}
-                  · {relations.rule_count} rules · {relations.source === "downloaded" ? "downloaded" : "built in"}
+                  · {relations.rule_count} rules
                 </span>
               )}
             </div>
@@ -954,15 +779,14 @@ const AboutSection: React.FC<{
             </button>
           </div>
         </div>
-        <label className="flex items-center gap-2 text-xs text-text-secondary cursor-pointer">
-          <input
-            type="checkbox"
+        <div className="border-t border-border-subtle pt-3">
+          <ToggleRow
+            flush
+            label="Check for updates on startup"
             checked={settings.check_updates_on_startup}
-            onChange={(e) => void onUpdateSettings({ ...settings, check_updates_on_startup: e.target.checked })}
-            className="rounded accent-accent"
+            onChange={(checked) => void onUpdateSettings({ ...settings, check_updates_on_startup: checked })}
           />
-          Check for updates on startup (app and anime relations)
-        </label>
+        </div>
       </div>
 
       <div className="bg-bg-secondary border border-border-subtle rounded-2xl p-5 space-y-3">

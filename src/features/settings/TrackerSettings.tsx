@@ -36,8 +36,7 @@ export const TrackerSettings: React.FC<{ onSignOut: () => void; onOpenProfile: (
           Accounts
         </h2>
         <p className="text-xs text-text-secondary mt-0.5">
-          Your list syncs with the account in use. Each account keeps its own list, history and settings on this
-          computer, so switching back finds everything as it was.
+          Each account keeps its own local list and history on this computer.
         </p>
       </div>
 
@@ -78,7 +77,7 @@ export const TrackerSettings: React.FC<{ onSignOut: () => void; onOpenProfile: (
           </div>
         ) : (
           <div className="px-3 py-3 bg-bg-primary text-[11px] text-text-muted">
-            Not signed in{activeTracker ? ` to ${activeTracker.name}` : ""}: add an account below to sync your list.
+            No accounts connected.
           </div>
         )}
 
@@ -106,7 +105,6 @@ export const TrackerSettings: React.FC<{ onSignOut: () => void; onOpenProfile: (
                 <button
                   onClick={() => void signIn(a.tracker)}
                   disabled={busy !== null}
-                  title={`Signs in whoever is logged in on ${trackerName(a.tracker)} in your browser`}
                   className={rowButton}
                 >
                   <LogIn className="w-3.5 h-3.5" />
@@ -142,8 +140,7 @@ export const TrackerSettings: React.FC<{ onSignOut: () => void; onOpenProfile: (
           ))}
         </div>
         <p className="text-[11px] text-text-muted leading-relaxed">
-          Signs in whoever is logged in on the tracker's site in your browser: log out there first to add another
-          account of the same tracker.
+          Uses your active browser session - log out in your browser first to add another account.
         </p>
       </div>
 
@@ -206,17 +203,15 @@ const RemoveAccountModal: React.FC<{
         </div>
 
         <p className="text-xs text-text-secondary leading-relaxed">
-          Deletes this account's list, watch history, imported activity, cached anime pages and saved sign-in from
-          Tora, along with what you set only here (folder links, aliases, pinned releases). Your list on{" "}
-          {trackerName} isn't touched: signing in again downloads it. This can't be undone.
+          Removes this account's local list, history, and settings from this computer. Your {trackerName} list is not
+          affected.
         </p>
 
         {account.unsent > 0 && (
           <p className="flex gap-2 text-xs text-rose-300 bg-rose-500/10 border border-rose-500/30 rounded-xl px-3 py-2 leading-relaxed">
             <TriangleAlert className="w-4 h-4 shrink-0 mt-px" />
-            {plural(account.unsent, "change")} {account.unsent === 1 ? "hasn't" : "haven't"} been sent to{" "}
-            {trackerName} yet and will be lost. {account.signed_in ? "Switch to" : "Sign in to"} this account first
-            to send {account.unsent === 1 ? "it" : "them"}.
+            {plural(account.unsent, "unsent change")} will be lost. {account.signed_in ? "Switch to" : "Sign in to"} this
+            account first to sync.
           </p>
         )}
 

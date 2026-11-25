@@ -25,7 +25,7 @@ static PENDING: Mutex<Option<PendingSignIn>> = Mutex::new(None);
 fn random_text(len: usize) -> Result<String, String> {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut bytes = vec![0u8; len];
-    getrandom::getrandom(&mut bytes).map_err(|e| format!("No randomness for the sign-in: {}", e))?;
+    getrandom::getrandom(&mut bytes).map_err(|e| format!("Failed to generate sign-in state: {}", e))?;
     Ok(bytes.iter().map(|b| ALPHABET[(b & 63) as usize] as char).collect())
 }
 

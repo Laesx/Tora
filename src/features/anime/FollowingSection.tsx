@@ -147,7 +147,7 @@ const FollowingRow: React.FC<{ entry: FollowingEntry; anime: AnimeEntry; pinned:
         )}
         <button
           onClick={() => togglePinnedUser(e.user_id)}
-          title={pinned ? "Unpin" : "Pin: always listed first, on every anime (this device)"}
+          title={pinned ? "Unpin" : "Pin to top"}
           className="p-1 rounded shrink-0 text-text-muted hover:text-accent opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition"
         >
           <PinIcon className="w-3.5 h-3.5" />

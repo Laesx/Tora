@@ -32,7 +32,6 @@ export const SynopsisSection: React.FC<{ synopsis: string }> = ({ synopsis }) =>
     <PageSection title="Synopsis">
       <div
         onClick={toggle}
-        title={overflows ? (open ? "Click to collapse" : "Click to read all") : undefined}
         className={`relative ${overflows ? "cursor-pointer" : ""}`}
       >
         <p

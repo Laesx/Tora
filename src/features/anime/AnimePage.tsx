@@ -218,7 +218,7 @@ export const AnimePage: React.FC<AnimePageProps> = ({
             </div>
             <button
               onClick={() => openSaga(anime)}
-              title="Every anime of this franchise as a graph"
+              title="View franchise graph"
               className="shrink-0 w-20 flex flex-col items-center justify-center gap-1 rounded-xl border border-dashed border-border-subtle text-[11px] font-semibold text-text-secondary hover:border-accent hover:text-accent transition"
             >
               <Network className="w-4 h-4" />

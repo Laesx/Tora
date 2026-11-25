@@ -55,7 +55,7 @@ const JIKAN_PAUSE: Duration = Duration::from_secs(5 * 60);
 /// Staff kept per anime (like AniList's first page); the tracker's page has the rest.
 const STAFF_KEPT: usize = 25;
 /// Why the features from Jikan are only partly supported.
-const JIKAN_NOTE: &str = "From Jikan, an unofficial MyAnimeList API: missing while it is down";
+const JIKAN_NOTE: &str = "Via Jikan (unofficial MAL API); unavailable when Jikan is offline";
 /// A related / recommended anime's card fields (nested fields work one level deep).
 const CARD_FIELDS: &str = "id,title,main_picture,alternative_titles,media_type,status,num_episodes,start_season,start_date";
 

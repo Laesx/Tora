@@ -22,14 +22,14 @@ export const trackerAnimeUrl = (links: TrackerLinks | null | undefined, anime: A
 
 /** Every feature only some trackers have, in the order Settings → Tracker lists them. */
 export const TRACKER_FEATURES: { id: TrackerFeature; label: string; where: string }[] = [
-  { id: "airing_schedule", label: "Airing schedule", where: "The Schedule tab" },
+  { id: "airing_schedule", label: "Airing schedule", where: "Schedule tab" },
   { id: "next_episode", label: "Next episode countdown", where: "Airing dots, Now Playing, Stats" },
   { id: "characters", label: "Characters & voice actors", where: "Anime page" },
   { id: "staff", label: "Staff", where: "Anime page" },
   { id: "recommendations", label: "Recommendations", where: "Anime page" },
-  { id: "source_material", label: "Source manga / novel", where: "Anime page, saga (“Based on”)" },
+  { id: "source_material", label: "Source manga / novel", where: "Anime page, Saga" },
   { id: "custom_lists", label: "Custom lists", where: "Anime List, quick menus, Now Playing" },
-  { id: "following", label: "Following", where: "Anime page: people you follow" },
+  { id: "following", label: "Following", where: "Anime page" },
   { id: "activity_history", label: "Activity import", where: "History, Stats" },
 ];
 

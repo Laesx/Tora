@@ -29,9 +29,9 @@ export type ViewMode = AppSettings["view_mode"];
 
 /** In switcher order; `key` is the Alt shortcut (useGlobalShortcuts) */
 const VIEW_MODES: { id: ViewMode; icon: LucideIcon; title: string; key: string }[] = [
-  { id: "grid", icon: LayoutGrid, title: "Poster Grid View", key: "Q" },
-  { id: "compact", icon: Rows, title: "Detailed Cards View", key: "W" },
-  { id: "table", icon: List, title: "Taiga Classic Dense Table View", key: "E" },
+  { id: "grid", icon: LayoutGrid, title: "Grid view", key: "Q" },
+  { id: "compact", icon: Rows, title: "Card view", key: "W" },
+  { id: "table", icon: List, title: "Table view", key: "E" },
 ];
 
 interface WatchlistViewProps {
@@ -175,7 +175,6 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
               // Esc / ↓ / Enter are handled by the global shortcuts (useGlobalShortcuts)
               onChange={(e) => w.setSearchQuery(e.target.value)}
               placeholder="Search all lists..."
-              title="Searches every list; results are grouped by status (Esc clears)"
               className="pl-8 pr-7 py-1.5 rounded-xl bg-bg-secondary border border-border-subtle text-xs text-text-primary focus:outline-none focus:border-accent w-56"
             />
             {w.searchQuery && (
@@ -197,7 +196,7 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
               value={w.sortKey}
               onChange={(e) => w.setSort(e.target.value as WatchlistSortKey)}
               className="px-2.5 py-1.5 rounded-xl bg-bg-secondary border border-border-subtle text-xs text-text-primary"
-              title="Sort (with a search: best match first, then this)"
+              title="Sort by"
             >
               {SORT_GROUPS.map((group) => (
                 <optgroup key={group} label={group}>
@@ -212,7 +211,7 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
             <button
               onClick={() => w.setSort(w.sortKey, w.sortDir === "asc" ? "desc" : "asc")}
               className="p-2 rounded-xl bg-bg-secondary hover:bg-bg-tertiary border border-border-subtle text-text-secondary hover:text-text-primary transition"
-              title={w.sortDir === "asc" ? "Ascending (click for descending)" : "Descending (click for ascending)"}
+              title={w.sortDir === "asc" ? "Ascending" : "Descending"}
             >
               {w.sortDir === "asc" ? (
                 <ArrowUpNarrowWide className="w-3.5 h-3.5" />
@@ -231,10 +230,8 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
                 }`}
               title={
                 !w.canGroup
-                  ? "Group by status: for All Anime and custom lists (a search is always grouped)"
-                  : w.groupByStatus
-                    ? "Grouped by status (click for one list)"
-                    : "Group by status"
+                  ? "Group by status (All Anime & custom lists)"
+                  : "Group by status"
               }
             >
               <ListTree className="w-3.5 h-3.5" />
@@ -244,7 +241,7 @@ export const WatchlistView: React.FC<WatchlistViewProps> = ({
           <button
             onClick={openRandom}
             className="p-2 rounded-xl bg-bg-secondary hover:bg-bg-tertiary border border-border-subtle text-text-secondary hover:text-text-primary transition"
-            title="Pick Random Anime from Current List"
+            title="Random anime"
           >
             <Shuffle className="w-3.5 h-3.5" />
           </button>

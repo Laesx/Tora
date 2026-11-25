@@ -1824,9 +1824,9 @@ const OAUTH_CALLBACK_HTML: &str = r#"<!DOCTYPE html>
   <div class="card">
     <div class="logo">虎</div>
     <img id="avatar" class="avatar" alt="Avatar" />
-    <h1 id="title">Connecting to Tora...</h1>
-    <p id="desc">Completing AniList authorization, please wait a moment.</p>
-    <div id="status" class="badge">Verifying OAuth Token...</div>
+    <h1 id="title">Signing in…</h1>
+    <p id="desc">Finishing AniList sign-in.</p>
+    <div id="status" class="badge">Connecting…</div>
   </div>
   <script>
     (async function() {
@@ -1844,9 +1844,9 @@ const OAUTH_CALLBACK_HTML: &str = r#"<!DOCTYPE html>
       }
 
       if (!token) {
-        titleEl.textContent = "Authorization Incomplete";
-        descEl.textContent = "No AniList access token was found in the callback URL. Please click the Sign In banner inside Tora and try again.";
-        statusEl.textContent = "Missing Token";
+        titleEl.textContent = "Sign-in incomplete";
+        descEl.textContent = "No access token received. Start sign-in again from Tora.";
+        statusEl.textContent = "Not signed in";
         statusEl.className = "badge error";
         return;
       }
@@ -1859,17 +1859,17 @@ const OAUTH_CALLBACK_HTML: &str = r#"<!DOCTYPE html>
             avatarEl.src = data.avatar_url;
             avatarEl.style.display = "block";
           }
-          titleEl.textContent = "Signed in as @" + (data.username || "AniList User") + "!";
-          descEl.textContent = "Your AniList account is now linked and syncing with Tora. You can close this tab and return to the app.";
-          statusEl.textContent = "Authenticated Successfully";
+          titleEl.textContent = "Signed in as @" + (data.username || "AniList User");
+          descEl.textContent = "You can close this tab.";
+          statusEl.textContent = "Signed in";
           setTimeout(() => { try { window.close(); } catch (_) {} }, 1500);
         } else {
           throw new Error(data.error || "Failed to verify AniList account");
         }
       } catch (err) {
-        titleEl.textContent = "Authentication Failed";
+        titleEl.textContent = "Sign-in failed";
         descEl.textContent = String(err.message || err);
-        statusEl.textContent = "Verification Error";
+        statusEl.textContent = "Not signed in";
         statusEl.className = "badge error";
       }
     })();
@@ -1955,13 +1955,12 @@ async fn handle_oauth_http_stream(
             return;
         }
         sign_in::Callback::Pending(pending) => {
-            let name = trackers.get(&pending.tracker).map(|t| t.descriptor().name).unwrap_or_default();
             match finish_code_sign_in(&pending, query, &trackers, &sync).await {
                 Ok(account) => {
                     let page = sign_in::result_page(
                         true,
                         &format!("Signed in as @{}", account.username),
-                        &format!("Your {} account is linked to Tora. You can close this tab.", name),
+                        "You can close this tab.",
                     );
                     write_html(&mut stream, "200 OK", &page).await;
                     after_sign_in(&app_handle, sync, &account);
@@ -2080,7 +2079,7 @@ async fn finish_code_sign_in(
     }
     // The state ties the redirect to the sign-in Tora started (no other page can sign an account in)
     if extract_query_param(query, "state").as_deref() != Some(pending.state.as_str()) {
-        return Err("The sign-in answer doesn't match the sign-in Tora started. Try again.".into());
+        return Err("Sign-in session mismatch. Try signing in again.".into());
     }
     let code = extract_query_param(query, "code").ok_or_else(|| format!("{} sent no authorization code.", name))?;
     let tokens = sync.exchange_code(&pending.tracker, &code, &pending.verifier).await?;

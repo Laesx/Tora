@@ -73,7 +73,7 @@ export const MediaCard: React.FC<{
         type="button"
         onClick={(e) => open(e.ctrlKey || e.metaKey)}
         disabled={busy}
-        title={`${titleOf(entry ?? m)}${entry ? "" : " (not in your list)"}\nCtrl+click: the other view`}
+        title={titleOf(entry ?? m)}
         className="flex gap-2.5 min-w-0 flex-1 text-left disabled:cursor-wait"
       >
         <div className="w-12 h-full shrink-0 rounded-md overflow-hidden bg-bg-tertiary">

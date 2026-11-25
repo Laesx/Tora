@@ -73,14 +73,17 @@ export const CustomListsPanel: React.FC<CustomListsPanelProps> = ({
           })}
         </div>
         {allInSomeList && (
-          <label className="flex items-center gap-2 text-[11px] text-text-secondary cursor-pointer select-none w-fit">
+          <label
+            title="Only shown in custom lists and All Anime"
+            className="flex items-center gap-2 text-[11px] text-text-secondary cursor-pointer select-none w-fit"
+          >
             <input
               type="checkbox"
               checked={allHidden}
               onChange={toggleHidden}
               style={{ accentColor: "rgb(var(--accent-primary))" }}
             />
-            Hide from status lists (only shown in its custom lists and All Anime)
+            Hide from status lists
           </label>
         )}
       </div>

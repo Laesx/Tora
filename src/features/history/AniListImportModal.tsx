@@ -39,18 +39,14 @@ export const AniListImportModal: React.FC<AniListImportModalProps> = ({ onClose 
             <h3 className="text-sm font-bold text-text-primary">
               {phase === "done" ? "AniList history imported" : "Import your AniList history"}
             </h3>
-            <p className="text-[11px] text-text-muted">Every episode you've marked as watched on AniList</p>
           </div>
         </div>
 
         {phase === "idle" ? (
-          <div className="space-y-2 text-xs text-text-secondary leading-relaxed">
-            <p className="font-semibold text-text-primary">Downloading all your activity will take a while.</p>
-            <p>
-              It keeps going in the background even if you close this window, and it picks up where it left off if stopped. Episodes Tora already logged
-              aren't duplicated.
-            </p>
-          </div>
+          <p className="text-xs text-text-secondary leading-relaxed">
+            Imports your watched-episode activity from AniList in the background. Safe to close or pause anytime;
+            episodes already logged locally aren't duplicated.
+          </p>
         ) : (
           <div className="space-y-2">
             <div className="h-2 rounded-full bg-bg-tertiary overflow-hidden">
@@ -72,10 +68,10 @@ export const AniListImportModal: React.FC<AniListImportModalProps> = ({ onClose 
                 ? `${(s?.episode_count ?? 0).toLocaleString()} watched episodes stored. New activity is fetched after each sync.`
                 : phase === "paused"
                   ? s?.last_error
-                    ? "Paused because of an error. It resumes on its own the next time Tora starts."
-                    : "Paused. It resumes from here when you continue."
+                    ? "Paused due to an error. Retries on next launch, or click Resume."
+                    : "Paused."
                   : running
-                    ? "Importing… you can close this window, it keeps going in the background."
+                    ? "Importing in the background — safe to close."
                     : "Waiting to continue…"}
             </p>
             {phase === "paused" && s?.last_error && (

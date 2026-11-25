@@ -29,7 +29,7 @@ export const SignOutModal: React.FC<SignOutModalProps> = ({ onCancel, onConfirm 
       </div>
 
       <p className="text-xs text-text-secondary leading-relaxed">
-        Are you sure you want to sign out? Your local anime library and settings will remain intact, but automatic {name} synchronization will stop until you sign in again.
+        Your local list and settings stay on this computer. Syncing pauses until you sign back in.
       </p>
 
       <div className="flex items-center justify-end gap-2.5 pt-1">
@@ -43,7 +43,7 @@ export const SignOutModal: React.FC<SignOutModalProps> = ({ onCancel, onConfirm 
           onClick={onConfirm}
           className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold transition shadow-sm cursor-pointer"
         >
-          Sign Out
+          Sign out
         </button>
       </div>
     </div>

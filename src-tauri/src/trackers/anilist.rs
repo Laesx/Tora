@@ -366,7 +366,7 @@ impl AniListPlugin {
             .and_then(|v| v.get("id"))
             .and_then(|v| v.as_i64())
             .ok_or_else(|| {
-                TrackerError::Unauthorized("AniList did not return a Viewer for this token".into())
+                TrackerError::Unauthorized("Could not verify AniList account".into())
             })?;
         if let Ok(mut guard) = self.viewer_cache.lock() {
             *guard = Some((token.to_string(), id));
@@ -414,7 +414,7 @@ fn classify_graphql_response(
     if is_success && first_error.is_none() {
         let Some(body) = body else {
             return Err(TrackerError::Api(format!(
-                "AniList returned a non-JSON response (HTTP {}): {}",
+                "Unexpected response from AniList (HTTP {}): {}",
                 status,
                 snippet(text)
             )));
@@ -423,7 +423,7 @@ fn classify_graphql_response(
             .get("data")
             .filter(|d| !d.is_null())
             .cloned()
-            .ok_or_else(|| TrackerError::Api("AniList response missing 'data' field".into()));
+            .ok_or_else(|| TrackerError::Api("Invalid response from AniList".into()));
     }
 
     let message = gql_message.unwrap_or_else(|| {
@@ -1309,7 +1309,7 @@ impl TrackerAuth for AniListPlugin {
         Box::pin(async move {
             let token = token.trim();
             if token.is_empty() {
-                return Err(TrackerError::Unauthorized("AniList sign-in requires an OAuth access token".into()));
+                return Err(TrackerError::Unauthorized("Sign in to AniList first.".into()));
             }
             let query = r#"
                 query {
@@ -1331,7 +1331,7 @@ impl TrackerAuth for AniListPlugin {
             let data = self.graphql_request(query, json!({}), Some(token)).await?;
             let viewer = data
                 .get("Viewer")
-                .ok_or_else(|| TrackerError::Api("Invalid Viewer response".into()))?;
+                .ok_or_else(|| TrackerError::Api("Invalid account response from AniList".into()))?;
             let anime_stat = |key: &str| {
                 viewer
                     .pointer(&format!("/statistics/anime/{}", key))
@@ -1342,7 +1342,7 @@ impl TrackerAuth for AniListPlugin {
                 user_id: viewer
                     .get("id")
                     .and_then(|v| v.as_i64())
-                    .ok_or_else(|| TrackerError::Api("Viewer response has no id".into()))?,
+                    .ok_or_else(|| TrackerError::Api("Invalid account response from AniList".into()))?,
                 username: viewer.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
                 avatar_url: viewer.pointer("/avatar/large").and_then(|v| v.as_str()).map(str::to_string),
                 anime_count: anime_stat("count"),
@@ -1365,7 +1365,7 @@ impl ListSync for AniListPlugin {
             let token = token.trim();
             if token.is_empty() {
                 return Err(TrackerError::Unauthorized(
-                    "AniList OAuth token is required to sync the list.".into(),
+                    "Sign in to AniList first.".into(),
                 ));
             }
             let viewer_id = self.cached_viewer_id(token).await?;
@@ -1423,7 +1423,7 @@ impl ListSync for AniListPlugin {
             let collection = data
                 .get("MediaListCollection")
                 .filter(|c| !c.is_null())
-                .ok_or_else(|| TrackerError::Api("AniList returned no MediaListCollection".into()))?;
+                .ok_or_else(|| TrackerError::Api("AniList returned no list data".into()))?;
 
             let custom_lists = parse_custom_list_names(collection);
             let score_format = parse_score_format(collection);
@@ -1479,7 +1479,7 @@ impl ListSync for AniListPlugin {
             let token = token.trim();
             if token.is_empty() {
                 return Err(TrackerError::Unauthorized(
-                    "AniList OAuth token is required to push updates to AniList.".into(),
+                    "Sign in to AniList first.".into(),
                 ));
             }
             // Custom-list arguments only when set: an omitted argument leaves AniList's membership alone
@@ -1573,7 +1573,7 @@ impl ListSync for AniListPlugin {
             let token = token.trim();
             if token.is_empty() {
                 return Err(TrackerError::Unauthorized(
-                    "AniList OAuth token is required to delete AniList entries.".into(),
+                    "Sign in to AniList first.".into(),
                 ));
             }
 
@@ -1880,7 +1880,7 @@ impl Catalog for AniListPlugin {
             }
             let token = token.map(str::trim).filter(|t| !t.is_empty());
             if parts.following && token.is_none() {
-                return Err(TrackerError::Unauthorized("AniList OAuth token is required.".into()));
+                return Err(TrackerError::Unauthorized("Sign in to AniList first.".into()));
             }
             let mut vars = json!({ "id": id });
             if parts.details {
@@ -2081,7 +2081,7 @@ impl AniListPlugin {
         let token = token.trim();
         if token.is_empty() {
             return Err(TrackerError::Unauthorized(
-                "AniList OAuth token is required to edit custom lists.".into(),
+                "Sign in to AniList first.".into(),
             ));
         }
         let viewer = self

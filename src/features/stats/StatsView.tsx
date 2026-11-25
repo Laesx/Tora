@@ -246,7 +246,7 @@ export const StatsView: React.FC<StatsViewProps> = ({
         {anilist.hasData && (
           <label
             className="flex items-center gap-2 text-xs text-text-secondary cursor-pointer"
-            title="Count imported AniList episodes that Tora didn't log itself in the activity charts"
+            title="Include imported AniList activity in charts and streaks"
           >
             <input
               type="checkbox"
@@ -272,7 +272,7 @@ export const StatsView: React.FC<StatsViewProps> = ({
           icon={<Clock className="w-4 h-4" />}
           value={(stats.minutes_watched / 1440).toFixed(1)}
           label="Days watched"
-          note={`${formatHours(stats.minutes_watched)} in total`}
+          note={`${formatHours(stats.minutes_watched)} total`}
         />
         <StatTile
           icon={<Star className="w-4 h-4" />}
@@ -305,7 +305,7 @@ export const StatsView: React.FC<StatsViewProps> = ({
       >
         {stats.logged_episodes === 0 ? (
           <div className="py-8 text-center text-xs text-text-muted">
-            No watch history yet. Play an episode or update your progress to start tracking.
+            No watch history yet.
           </div>
         ) : (
           <div className="space-y-5">
@@ -347,13 +347,13 @@ export const StatsView: React.FC<StatsViewProps> = ({
         <StatTile
           icon={<Play className="w-4 h-4" />}
           value={readyEpisodes.toLocaleString()}
-          label="Downloaded, not watched"
+          label="Unwatched on disk"
           note={`${ready.length} anime`}
         />
         <StatTile
           icon={<ListTodo className="w-4 h-4" />}
           value={formatHours(stats.watching_remaining_minutes)}
-          label="Left on Watching"
+          label="Remaining in Watching"
           note={`${stats.watching_remaining_episodes.toLocaleString()} episodes`}
         />
         <StatTile
@@ -368,7 +368,7 @@ export const StatsView: React.FC<StatsViewProps> = ({
         <Section title="Ready to watch" className="md:col-span-2" aside={ready.length ? `${ready.length}` : undefined}>
           {ready.length === 0 ? (
             <div className="py-6 text-center text-xs text-text-muted">
-              Nothing downloaded past your progress.
+              No unwatched episodes on disk.
             </div>
           ) : (
             <div className="space-y-1 max-h-96 overflow-y-auto pr-1">

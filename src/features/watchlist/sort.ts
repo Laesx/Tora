@@ -77,7 +77,7 @@ export const SORT_OPTIONS: SortOption[] = [
   },
   {
     id: "ready",
-    label: "Ready to watch (on disk)",
+    label: "Unwatched on disk",
     group: "Progress",
     defaultDir: "desc",
     value: (a, c) => (a.available_episodes ?? []).filter((ep) => ep > c.progress).length,

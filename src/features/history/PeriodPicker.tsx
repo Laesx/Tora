@@ -103,7 +103,7 @@ export const PeriodPicker: React.FC<PeriodPickerProps> = ({
       className="absolute z-40 top-full right-0 mt-2 w-[26rem] max-w-[calc(100vw-2rem)] p-3 rounded-xl bg-bg-secondary border border-border-subtle shadow-2xl space-y-2"
     >
       <div className="flex items-center justify-between">
-        <span className="text-xs font-bold text-text-primary">Show a period</span>
+        <span className="text-xs font-bold text-text-primary">Period</span>
         <button
           onClick={onClear}
           disabled={!period}
@@ -195,7 +195,7 @@ export const PeriodPicker: React.FC<PeriodPickerProps> = ({
       </div>
 
       <p className="text-[10px] text-text-muted border-t border-border-subtle pt-2">
-        Click a month, a season or a year · Shift-click a second month for a range
+        Shift-click a second month to select a range
       </p>
     </div>
   );

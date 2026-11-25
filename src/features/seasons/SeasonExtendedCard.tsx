@@ -194,7 +194,6 @@ export const SeasonExtendedCard: React.FC<SeasonExtendedCardProps> = ({
             }}
             onDoubleClick={(e) => e.stopPropagation()}
             disabled={prequelBusy}
-            title="Open the prequel"
             className="shrink-0 h-[18px] flex items-center gap-1.5 min-w-0 text-left text-[11px] text-text-secondary hover:text-text-primary transition cursor-pointer disabled:cursor-wait"
           >
             <CornerLeftUp className="w-3 h-3 shrink-0 text-text-muted" />
@@ -205,7 +204,7 @@ export const SeasonExtendedCard: React.FC<SeasonExtendedCardProps> = ({
               </span>
             ) : (
               <span className="shrink-0 px-1.5 rounded text-[10px] font-semibold bg-bg-tertiary text-text-muted">
-                Not on your list
+                Not in list
               </span>
             )}
           </button>
@@ -228,7 +227,7 @@ export const SeasonExtendedCard: React.FC<SeasonExtendedCardProps> = ({
                   e.stopPropagation();
                   onCycleTag(name);
                 }}
-                title="Filter the season: show only / hide / off"
+                title="Filter: include / exclude / off"
                 className={`h-5 px-1.5 rounded text-[10px] font-medium transition cursor-pointer ${tagChipClass(
                   tagState(name),
                   genres.has(name)
@@ -272,7 +271,6 @@ export const SeasonExtendedCard: React.FC<SeasonExtendedCardProps> = ({
                     e.stopPropagation();
                     void openExternal(anime.trailer_url!, showToast);
                   }}
-                  title="Watch the trailer"
                   className={ACTION_BUTTON}
                 >
                   <Play className="w-3 h-3" />
@@ -285,7 +283,7 @@ export const SeasonExtendedCard: React.FC<SeasonExtendedCardProps> = ({
                     e.stopPropagation();
                     onSetNotInterested([anime], !notInterested);
                   }}
-                  title={notInterested ? "Bring it back" : "Hide it from this season (X)"}
+                  title={notInterested ? "Restore" : "Hide from season (X)"}
                   className={ACTION_BUTTON}
                 >
                   {notInterested ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3" />}

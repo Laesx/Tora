@@ -218,7 +218,8 @@ Tora/
 │   │   ├── stats/StatsView.tsx           # Stats tab: overview tiles, status bar, activity heatmap/streaks/monthly bars, backlog & ready-to-watch
 │   │   ├── settings/
 │   │   │   ├── SettingsModal.tsx         # Settings is a modal, not a tab (gear button, Ctrl+9, palette, `openSettings(section)`)
-│   │   │   ├── SettingsView.tsx          # Sectioned settings: Appearance, Tracker, Library, Playback & Detection (update mode, Discord, Anisthesia players), Torrents, System (tray, start with Windows), Diagnostics, About
+│   │   │   ├── SettingsView.tsx          # Sectioned settings: Appearance (Theme / Display / Behavior), Tracker, Library, Playback & Detection (List updates / Detection / While playing / Anisthesia players), Torrents, System (tray, start with Windows), Diagnostics, About
+│   │   │   ├── SettingRow.tsx            # Settings building blocks: `SettingsCard` (rows split by dividers), `SettingRow` (label + hint left, control right; `indent`, `stacked`, `flush`), `Toggle` / `ToggleRow` (switches, never checkboxes), `SettingGroup`, `Segmented`
 │   │   │   ├── LibraryManagerView.tsx    # Multi-drive folder manager, disk usage & virtualized episode table (Settings → Library)
 │   │   │   ├── AnitomyParserPanel.tsx    # Interactive Anitomy filename / window title parser (Settings → Diagnostics)
 │   │   │   ├── TrackerSettings.tsx       # Settings → Tracker: one list of the accounts on this computer (in use: profile / sign out; others: switch with the saved sign-in, sign in again, remove from this computer), "Add <tracker> account" buttons, the support table (collapsed)

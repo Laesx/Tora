@@ -42,7 +42,7 @@ export const UpdatePromptModal: React.FC<UpdatePromptModalProps> = ({
             <Sparkles className="w-5 h-5" />
           </div>
           <div>
-            <h3 className="text-sm font-bold text-text-primary">A new version of Tora is available</h3>
+            <h3 className="text-sm font-bold text-text-primary">Update available</h3>
             <p className="text-[11px] text-text-muted font-mono flex items-center gap-1.5">
               v{currentVersion}
               <ArrowRight className="w-3 h-3" />

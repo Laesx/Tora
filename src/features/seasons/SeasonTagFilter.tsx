@@ -110,12 +110,12 @@ export const SeasonTagFilter: React.FC<SeasonTagFilterProps> = ({
               type="text"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Find a genre or tag..."
+              placeholder="Filter genres & tags…"
               className="w-full pl-8 pr-3 py-1.5 rounded-lg bg-bg-primary border border-border-subtle text-xs text-text-primary focus:outline-none focus:border-accent"
             />
           </div>
 
-          <p className="text-[10px] text-text-muted">Click: show only → hide → off</p>
+          <p className="text-[10px] text-text-muted">Click: include → exclude → off</p>
 
           <div className="max-h-72 overflow-y-auto space-y-3 pr-1">
             {genres.length > 0 && (
@@ -131,7 +131,7 @@ export const SeasonTagFilter: React.FC<SeasonTagFilterProps> = ({
               </div>
             )}
             {genres.length === 0 && tags.length === 0 && (
-              <p className="py-4 text-center text-xs text-text-muted">Nothing in this season matches.</p>
+              <p className="py-4 text-center text-xs text-text-muted">No matching genres or tags.</p>
             )}
           </div>
 

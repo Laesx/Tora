@@ -40,7 +40,7 @@ export const EntrySettings: React.FC<{
       const picked = await open({
         directory: true,
         multiple: false,
-        title: `Select the folder of "${titleOf(anime)}"`,
+        title: `Select folder for "${titleOf(anime)}"`,
         defaultPath: current || fileDir || undefined,
       });
       if (picked && typeof picked === "string") setCustomFolder(picked);
@@ -58,12 +58,12 @@ export const EntrySettings: React.FC<{
 
       <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))" }}>
         <div>
-          <label className="block text-[11px] text-text-muted mb-1">Custom Aliases (file & player recognition)</label>
+          <label className="block text-[11px] text-text-muted mb-1">Custom Aliases</label>
           <input
             type="text"
             value={synonymsInput}
             onChange={(e) => setSynonymsInput(e.target.value)}
-            placeholder="Separated by a coma: HnK, Houseki"
+            placeholder="Comma-separated (e.g. HnK, Houseki)"
             className="w-full px-3 py-2 rounded-lg bg-bg-primary border border-border-subtle text-xs text-text-primary focus:outline-none focus:border-accent"
           />
         </div>
@@ -75,7 +75,7 @@ export const EntrySettings: React.FC<{
               type="text"
               value={customFolder}
               onChange={(e) => setCustomFolder(e.target.value)}
-              placeholder="e.g. D:\Anime\Houseki no Kuni"
+              placeholder="D:\Anime\Houseki no Kuni"
               className="flex-1 min-w-0 px-3 py-2 rounded-lg bg-bg-primary border border-border-subtle text-xs font-mono text-text-primary focus:outline-none focus:border-accent"
             />
             <button
@@ -96,7 +96,7 @@ export const EntrySettings: React.FC<{
           rows={2}
           value={notes}
           onChange={(e) => setNotes(e.target.value)}
-          placeholder="Add personal thoughts, release group preferences, etc."
+          placeholder="Notes…"
           className="w-full px-3 py-2 rounded-lg bg-bg-primary border border-border-subtle text-xs text-text-primary focus:outline-none focus:border-accent"
         />
       </div>
@@ -110,7 +110,7 @@ export const EntrySettings: React.FC<{
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-red-400 hover:bg-red-500/15 transition"
         >
           <Trash2 className="w-3.5 h-3.5" />
-          Remove from Library
+          Remove from List
         </button>
 
         <button

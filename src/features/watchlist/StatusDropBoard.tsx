@@ -178,7 +178,7 @@ export const StatusDropBoard: React.FC<StatusDropBoardProps> = ({
                       <span className="text-xs font-bold text-text-primary truncate">{name}</span>
                       <span className={`text-[10px] font-mono ${hovered ? "text-text-primary" : "text-text-muted"}`}>
                         {full
-                          ? "Already in it"
+                          ? "In list"
                           : hovered
                             ? `Add ${count - already === 1 ? "here" : `${count - already} here`}`
                             : `${listCounts.get(name) ?? 0} anime`}
@@ -190,7 +190,7 @@ export const StatusDropBoard: React.FC<StatusDropBoardProps> = ({
             </div>
           )}
 
-          <div className="shrink-0 pt-3 text-center text-[11px] text-text-muted">Drop on a tile · Esc to cancel</div>
+          <div className="shrink-0 pt-3 text-center text-[11px] text-text-muted">Esc to cancel</div>
         </div>
       </div>
 

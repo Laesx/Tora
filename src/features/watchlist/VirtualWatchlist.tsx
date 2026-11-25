@@ -614,19 +614,20 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
 
   if (items.length === 0) {
     const q = searchQuery?.trim();
+    const emptyHint = q
+      ? "Use the Search tab to search the full catalog."
+      : allAnime.length === 0
+        ? "Add anime from Seasons or Search, or sign in via Settings → Tracker."
+        : null;
     return (
       <div
         ref={containerRef}
-        className="py-16 text-center bg-bg-secondary border border-border-subtle rounded-2xl space-y-3"
+        className="py-16 text-center bg-bg-secondary border border-border-subtle rounded-2xl space-y-2"
       >
         <p className="text-sm font-semibold text-text-primary">
-          {q ? `No anime in your list match "${q}"` : "No anime in this list view"}
+          {q ? `No matches for "${q}"` : "No anime in this list"}
         </p>
-        <p className="text-xs text-text-muted">
-          {q
-            ? "Try fewer letters, or look it up from the Search tab."
-            : "Use the Seasons or Search tab to add shows, or sign in to your tracker in Settings → Tracker."}
-        </p>
+        {emptyHint && <p className="text-xs text-text-muted">{emptyHint}</p>}
       </div>
     );
   }
@@ -1288,7 +1289,7 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
                           onSort(key);
                         }}
                         className={`inline-flex items-center gap-1 min-w-0 uppercase transition hover:text-text-primary ${active ? "text-accent" : ""}`}
-                        title={active ? "Click to reverse the order" : `Sort by ${label.toLowerCase()}`}
+                        title={active ? "Reverse sort order" : `Sort by ${label.toLowerCase()}`}
                       >
                         <span className="truncate">{label}</span>
                         {active && <SortIcon className="w-3 h-3 shrink-0" />}
@@ -1417,7 +1418,7 @@ export const VirtualWatchlist: React.FC<VirtualWatchlistProps> = ({
                 { anime_ids: [scoreMenuAnime.id], user_score: score },
                 score > 0
                   ? `Scored "${title}" ${formatScore(score, scoreFormat)}${SCORE_SCALES[scoreFormat].suffix}`
-                  : `Cleared the score of "${title}"`
+                  : `Cleared score for "${title}"`
               );
             }}
           />

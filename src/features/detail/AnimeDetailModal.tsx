@@ -141,10 +141,7 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
 
           {!inList && (
             <div className="flex flex-wrap items-center justify-between gap-3 bg-bg-tertiary/40 p-4 rounded-xl border border-border-subtle">
-              <div>
-                <div className="text-xs font-semibold text-text-primary">Not in your list</div>
-                <div className="text-[11px] text-text-muted mt-0.5">Add it to track progress, score and dates.</div>
-              </div>
+              <div className="text-xs font-semibold text-text-primary">Not in your list</div>
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => handleAddToList("PLANNING")}
@@ -194,7 +191,7 @@ export const AnimeDetailModal: React.FC<AnimeDetailModalProps> = ({
 
           {/* Synopsis & Metadata */}
           <div className="space-y-3">
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-text-secondary">Synopsis & Details</h3>
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-text-secondary">Synopsis</h3>
             <p className="text-xs text-text-secondary leading-relaxed whitespace-pre-line bg-bg-primary/50 p-3.5 rounded-xl border border-border-subtle">
               {anime.synopsis || "No synopsis available."}
             </p>

@@ -297,7 +297,6 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ animeList, refreshKey,
           {anilist.supported && importing && (
             <button
               onClick={anilist.openImport}
-              title="AniList history import"
               className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-bg-secondary border border-border-subtle hover:bg-bg-tertiary text-[11px] font-semibold text-text-secondary transition"
             >
               {status?.status === "running" && status.active ? (
@@ -363,7 +362,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ animeList, refreshKey,
                     // The picker closes on outside mousedown: let this click toggle it instead
                     onMouseDown={(e) => e.stopPropagation()}
                     onClick={() => setPickerOpen((o) => !o)}
-                    title="Pick another period"
+                    title="Change period"
                     className="flex items-center gap-1.5 px-1.5 py-1.5 text-xs font-semibold text-text-primary hover:text-accent transition"
                   >
                     <CalendarDays className="w-3.5 h-3.5 text-accent" />
@@ -379,7 +378,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ animeList, refreshKey,
                   </button>
                   <button
                     onClick={() => setPeriod(null)}
-                    title="Back to all time"
+                    title="All time"
                     className="p-1.5 rounded-r-xl hover:bg-bg-tertiary text-text-muted hover:text-text-primary transition"
                   >
                     <X className="w-3.5 h-3.5" />
@@ -389,7 +388,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ animeList, refreshKey,
                 <button
                   onMouseDown={(e) => e.stopPropagation()}
                   onClick={() => setPickerOpen((o) => !o)}
-                  title="Show a month, season or year"
+                  title="Filter by period"
                   className="p-2 rounded-xl bg-bg-secondary border border-border-subtle hover:bg-bg-tertiary text-text-secondary hover:text-text-primary transition"
                 >
                   <CalendarDays className="w-3.5 h-3.5" />
@@ -452,14 +451,14 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ animeList, refreshKey,
             {loading
               ? "Loading..."
               : search
-                ? "No entries match the filter."
+                ? "No matching entries."
                 : period
                   ? `Nothing watched in ${periodLabel(period)}.`
                   : source === "anilist"
                     ? anilist.hasData
-                      ? "Every episode in your AniList history was also logged by Tora."
+                      ? "All imported AniList episodes are already in local history."
                       : "Nothing imported from AniList yet."
-                    : "No history yet. Play an episode or update your progress to start tracking."}
+                    : "No watch history yet."}
           </p>
           {source === "anilist" && !anilist.hasData && !importing && (
             <button
@@ -510,7 +509,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ animeList, refreshKey,
                             remember();
                             setAnimeFilter({ id: h.anime_id, title });
                           }}
-                          title="Show every episode of this anime"
+                          title="Episode timeline"
                           className="hover:underline disabled:no-underline focus:outline-none text-left"
                         >
                           {title}
@@ -591,7 +590,7 @@ const TimelineDayRow: React.FC<{ row: TimelineDay }> = ({ row }) => {
   return (
     <div
       className="flex items-center gap-3 px-2 py-1 rounded-lg hover:bg-bg-tertiary"
-      title={batch ? `${detail}\n≈ AniList merged these into one activity: its time, not each episode's` : detail}
+      title={batch ? `${detail}\n≈ Merged AniList activity (single timestamp)` : detail}
     >
       <span className="w-32 shrink-0 text-xs font-mono font-semibold text-accent truncate">{episodesLabel(row.episodes)}</span>
       <span className="flex-1 min-w-0 flex items-center gap-1.5 text-[11px] font-mono text-text-muted truncate">
@@ -677,7 +676,7 @@ const AnimeTimeline: React.FC<{
         </div>
         <button
           onClick={onBack}
-          title="Clear the anime filter"
+          title="Close timeline"
           className="p-2 rounded-xl hover:bg-bg-tertiary text-text-muted hover:text-text-primary transition shrink-0"
         >
           <X className="w-4 h-4" />

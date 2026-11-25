@@ -135,8 +135,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
             <EyeOff className="w-4 h-4 text-accent" /> Hide anime by list status
           </h2>
           <p className="text-[11px] text-text-muted mt-1 max-w-2xl">
-            Anime with these statuses get no card on the Releases tab, and their releases are never selected or
-            auto-downloaded. Searching an anime from its details still shows it.
+            Exclude anime with these statuses from feed results and auto-download.
           </p>
         </div>
         <div className="flex flex-wrap gap-1.5">
@@ -158,7 +157,6 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                   ? "bg-red-500/10 border-red-500/50 text-red-300"
                   : "bg-bg-primary border-border-subtle text-text-secondary hover:text-text-primary"
                   }`}
-                title={hidden ? "Hidden: click to show" : "Shown: click to hide"}
               >
                 {hidden ? <EyeOff className="w-3.5 h-3.5" /> : <Icon className={`w-3.5 h-3.5 ${st.color}`} />}
                 {st.label}
@@ -176,9 +174,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
               <Layers className="w-4 h-4 text-accent" /> Release priority
             </h2>
             <p className="text-[11px] text-text-muted mt-1 max-w-2xl">
-              For each new episode, the first tier with a matching release wins and only its releases are picked
-              (ties go to the resolution closest to 1080p, then seeders). Anime with a fansub override below ignore
-              these tiers.
+              Selects the highest matching tier per episode (ties prefer 1080p, then seeders).
             </p>
           </div>
           <SaveButton dirty={tiersDirty} onClick={() => onSavePriority(tiers)} />
@@ -214,14 +210,14 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
         <div className="flex flex-wrap items-center gap-4">
           <GroupInput
             groups={groups}
-            placeholder="Add a release group…"
+            placeholder="Release group…"
             onAdd={(g) => setTiers((x) => ({ ...x, tiers: [...x.tiers, { id: 0, query: groupQuery(g), enabled: true }] }))}
           />
           <button
             onClick={() => setTiers((x) => ({ ...x, tiers: [...x.tiers, { id: 0, query: "group:Name res:1080p", enabled: true }] }))}
             className="text-[11px] text-accent hover:underline flex items-center gap-1"
           >
-            <Plus className="w-3 h-3" /> Add a custom tier
+            <Plus className="w-3 h-3" /> Add custom tier
           </button>
           <label className="flex items-center gap-2 text-xs text-text-secondary cursor-pointer ml-auto">
             <input
@@ -230,7 +226,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
               onChange={(e) => setTiers((x) => ({ ...x, fallback_to_best: e.target.checked }))}
               className="rounded accent-accent"
             />
-            When no tier matches, pick the best other release
+            Fallback to best release if no tier matches
           </label>
         </div>
       </section>
@@ -242,8 +238,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
             <Pin className="w-4 h-4 text-accent" /> Fansubs per anime
           </h2>
           <p className="text-[11px] text-text-muted mt-1 max-w-2xl">
-            Only these groups are picked for the anime, in this order, with no fallback to others (e.g. Kusuriya S3 →
-            Judas). Other groups' releases stay visible under “Other releases”. Right-click a release to set this quickly.
+            Restrict specific anime to these groups in priority order, with no fallback.
           </p>
         </div>
         <div className="divide-y divide-border-subtle/60">
@@ -292,7 +287,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
           <AnimePicker
             animeList={animeList}
             exclude={overrideRows.map((o) => o.anime_id)}
-            placeholder="Add an anime…"
+            placeholder="Add anime…"
             onPick={(a) => setPendingFansubIds((p) => [...p, a.id])}
           />
         </div>
@@ -306,10 +301,8 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
               <ListFilter className="w-4 h-4 text-accent" /> Filters
             </h2>
             <p className="text-[11px] text-text-muted mt-1 max-w-2xl">
-              <b>Hide</b> filters remove matching releases (never selected). <b>Select</b> filters also pick releases
-              the built-in rule skips (new episodes of anime you're watching, not on disk, no batches), e.g.{" "}
-              <code className="font-mono">batch:yes status:completed</code>. Write conditions as rows or as text:{" "}
-              <code className="font-mono">group:Judas res&gt;=1080p -dub codec:hevc seeds&gt;5</code>.
+              <b>Hide</b> excludes matching releases; <b>Select</b> auto-selects them even for batches or non-watching
+              statuses.
             </p>
           </div>
           <div className="flex items-center gap-2 shrink-0">
@@ -383,7 +376,7 @@ export const FiltersPanel: React.FC<FiltersPanelProps> = ({
                 <AnimePicker
                   animeList={animeList}
                   exclude={f.anime_ids}
-                  placeholder="Limit to an anime…"
+                  placeholder="Limit to anime…"
                   onPick={(a) => setFilter(i, { anime_ids: [...f.anime_ids, a.id] })}
                 />
               </div>

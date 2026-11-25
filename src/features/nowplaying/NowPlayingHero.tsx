@@ -78,7 +78,7 @@ export const NowPlayingHero: React.FC<NowPlayingHeroProps> = ({
   ) : session.waiting_for_close ? (
     <span className="px-2.5 py-1 rounded-lg bg-amber-500/20 text-amber-300 text-[11px] font-semibold flex items-center gap-1.5">
       <Clock className="w-3.5 h-3.5" />
-      Updates when the player closes
+      Updates when player closes
     </span>
   ) : (
     <span className="px-2.5 py-1 rounded-lg bg-amber-500/20 text-amber-300 text-[11px] font-mono flex items-center gap-1.5">
@@ -261,7 +261,7 @@ const LinkAnimePanel: React.FC<LinkAnimePanelProps> = ({
     setBusy(true);
     try {
       await onLink(selectedId, alias);
-      showToast(`Saved relation "${alias}" — later episodes will match automatically`, "success");
+      showToast(`Linked "${alias}"`, "success");
     } catch (err) {
       showToast(String(err), "error");
     } finally {
@@ -278,9 +278,7 @@ const LinkAnimePanel: React.FC<LinkAnimePanelProps> = ({
             {session.matched_anime_id ? "Change linked anime" : "Which anime is this?"}
           </h3>
           <p className="text-[11px] text-text-secondary mt-0.5">
-            Link{" "}
-            <span className="font-mono text-text-primary font-semibold">"{session.parsed.anime_title}"</span> to
-            an entry in your list. Tora saves this relation so later episodes match automatically.
+            Detected title: <span className="font-mono text-text-primary font-semibold">"{session.parsed.anime_title}"</span>
           </p>
         </div>
         {isRelinking && (
@@ -299,7 +297,7 @@ const LinkAnimePanel: React.FC<LinkAnimePanelProps> = ({
           type="text"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search your list by title or alternative name..."
+          placeholder="Search your list…"
           className="w-full pl-8 pr-3 py-2 rounded-xl bg-bg-primary border border-border-subtle text-xs text-text-primary focus:outline-none focus:border-accent"
         />
       </div>

@@ -4,6 +4,7 @@ import { AppSettings } from "@/lib/types";
 import { importProgress, useAniListHistory } from "@/contexts/anilistHistory";
 import { formatLastSynced } from "@/lib/format";
 import { useTracker } from "@/contexts/tracker";
+import { ToggleRow } from "./SettingRow";
 
 /** Settings → Tracker: the AniList activity history import (off until the user imports). */
 export const AniListHistorySettings: React.FC<{ settings: AppSettings }> = ({ settings }) => {
@@ -16,7 +17,7 @@ export const AniListHistorySettings: React.FC<{ settings: AppSettings }> = ({ se
 
   const statusLine =
     phase === "idle"
-      ? "Not imported. Your History tab shows only what Tora logged."
+      ? null
       : phase === "done"
         ? `${(s?.episode_count ?? 0).toLocaleString()} episodes from ${(s?.activity_count ?? 0).toLocaleString()} activities${
             s?.last_refreshed_at ? ` · updated ${formatLastSynced(s.last_refreshed_at)}` : ""
@@ -31,27 +32,20 @@ export const AniListHistorySettings: React.FC<{ settings: AppSettings }> = ({ se
           AniList activity history
         </h2>
         <p className="text-xs text-text-secondary mt-0.5">
-          Import every episode you marked as watched on AniList into History (and, if you choose, Stats).
+          Import watched episode activity from AniList.
         </p>
       </div>
 
-      <p className="text-xs text-text-muted">{statusLine}</p>
+      {statusLine && <p className="text-xs text-text-muted">{statusLine}</p>}
 
       {phase === "done" && (
-        <label className="flex items-start gap-2.5 cursor-pointer text-xs">
-          <input
-            type="checkbox"
-            checked={history.enabled}
-            onChange={(e) => history.setEnabled(e.target.checked)}
-            className="rounded accent-accent w-4 h-4 mt-0.5 cursor-pointer"
-          />
-          <span>
-            <span className="font-semibold text-text-primary">Keep it updated</span>
-            <span className="block text-[11px] text-text-muted">
-              Fetch new AniList activity after each sync. The History tab's refresh button works either way.
-            </span>
-          </span>
-        </label>
+        <ToggleRow
+          flush
+          label="Keep it updated"
+          hint="Fetch new activity after each sync"
+          checked={history.enabled}
+          onChange={(checked) => history.setEnabled(checked)}
+        />
       )}
 
       <div className="flex flex-wrap items-center gap-2">

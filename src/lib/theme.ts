@@ -8,7 +8,6 @@ export const THEME_PRESETS: ThemePreset[] = [
     previewBg: "#0c0e14",
     previewCard: "#1a1e2b",
     defaultAccent: "#f59e0b",
-    description: "Deep obsidian dark mode with signature Tiger Amber highlights.",
   },
   {
     id: "taiga-classic",
@@ -17,7 +16,6 @@ export const THEME_PRESETS: ThemePreset[] = [
     previewBg: "#f8fafc",
     previewCard: "#ffffff",
     defaultAccent: "#2563eb",
-    description: "Crisp daylight desktop theme inspired by classic Taiga.",
   },
   {
     id: "catppuccin-mocha",
@@ -26,7 +24,6 @@ export const THEME_PRESETS: ThemePreset[] = [
     previewBg: "#181825",
     previewCard: "#313244",
     defaultAccent: "#cba6f7",
-    description: "Soothing pastel dark mocha with lavender & mauve tones.",
   },
   {
     id: "tokyo-night",
@@ -35,7 +32,6 @@ export const THEME_PRESETS: ThemePreset[] = [
     previewBg: "#16161e",
     previewCard: "#24283b",
     defaultAccent: "#7aa2f7",
-    description: "Clean neon night palette inspired by downtown Tokyo lights.",
   },
   {
     id: "cyber-sakura",
@@ -44,7 +40,6 @@ export const THEME_PRESETS: ThemePreset[] = [
     previewBg: "#08070c",
     previewCard: "#1a1426",
     defaultAccent: "#ec4899",
-    description: "High-contrast AMOLED black with electric sakura pink.",
   },
   {
     id: "nordic-frost",
@@ -53,7 +48,6 @@ export const THEME_PRESETS: ThemePreset[] = [
     previewBg: "#242933",
     previewCard: "#3b4252",
     defaultAccent: "#88c0d0",
-    description: "Arctic slate blues and cool frost cyan.",
   },
 ];
 

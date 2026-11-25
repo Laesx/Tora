@@ -136,9 +136,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
           anime_ids: targetIds,
           progress_delta: delta,
         },
-        `${delta > 0 ? "Incremented" : "Decremented"} episode progress (${
-          delta > 0 ? `+${delta}` : delta
-        }) for ${targets.length} anime`
+        `Updated progress (${delta > 0 ? `+${delta}` : delta}) for ${targets.length} anime`
       );
     };
 
@@ -243,9 +241,11 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
                   <Layers className="w-3.5 h-3.5 text-accent shrink-0" />
                   <span>{targets.length} Anime Selected</span>
                 </div>
-                <div className="text-[10px] text-text-muted font-mono truncate">
-                  {totalOnDisk > 0 ? `${totalOnDisk} eps on disk` : "Batch actions"}
-                </div>
+                {totalOnDisk > 0 && (
+                  <div className="text-[10px] text-text-muted font-mono truncate">
+                    {totalOnDisk} eps on disk
+                  </div>
+                )}
               </div>
             </div>
             {onClearSelection && (
@@ -289,7 +289,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
           >
             <span className="flex items-center gap-2">
               <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Mark Completed & Max Episodes</span>
+              <span>Complete All Episodes</span>
             </span>
           </button>
           {customListNames.length > 0 && (
@@ -319,14 +319,14 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
           <button onClick={() => handleBulkStepProgress(1)} className={itemClass}>
             <span className="flex items-center gap-2">
               <Plus className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Increment Episode (+1 All)</span>
+              <span>Next Episode (+1 All)</span>
             </span>
           </button>
 
           <button onClick={() => handleBulkStepProgress(-1)} className={itemClass}>
             <span className="flex items-center gap-2">
               <Minus className="w-3.5 h-3.5 text-text-muted" />
-              <span>Decrement Episode (-1 All)</span>
+              <span>Previous Episode (−1 All)</span>
             </span>
           </button>
 
@@ -589,8 +589,8 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
                 onChange={(e) => setNotesValue(e.target.value)}
                 placeholder={
                   notesMode === "append"
-                    ? "Text to append to notes..."
-                    : "Set notes for selected anime..."
+                    ? "Append to notes…"
+                    : "Notes…"
                 }
                 className="w-full px-2 py-1.5 rounded bg-bg-secondary border border-border-subtle text-xs text-text-primary focus:outline-none focus:border-accent"
               />
@@ -806,7 +806,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
         >
           <span className="flex items-center gap-2">
             <Plus className="w-3.5 h-3.5 text-emerald-400" />
-            <span>Increment Episode (+1)</span>
+            <span>Next Episode (+1)</span>
           </span>
         </button>
 
@@ -820,7 +820,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
         >
           <span className="flex items-center gap-2">
             <Minus className="w-3.5 h-3.5 text-text-muted" />
-            <span>Decrement Episode (-1)</span>
+            <span>Previous Episode (−1)</span>
           </span>
         </button>
 
@@ -959,7 +959,7 @@ export const AnimeQuickMenu: React.FC<AnimeQuickMenuProps> = ({
               rows={2}
               value={notesValue}
               onChange={(e) => setNotesValue(e.target.value)}
-              placeholder="Personal notes..."
+              placeholder="Notes…"
               className="w-full px-2 py-1 rounded bg-bg-secondary border border-border-subtle text-xs text-text-primary focus:outline-none focus:border-accent"
             />
             <div className="flex items-center justify-end gap-1.5">

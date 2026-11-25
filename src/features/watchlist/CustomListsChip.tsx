@@ -131,7 +131,7 @@ export const CustomListsChip: React.FC<CustomListsChipProps> = ({
           ? "bg-accent text-white shadow-sm"
           : "text-text-secondary hover:text-text-primary"
           }`}
-        title={active !== null ? `${active} (AniList custom list)` : "AniList custom lists"}
+        title={active ?? undefined}
       >
         <ListChecks className="w-3.5 h-3.5 shrink-0" />
         <span className="flex-1 min-w-0 truncate text-left">{active ?? "Custom lists"}</span>
@@ -235,7 +235,7 @@ export const CustomListsChip: React.FC<CustomListsChipProps> = ({
           count={counts.get(deleting) ?? 0}
           onDelete={async () => {
             await onDelete(deleting);
-            showToast(`Deleted list "${deleting}" on AniList`, "success");
+            showToast(`Deleted list "${deleting}"`, "success");
           }}
           onClose={() => setDeleting(null)}
         />
@@ -246,7 +246,7 @@ export const CustomListsChip: React.FC<CustomListsChipProps> = ({
           existingNames={names}
           onSubmit={async (name) => {
             await onCreate(name);
-            showToast(`Created list "${name}" on AniList`, "success");
+            showToast(`Created list "${name}"`, "success");
           }}
           onClose={() => setCreating(false)}
         />
@@ -258,7 +258,7 @@ export const CustomListsChip: React.FC<CustomListsChipProps> = ({
           renaming={renaming}
           onSubmit={async (name) => {
             await onRename(renaming, name);
-            showToast(`Renamed list "${renaming}" to "${name}" on AniList`, "success");
+            showToast(`Renamed "${renaming}" to "${name}"`, "success");
           }}
           onClose={() => setRenaming(null)}
         />

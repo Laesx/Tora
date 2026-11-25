@@ -511,7 +511,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
             }}
             onKeyDown={handleKeyDown}
             placeholder={
-              tab === "anime" ? "Jump to an anime in your list..." : "Run a command..."
+              tab === "anime" ? "Search your list…" : "Run a command…"
             }
             className="flex-1 bg-transparent text-base text-text-primary focus:outline-none placeholder:text-text-muted"
           />

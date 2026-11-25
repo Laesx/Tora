@@ -30,7 +30,7 @@ export const AnitomyParserPanel: React.FC = () => {
     <div className="bg-bg-secondary border border-border-subtle rounded-2xl p-5 space-y-4">
       <h2 className="text-sm font-bold text-text-primary flex items-center gap-2">
         <Terminal className="w-4 h-4 text-accent" />
-        Interactive Anitomy Filename & Window Title Parser
+        Filename Parser
       </h2>
 
       <div className="space-y-2">
@@ -38,7 +38,7 @@ export const AnitomyParserPanel: React.FC = () => {
           type="text"
           value={testInput}
           onChange={(e) => setTestInput(e.target.value)}
-          placeholder="Paste any anime filename or window title to inspect Anitomy tokens..."
+          placeholder="Filename or window title…"
           className="w-full px-4 py-2.5 rounded-xl bg-bg-primary border border-border-subtle text-xs font-mono text-text-primary focus:outline-none focus:border-accent"
         />
 

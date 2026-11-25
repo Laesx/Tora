@@ -214,7 +214,7 @@ export const AnimeHero: React.FC<
               Search torrents
             </button>
             {hasSaga && (
-              <button onClick={() => openSaga(anime)} title="Every anime of this franchise as a graph" className={secondaryButton}>
+              <button onClick={() => openSaga(anime)} title="View franchise graph" className={secondaryButton}>
                 <Network className="w-3.5 h-3.5" />
                 Saga
               </button>

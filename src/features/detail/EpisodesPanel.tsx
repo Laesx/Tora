@@ -118,11 +118,7 @@ const FileRows: React.FC<{ rows: FileRow[]; releases: Release[] }> = ({ rows, re
               {weak && (
                 <span
                   className="shrink-0 text-text-muted"
-                  title={
-                    f.match_kind === "folder"
-                      ? "Matched by its folder: the name doesn't say which anime it is"
-                      : "Matched by a similar title: a guess"
-                  }
+                  title={f.match_kind === "folder" ? "Matched by folder" : "Fuzzy title match"}
                 >
                   {f.match_kind === "folder" ? <FolderTree className="w-3.5 h-3.5" /> : <CircleHelp className="w-3.5 h-3.5" />}
                 </span>
@@ -321,10 +317,10 @@ export const EpisodesPanel: React.FC<{
                   onClick={() => togglePin(r)}
                   title={
                     isPinned
-                      ? "Plays first (pinned). Click to unpin: the oldest release plays again"
+                      ? "Pinned release (click to unpin)"
                       : isPlaying
-                        ? "Plays first (the oldest release). Click to pin it"
-                        : "Play this release first"
+                        ? "Default release (click to pin)"
+                        : "Pin preferred release"
                   }
                   className={`pr-2 pl-1 py-1.5 transition ${
                     isPinned ? "text-accent" : isPlaying ? "text-text-secondary" : "text-text-muted/50 hover:text-text-secondary"
@@ -362,8 +358,8 @@ export const EpisodesPanel: React.FC<{
               onClick={() => playEpisode(epNum)}
               title={
                 hasLocal
-                  ? `Episode ${epNum} on disk${copies > 1 ? ` (${copies} releases)` : ""}. Click to play`
-                  : `Episode ${epNum}. Click to search torrents for this anime`
+                  ? `Play episode ${epNum}${copies > 1 ? ` (${copies} releases)` : ""}`
+                  : `Episode ${epNum} — search torrents`
               }
               className={`relative py-1.5 rounded-md text-xs font-mono border transition flex items-center justify-center ${btnClass} ${
                 epNum === playingEpisode ? "ring-2 ring-accent ring-offset-1 ring-offset-bg-primary" : ""

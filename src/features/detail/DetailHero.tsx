@@ -93,7 +93,6 @@ export const DetailHero: React.FC<{
           bg-black/65 hover:bg-accent text-white text-xs font-semibold
           border border-white/15 shadow-lg transition cursor-pointer
         "
-        title="Open the full anime page: characters, staff, recommendations, history"
       >
         <Maximize2 className="w-4 h-4" />
         Full page

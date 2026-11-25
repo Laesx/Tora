@@ -46,7 +46,6 @@ export const InstallUpdateButton: React.FC<{
       <button
         onClick={onInstall}
         className="px-4 py-2 rounded-xl bg-accent hover:bg-accent-hover text-white text-xs font-semibold transition shadow-sm cursor-pointer flex items-center gap-1.5"
-        title={`Download and install Tora v${version}, then restart`}
       >
         <Download className="w-3.5 h-3.5" />
         {label}
@@ -160,10 +159,10 @@ export const ChangelogModal: React.FC<ChangelogModalProps> = ({
           ) : !releases ? (
             <p className="text-xs text-text-muted flex items-center gap-2">
               <Loader2 className="w-3.5 h-3.5 animate-spin text-accent" />
-              Loading releases from GitHub…
+              Loading releases…
             </p>
           ) : releases.length === 0 ? (
-            <p className="text-xs text-text-muted">No releases have been published yet.</p>
+            <p className="text-xs text-text-muted">No releases found.</p>
           ) : (
             releases.map((r) => {
               const cmp = version ? compareVersions(r.version, version) : -1;

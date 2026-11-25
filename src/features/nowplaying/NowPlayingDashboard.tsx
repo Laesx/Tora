@@ -158,30 +158,30 @@ export const NowPlayingDashboard: React.FC<NowPlayingDashboardProps> = ({
         <StatTile
           icon={<Film className="w-4 h-4" />}
           value={stats ? stats.episodes_last_week.toLocaleString() : "—"}
-          label="episodes watched in the last 7 days"
+          label="Episodes (7 days)"
           note={
             stats && (stats.episodes_last_week > 0 || stats.episodes_prev_week > 0)
               ? weekDelta === 0
-                ? "same as the week before"
-                : `${weekDelta > 0 ? "+" : ""}${weekDelta} vs the week before`
+                ? "same as last week"
+                : `${weekDelta > 0 ? "+" : ""}${weekDelta} vs last week`
               : undefined
           }
         />
         <StatTile
           icon={<Clock className="w-4 h-4" />}
           value={stats ? formatMinutes(stats.minutes_last_week) : "—"}
-          label="spent watching in the last 7 days"
+          label="Watch time (7 days)"
         />
         <StatTile
           icon={<HardDrive className="w-4 h-4" />}
           value={totals.onDisk.toLocaleString()}
-          label="new episodes on disk"
+          label="Unwatched on disk"
           note={totals.showsWithNew > 0 ? `across ${totals.showsWithNew} anime` : undefined}
         />
         <StatTile
           icon={<Tv className="w-4 h-4" />}
           value={totals.watching.toLocaleString()}
-          label="anime you're watching"
+          label="Watching"
           note={totals.airing > 0 ? `${totals.airing} currently airing` : undefined}
         />
       </div>
@@ -196,7 +196,7 @@ export const NowPlayingDashboard: React.FC<NowPlayingDashboardProps> = ({
             <select
               value={listFilter ?? ""}
               onChange={(e) => updatePrefs({ customList: e.target.value || null })}
-              title="Only anime in this custom list"
+              title="Filter by custom list"
               className="max-w-48 px-2 py-1 rounded-lg bg-bg-primary border border-border-subtle text-[11px] font-medium text-text-secondary cursor-pointer focus:outline-none focus:border-accent"
             >
               <option value="">All anime</option>
@@ -219,8 +219,8 @@ export const NowPlayingDashboard: React.FC<NowPlayingDashboardProps> = ({
         {continueWatching.length === 0 ? (
           <div className="py-6 text-center text-xs text-text-muted">
             {listFilter === null
-              ? "No next episodes on disk for the anime you're watching."
-              : `No next episodes on disk for anime in “${listFilter}”.`}
+              ? "No unwatched episodes on disk."
+              : `No unwatched episodes on disk in “${listFilter}”.`}
           </div>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
@@ -263,7 +263,7 @@ export const NowPlayingDashboard: React.FC<NowPlayingDashboardProps> = ({
                     {left && (
                       <div
                         className="text-[10px] text-text-secondary mt-0.5 flex items-center gap-1"
-                        title={`${left.episodes} episode${left.episodes === 1 ? "" : "s"} left × ${left.perEpisode} min${skipOpEd ? " (openings and endings skipped)" : ""}`}
+                        title={`${left.episodes} episode${left.episodes === 1 ? "" : "s"} left × ${left.perEpisode} min${skipOpEd ? " (excl. OP/ED)" : ""}`}
                       >
                         <Clock className="w-3 h-3 shrink-0 text-text-muted" />~{formatMinutes(left.minutes)} to finish
                       </div>
@@ -283,14 +283,14 @@ export const NowPlayingDashboard: React.FC<NowPlayingDashboardProps> = ({
           title="Recently Started Airing"
           items={recentlyStarted}
           dateOf={(a) => a.start_date}
-          empty={`Nothing on your list started airing in the last ${RECENT_DAYS} days.`}
+          empty={`None in the last ${RECENT_DAYS} days.`}
         />
         <RecentList
           icon={<CalendarCheck className="w-4 h-4 text-accent" />}
           title="Recently Finished Airing"
           items={recentlyFinished}
           dateOf={(a) => a.end_date}
-          empty={`Nothing on your list finished airing in the last ${RECENT_DAYS} days.`}
+          empty={`None in the last ${RECENT_DAYS} days.`}
         />
       </div>
 

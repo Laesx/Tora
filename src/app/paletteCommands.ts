@@ -47,14 +47,14 @@ export function buildPaletteCommands(d: PaletteCommandDeps): PaletteCommand[] {
     ...(d.goBack ? [{ id: "go-back", label: "Go Back", keywords: ["previous", "history", "return"], icon: ArrowLeft, shortcut: "Alt+←", run: d.goBack }] : []),
     ...(d.goForward ? [{ id: "go-forward", label: "Go Forward", keywords: ["next", "history"], icon: ArrowRight, shortcut: "Alt+→", run: d.goForward }] : []),
     { id: "settings", label: "Open Settings", keywords: ["preferences", "options"], icon: Settings, shortcut: `Ctrl+${SETTINGS_SHORTCUT_DIGIT}`, run: d.openSettings },
-    { id: "torrent-settings", label: "Torrent settings", keywords: ["qbittorrent", "download folder", "refresh interval", "torrents"], icon: Settings, run: d.openTorrentSettings },
-    { id: "rescan-library", label: "Rescan All Library Folders", keywords: ["scan", "refresh", "files", "disk"], icon: HardDrive, shortcut: "F5", run: d.rescanLibrary },
+    { id: "torrent-settings", label: "Torrent Settings", keywords: ["qbittorrent", "download folder", "refresh interval", "torrents"], icon: Settings, run: d.openTorrentSettings },
+    { id: "rescan-library", label: "Rescan Library Folders", keywords: ["scan", "refresh", "files", "disk"], icon: HardDrive, shortcut: "F5", run: d.rescanLibrary },
     // Id kept from before other trackers: recent commands are stored by id
     { id: "sync-anilist", label: `Sync from ${d.trackerName}`, keywords: ["pull", "refresh", "tracker", d.trackerName.toLowerCase()], icon: RefreshCw, run: d.syncFromTracker },
     { id: "shortcuts", label: "Keyboard Shortcuts", keywords: ["keys", "hotkeys", "help", "keyboard"], icon: Keyboard, shortcut: "?", run: d.openShortcuts },
     { id: "check-updates", label: "Check for Updates", keywords: ["update", "upgrade", "version", "relations", "github"], icon: Download, run: d.checkForUpdates },
     { id: "changelog", label: "What's New (Changelog)", keywords: ["release notes", "version", "updates", "changes"], icon: ScrollText, run: d.openChangelog },
-    { id: "random-anime", label: "Open a Random Anime from the Current List", keywords: ["shuffle", "pick", "random"], icon: Shuffle, run: d.openRandomAnime },
+    { id: "random-anime", label: "Random Anime", keywords: ["shuffle", "pick", "random"], icon: Shuffle, run: d.openRandomAnime },
     ...d.customListNames.map((name) => ({
       id: `custom-list-${name}`,
       label: `Open List: ${name}`,

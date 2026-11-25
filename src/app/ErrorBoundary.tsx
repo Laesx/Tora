@@ -42,7 +42,7 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
             Something went wrong
           </div>
           <p className="text-xs text-text-secondary">
-            This part of Tora crashed. The error was written to the log (Settings → Diagnostics → Logs).
+            Error details were written to Settings → Diagnostics → Logs.
           </p>
           <pre className="text-[11px] font-mono text-red-300 bg-bg-primary rounded-xl p-3 max-h-48 overflow-auto whitespace-pre-wrap break-all">
             {errorText(error)}

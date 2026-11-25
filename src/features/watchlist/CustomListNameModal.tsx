@@ -68,9 +68,6 @@ export const CustomListNameModal: React.FC<CustomListNameModalProps> = ({
             <h3 className="text-sm font-bold text-text-primary truncate">
               {renaming !== undefined ? `Rename "${renaming}"` : "New custom list"}
             </h3>
-            <p className="text-[11px] text-text-muted">
-              {renaming !== undefined ? "Renamed on your AniList account; its anime stay in it" : "Created on your AniList account"}
-            </p>
           </div>
         </div>
 

@@ -44,7 +44,7 @@ pub fn init(app: &AppHandle, settings: &AppSettings) -> tauri::Result<()> {
     let detection = CheckMenuItem::with_id(
         app,
         "detection",
-        "Playback detection",
+        "Media detection",
         true,
         settings.recognition_enabled,
         None::<&str>,

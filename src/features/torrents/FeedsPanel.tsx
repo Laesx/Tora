@@ -92,7 +92,7 @@ function useRowDrag(onMove: (from: number, to: number) => void) {
       else return;
       e.preventDefault();
     },
-    title: "Drag to reorder (or focus and use ↑ / ↓)",
+    title: "Drag to reorder",
     className: "p-1 rounded text-text-muted hover:text-text-primary cursor-grab active:cursor-grabbing touch-none",
   });
 
@@ -115,12 +115,12 @@ const NyaaBuilder: React.FC<{ search: boolean; onBuild: (url: string, name: stri
       <div className="grid grid-cols-1 md:grid-cols-[minmax(0,2fr)_minmax(0,1.3fr)_minmax(0,1fr)] gap-2.5">
         <div>
           <label className="block text-[11px] text-text-muted mb-1">
-            {search ? "Extra words after the title (optional)" : "Search words (blank = latest uploads)"}
+            {search ? "Extra terms (optional)" : "Query (optional)"}
           </label>
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder={search ? "e.g. 1080p" : "e.g. Erai 1080p|Judas|Ironclad"}
+            placeholder={search ? "1080p" : "SubsPlease 1080p | Judas"}
             className={inputClass}
           />
         </div>
@@ -192,15 +192,12 @@ export const FeedsPanel: React.FC<FeedsPanelProps> = ({ feeds, searchFeeds, onSa
             <h2 className="text-sm font-bold text-text-primary flex items-center gap-2">
               <Rss className="w-4 h-4 text-accent" /> General feeds
             </h2>
-            <p className="text-[11px] text-text-muted mt-1 max-w-2xl">
-              Any RSS torrent feed: Nyaa (e.g. <code className="font-mono">…&amp;q=Erai+1080p|Judas|Ironclad</code>),
-              SubsPlease (<code className="font-mono">https://subsplease.org/rss/?t&amp;r=1080</code>) and others. Tick
-              several on the Releases tab to check them at once. They're fetched when you press Refresh, then kept in
-              memory and refreshed on the{" "}
+            <p className="text-[11px] text-text-muted mt-1">
+              RSS feeds checked on the Releases tab. Configure auto-refresh in{" "}
               <button onClick={onOpenSettings} className="text-accent hover:underline">
-                refresh interval (Settings → Torrents)
+                Settings → Torrents
               </button>
-              . Drag the handles to change the order of the chips.
+              .
             </p>
           </div>
           <div className="flex items-center gap-2 shrink-0">
@@ -247,13 +244,13 @@ export const FeedsPanel: React.FC<FeedsPanelProps> = ({ feeds, searchFeeds, onSa
               <input
                 value={f.name}
                 onChange={(e) => set(i, { name: e.target.value })}
-                placeholder="Name (defaults to the site)"
+                placeholder="Name (optional)"
                 className={`${inputClass} font-semibold !w-56`}
               />
               <input
                 value={f.url}
                 onChange={(e) => set(i, { url: e.target.value })}
-                placeholder="https://… RSS URL"
+                placeholder="https://…"
                 spellCheck={false}
                 className={`${inputClass} font-mono flex-1 min-w-[260px] ${f.url && !isHttp(f.url) ? "!border-red-500/60" : ""}`}
               />
@@ -276,11 +273,8 @@ export const FeedsPanel: React.FC<FeedsPanelProps> = ({ feeds, searchFeeds, onSa
             <h2 className="text-sm font-bold text-text-primary flex items-center gap-2">
               <Search className="w-4 h-4 text-accent" /> Search feeds
             </h2>
-            <p className="text-[11px] text-text-muted mt-1 max-w-2xl">
-              Used by the search box and “Find torrents” for an anime. <code className="font-mono">%title%</code> is
-              replaced by the anime's title, e.g.{" "}
-              <code className="font-mono">https://nyaa.si/?page=rss&amp;c=0_0&amp;f=0&amp;q=%title%</code>. Pick which
-              one to use from the dropdown next to the search box (the first one is used until you pick).
+            <p className="text-[11px] text-text-muted mt-1">
+              RSS templates for anime searches — use <code className="font-mono">%title%</code> for the query.
             </p>
           </div>
           <div className="flex items-center gap-2 shrink-0">
@@ -318,7 +312,7 @@ export const FeedsPanel: React.FC<FeedsPanelProps> = ({ feeds, searchFeeds, onSa
                   <input
                     value={f.name}
                     onChange={(e) => setSearch(i, { name: e.target.value })}
-                    placeholder="Name (defaults to the site)"
+                    placeholder="Name (optional)"
                     className={`${inputClass} font-semibold !w-56`}
                   />
                   <input
@@ -337,7 +331,7 @@ export const FeedsPanel: React.FC<FeedsPanelProps> = ({ feeds, searchFeeds, onSa
                     <Trash2 className="w-4 h-4" />
                   </button>
                 </div>
-                {missing && <div className="text-[11px] text-red-400 pl-7">Add %title% where the anime's title goes.</div>}
+                {missing && <div className="text-[11px] text-red-400 pl-7">URL must include %title%.</div>}
               </div>
             );
           })}

@@ -38,7 +38,7 @@ export function useStoredAccounts() {
       try {
         setBusy(trackerId);
         await toraApi.startTrackerSignIn(trackerId);
-        showToast(`Opened ${name} in your browser — approve Tora there to sign in`, "info");
+        showToast(`Finish signing in to ${name} in your browser`, "info");
       } catch (err) {
         showToast(errorText(err), "error");
       } finally {

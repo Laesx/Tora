@@ -55,10 +55,9 @@ export const DeleteCustomListModal: React.FC<DeleteCustomListModalProps> = ({ na
         </div>
 
         <p className="text-xs text-text-secondary leading-relaxed">
-          This removes the list from your AniList account right away.{" "}
           {count > 0
-            ? `The ${count} anime in it stay on your list; only their membership in "${name}" is removed.`
-            : "It has no anime in it."}
+            ? `The ${count} anime in "${name}" will stay on your main list.`
+            : `Remove "${name}" from your custom lists?`}
         </p>
         {error && <p className="text-[11px] text-rose-400">{error}</p>}
 

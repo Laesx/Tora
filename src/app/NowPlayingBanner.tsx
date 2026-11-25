@@ -46,7 +46,7 @@ export const NowPlayingBanner: React.FC<NowPlayingBannerProps> = ({
           session.auto_synced ? (
             <span className="text-emerald-400 font-semibold flex items-center gap-1">
               <CheckCircle2 className="w-4 h-4" />
-              Progress Scrobbled!
+              Progress updated
             </span>
           ) : alreadySeen ? null : session.awaiting_confirmation ? (
             <button
@@ -57,7 +57,7 @@ export const NowPlayingBanner: React.FC<NowPlayingBannerProps> = ({
               Update to episode {ep}
             </button>
           ) : session.waiting_for_close ? (
-            <span className="text-amber-300 text-[11px] font-semibold">Updates when the player closes</span>
+            <span className="text-amber-300 text-[11px] font-semibold">Updates when player closes</span>
           ) : (
             <span className="text-amber-300 font-mono text-[11px]">
               Auto-updating in <UpdateCountdown session={session} delaySeconds={recognitionDelaySeconds} />s...
@@ -69,7 +69,7 @@ export const NowPlayingBanner: React.FC<NowPlayingBannerProps> = ({
             className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-500/20 border border-amber-500/40 text-amber-300 font-semibold hover:bg-amber-500/30 transition text-[11px]"
           >
             <AlertTriangle className="w-3.5 h-3.5" />
-            Unmatched — Select Anime
+            Link to anime
           </button>
         )}
         <button

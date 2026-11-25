@@ -4,6 +4,7 @@ import { Clock, Download, FolderOpen, RotateCcw, Zap } from "lucide-react";
 import { AppSettings, DetectedTorrentApp } from "@/lib/types";
 import { toraApi } from "@/lib/api";
 import { useToast } from "@/contexts/toast";
+import { ToggleRow } from "@/features/settings/SettingRow";
 
 interface TorrentSettingsProps {
   settings: AppSettings;
@@ -48,7 +49,7 @@ export const TorrentSettingsSection: React.FC<TorrentSettingsProps> = ({ setting
     const v = value.trim();
     if (v === settings.torrent_download_folder.trim()) return;
     await update({ torrent_download_folder: v });
-    if (v) showToast("Download folder saved; it's watched as a library folder", "success");
+    if (v) showToast("Download folder saved and added to library", "success");
   };
 
   const browseApp = async () => {
@@ -77,9 +78,8 @@ export const TorrentSettingsSection: React.FC<TorrentSettingsProps> = ({ setting
           Torrent application
         </h2>
         <p className="text-[11px] text-text-muted">
-          Tora launches your torrent app with each torrent and its save folder, like Taiga. qBittorrent starts if it's
-          closed and queues every torrent without a dialog. µTorrent, Deluge, PicoTorrent, aria2 and Transmission get
-          their own flags; any other app just receives the file.
+          Supported clients (qBittorrent, µTorrent, Deluge, PicoTorrent, aria2, Transmission) receive the save folder
+          automatically.
         </p>
         <div className="flex items-center gap-3 rounded-xl bg-bg-primary border border-border-subtle px-3.5 py-3">
           <div className="min-w-0 flex-1">
@@ -99,7 +99,6 @@ export const TorrentSettingsSection: React.FC<TorrentSettingsProps> = ({ setting
             <button
               onClick={() => void update({ torrent_app_path: "" })}
               className="px-3 py-2 rounded-xl text-text-secondary hover:text-text-primary text-xs flex items-center gap-1.5 shrink-0"
-              title="Go back to auto-detection"
             >
               <RotateCcw className="w-3.5 h-3.5" /> Auto-detect
             </button>
@@ -122,9 +121,7 @@ export const TorrentSettingsSection: React.FC<TorrentSettingsProps> = ({ setting
           Download folder
         </h2>
         <p className="text-[11px] text-text-muted">
-          Releases go to the anime's own folder (or the folder its episodes are in). An anime with neither gets a new
-          folder named after it inside this one, which becomes its folder from then on. This folder is added to your
-          library so new files are matched.
+          Default folder for anime without a linked folder. Automatically watched as a library folder.
         </p>
         <div className="flex items-center gap-2">
           <input
@@ -142,15 +139,12 @@ export const TorrentSettingsSection: React.FC<TorrentSettingsProps> = ({ setting
             <FolderOpen className="w-3.5 h-3.5" /> Browse…
           </button>
         </div>
-        <label className="flex items-center gap-2 text-xs text-text-secondary cursor-pointer">
-          <input
-            type="checkbox"
-            checked={settings.torrent_create_subfolder}
-            onChange={(e) => void update({ torrent_create_subfolder: e.target.checked })}
-            className="rounded accent-accent"
-          />
-          Create a subfolder per anime
-        </label>
+        <ToggleRow
+          flush
+          label="Create a subfolder per anime"
+          checked={settings.torrent_create_subfolder}
+          onChange={(checked) => void update({ torrent_create_subfolder: checked })}
+        />
       </div>
 
       <div className={cardClass}>
@@ -158,9 +152,6 @@ export const TorrentSettingsSection: React.FC<TorrentSettingsProps> = ({ setting
           <Clock className="w-4 h-4 text-accent" />
           Feed refresh
         </h2>
-        <p className="text-[11px] text-text-muted">
-          Feeds stay in memory between visits; Refresh on the Torrents tab always fetches them again.
-        </p>
         <div className="max-w-xs">
           <select
             value={settings.torrent_refresh_minutes}
@@ -174,23 +165,14 @@ export const TorrentSettingsSection: React.FC<TorrentSettingsProps> = ({ setting
             ))}
           </select>
         </div>
-        <label className="flex items-start gap-2 text-xs text-text-secondary cursor-pointer">
-          <input
-            type="checkbox"
-            checked={settings.torrent_auto_download}
-            disabled={settings.torrent_refresh_minutes === 0}
-            onChange={(e) => void update({ torrent_auto_download: e.target.checked })}
-            className="rounded accent-accent mt-0.5"
-          />
-          <span>
-            <span className="flex items-center gap-1 font-semibold text-text-primary">
-              <Zap className="w-3.5 h-3.5 text-amber-400" /> Download auto-selected releases after each refresh
-            </span>
-            <span className="text-[11px] text-text-muted">
-              New episodes of anime you're watching, picked by your priority, fansubs and filters.
-            </span>
-          </span>
-        </label>
+        <ToggleRow
+          flush
+          icon={Zap}
+          label="Download auto-selected releases after each refresh"
+          disabled={settings.torrent_refresh_minutes === 0}
+          checked={settings.torrent_auto_download}
+          onChange={(checked) => void update({ torrent_auto_download: checked })}
+        />
       </div>
     </>
   );

@@ -22,16 +22,9 @@ export const TrackerSupportTable: React.FC<{ trackers: TrackerDescriptor[]; acti
         className="flex items-center gap-1 text-xs font-bold text-text-primary hover:text-accent transition cursor-pointer"
       >
         <ChevronRight className={`w-3.5 h-3.5 transition-transform ${open ? "rotate-90" : ""}`} />
-        What each tracker supports
+        Supported features
       </button>
       {open && (
-      <>
-      <div>
-        <p className="text-[11px] text-text-muted leading-relaxed">
-          Every tracker syncs your list, searches anime, browses seasons and shows related anime. While a tracker is
-          active, what it doesn't support is hidden or turned off.
-        </p>
-      </div>
       <div className="overflow-x-auto rounded-xl border border-border-subtle">
         <table className="w-full text-[11px]">
           <thead>
@@ -76,7 +69,6 @@ export const TrackerSupportTable: React.FC<{ trackers: TrackerDescriptor[]; acti
           </tbody>
         </table>
       </div>
-      </>
       )}
     </div>
   );

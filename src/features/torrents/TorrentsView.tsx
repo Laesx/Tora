@@ -502,7 +502,7 @@ export const TorrentsView: React.FC<TorrentsViewProps> = ({
           <button
             onClick={onOpenSettings}
             className="px-2.5 py-1.5 rounded-lg text-text-secondary hover:text-text-primary transition"
-            title="Torrent settings (app, download folder, refresh interval)"
+            title="Torrent settings"
           >
             <Settings className="w-3.5 h-3.5" />
           </button>
@@ -524,7 +524,7 @@ export const TorrentsView: React.FC<TorrentsViewProps> = ({
                 <input
                   value={searchText}
                   onChange={(e) => setSearchText(e.target.value)}
-                  placeholder="Search for an anime (Enter)…"
+                  placeholder="Search torrents…"
                   className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-bg-primary border border-border-subtle text-xs text-text-primary focus:outline-none focus:border-accent"
                 />
               </form>
@@ -532,7 +532,7 @@ export const TorrentsView: React.FC<TorrentsViewProps> = ({
                 <select
                   value={activeSearchFeed?.id ?? ""}
                   onChange={(e) => void chooseSearchFeed(Number(e.target.value))}
-                  title="Search feed used for searches"
+                  title="Search feed"
                   className="px-3 py-2.5 rounded-xl bg-bg-primary border border-border-subtle text-xs text-text-primary max-w-[220px]"
                 >
                   {searchFeeds.map((f) => (
@@ -546,7 +546,6 @@ export const TorrentsView: React.FC<TorrentsViewProps> = ({
                 onClick={() => void load(true)}
                 disabled={loading}
                 className="px-4 py-2.5 rounded-xl bg-bg-primary border border-border-subtle hover:bg-bg-tertiary text-text-primary text-xs font-semibold transition flex items-center gap-1.5"
-                title="Fetch the feeds again"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
                 Refresh
@@ -619,7 +618,7 @@ export const TorrentsView: React.FC<TorrentsViewProps> = ({
 
           {!search && board && board.unfetched.length > 0 && board.fetched_at != null && (
             <div className="text-[11px] text-text-muted px-1">
-              {board.unfetched.join(", ")} not fetched yet. Press Refresh to fetch {board.unfetched.length === 1 ? "it" : "them"}.
+              {board.unfetched.join(", ")} not fetched yet.
             </div>
           )}
 
@@ -650,8 +649,8 @@ export const TorrentsView: React.FC<TorrentsViewProps> = ({
             </div>
           ) : visibleCards.length === 0 ? (
             <div className="bg-bg-secondary border border-border-subtle rounded-2xl py-14 text-center text-xs text-text-muted">
-              {search ? "No releases found for this search." : "No releases for anime in your list in these feeds."}
-              {unmatchedCount > 0 && !showUnmatched && " Turn on “Not in my list” to see the rest."}
+              {search ? "No releases found for this search." : "No matching releases in these feeds."}
+              {unmatchedCount > 0 && !showUnmatched && " Enable “Not in my list” to show unmatched releases."}
             </div>
           ) : (
             <div className={`space-y-3 transition-opacity ${loading ? "opacity-60" : ""}`}>
