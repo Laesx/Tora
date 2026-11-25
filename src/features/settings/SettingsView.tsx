@@ -150,6 +150,7 @@ const CREDITS: { name: string; role: string; license?: string; url: string }[] =
   { name: "anime-relations", role: "Sequel episode redirection", license: "CC0-1.0", url: "https://github.com/erengy/anime-relations" },
   { name: "AniList", role: "List sync, metadata, seasons & schedule", url: "https://anilist.co" },
   { name: "MyAnimeList", role: "List sync, metadata & seasons", url: "https://myanimelist.net" },
+  { name: "Jikan", role: "MyAnimeList characters, staff & source manga", license: "MIT", url: "https://jikan.moe" },
   { name: "Nyaa, SubsPlease & other RSS feeds", role: "Torrent feeds and search", url: "https://nyaa.si" },
   { name: "Tauri", role: "Desktop app framework", license: "MIT / Apache-2.0", url: "https://tauri.app" },
   { name: "React & Tailwind CSS", role: "User interface", license: "MIT", url: "https://react.dev" },

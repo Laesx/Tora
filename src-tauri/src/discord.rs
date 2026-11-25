@@ -6,6 +6,7 @@
 //! limits activity updates), connects lazily and retries while Discord isn't running.
 
 use crate::db::AnimeEntry;
+use crate::trackers::TrackerDescriptor;
 use discord_rich_presence::activity::{
     Activity, ActivityType, Assets, Button, StatusDisplayType, Timestamps,
 };
@@ -27,12 +28,14 @@ const MAX_FIELD_CHARS: usize = 128;
 pub struct PresenceAnime {
     pub title: String,
     pub cover_url: Option<String>,
-    pub anilist_url: Option<String>,
+    /// The anime's page on the active tracker and that tracker's name ("View on MyAnimeList")
+    pub page: Option<(String, String)>,
 }
 
 impl PresenceAnime {
-    /// The title in the user's title language (missing English / Native titles fall back to Romaji).
-    pub fn from_entry(entry: &AnimeEntry, title_language: &str) -> Self {
+    /// The title in the user's title language (missing English / Native titles fall back to Romaji), and the
+    /// anime's page on `tracker` (the active one): its stored page, else the tracker's link template.
+    pub fn from_entry(entry: &AnimeEntry, title_language: &str, tracker: Option<&TrackerDescriptor>) -> Self {
         let localized = match title_language {
             "english" => entry.title_english.as_deref(),
             "native" => entry.title_native.as_deref(),
@@ -43,15 +46,19 @@ impl PresenceAnime {
             .filter(|t| !t.is_empty())
             .unwrap_or(&entry.title_romaji)
             .to_string();
-        let anilist_url = entry
-            .site_url
-            .clone()
-            .filter(|u| u.starts_with("https://"))
-            .or_else(|| entry.anilist_id.map(|id| format!("https://anilist.co/anime/{}", id)));
+        let page = tracker.and_then(|t| {
+            let url = entry
+                .site_url
+                .clone()
+                .filter(|u| u.starts_with("https://"))
+                .or_else(|| Some(t.links.anime.replace("{id}", &entry.id.to_string())))
+                .filter(|u| u.starts_with("https://"))?;
+            Some((url, t.name.clone()))
+        });
         Self {
             title,
             cover_url: Some(entry.cover_image.clone()).filter(|u| u.starts_with("https://")),
-            anilist_url,
+            page,
         }
     }
 }
@@ -104,12 +111,13 @@ impl DiscordPresence {
             *cache = Some((anime_id, title_language.to_string(), anime));
         }
     }
-}
 
-/// "View on MyAnimeList" for a MyAnimeList page, "View on AniList" otherwise (the anime's tracker page).
-fn view_on_label(url: &str) -> String {
-    let site = if url.contains("myanimelist.net") { "MyAnimeList" } else { "AniList" };
-    format!("View on {}", site)
+    /// Forget the cached anime: after an account switch the same id can be another tracker's anime.
+    pub fn clear_cache(&self) {
+        if let Ok(mut cache) = self.cache.lock() {
+            *cache = None;
+        }
+    }
 }
 
 fn truncate(s: &str) -> String {
@@ -135,8 +143,8 @@ fn set_presence(client: &mut DiscordIpcClient, info: &PresenceInfo) -> Result<()
     let title = truncate(&format!("{:<2}", info.anime.title));
     let state = episode_label(info);
     let mut buttons = Vec::new();
-    let label = info.anime.anilist_url.as_deref().map(view_on_label);
-    if let (Some(url), Some(label)) = (info.anime.anilist_url.as_deref(), label.as_deref()) {
+    let page_label = info.anime.page.as_ref().map(|(_, site)| format!("View on {}", site));
+    if let (Some((url, _)), Some(label)) = (info.anime.page.as_ref(), page_label.as_deref()) {
         buttons.push(Button::new(label, url));
     }
     buttons.push(Button::new("Get Tora", TORA_REPO_URL));
@@ -153,7 +161,7 @@ fn set_presence(client: &mut DiscordIpcClient, info: &PresenceInfo) -> Result<()
         .timestamps(Timestamps::new().start(info.started_at_unix * 1000))
         .assets(assets)
         .buttons(buttons);
-    if let Some(url) = info.anime.anilist_url.as_deref() {
+    if let Some((url, _)) = info.anime.page.as_ref() {
         activity = activity.details_url(url);
     }
     if let Some(state) = state.as_deref() {
@@ -246,7 +254,7 @@ mod tests {
             anime: PresenceAnime {
                 title: "Sousou no Frieren".into(),
                 cover_url: None,
-                anilist_url: None,
+                page: None,
             },
             episode,
             total_episodes: total,
@@ -259,6 +267,23 @@ mod tests {
         assert_eq!(episode_label(&info(Some(5), Some(28))).as_deref(), Some("Episode 5 of 28"));
         assert_eq!(episode_label(&info(Some(5), None)).as_deref(), Some("Episode 5"));
         assert_eq!(episode_label(&info(None, Some(28))), None);
+    }
+
+    #[test]
+    fn the_page_is_the_active_trackers() {
+        use crate::trackers::Tracker;
+        let tracker = crate::trackers::mal::MalPlugin::new().descriptor();
+        let mut entry = crate::db::test_entry(52991, "Sousou no Frieren");
+        entry.site_url = None;
+        let anime = PresenceAnime::from_entry(&entry, "romaji", Some(&tracker));
+        assert_eq!(
+            anime.page,
+            Some(("https://myanimelist.net/anime/52991".to_string(), "MyAnimeList".to_string()))
+        );
+        entry.site_url = Some("https://myanimelist.net/anime/52991/Sousou_no_Frieren".into());
+        let anime = PresenceAnime::from_entry(&entry, "romaji", Some(&tracker));
+        assert_eq!(anime.page.unwrap().0, "https://myanimelist.net/anime/52991/Sousou_no_Frieren");
+        assert_eq!(PresenceAnime::from_entry(&entry, "romaji", None).page, None);
     }
 
     #[test]

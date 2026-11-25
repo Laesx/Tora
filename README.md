@@ -85,7 +85,7 @@ Tora uses the same detection and parsing libraries as Taiga, so recognition shou
 
 What you give up:
 
-- **Fewer trackers.** Only AniList for now (no MyAnimeList or Kitsu).
+- **Fewer trackers.** AniList and MyAnimeList only (no Kitsu). Some features (airing schedule, custom lists, Following, activity import) exist only on AniList.
 - **Heavier.** Tora runs on Tauri, so it uses more memory than Taiga. (Around 200MB total)
 
 
@@ -98,7 +98,7 @@ What you give up:
 - [ ] Add system notifications when an episode airs (or is available to download).
 - [ ] Add keyboard shortcuts throughout the application.
 - [ ] Improve keyboard navigation throughout the app.
-- [ ] Add support for MyAnimeList and Kitsu (this is low priority and will take a while since it's coupled pretty hard to Anilist currently).
+- [x] Add support for MyAnimeList.
 
 
 ## Building

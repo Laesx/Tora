@@ -597,7 +597,7 @@ impl TrackerSyncService {
                 match result {
                     Ok(items) => fetched.extend(items),
                     Err(e) => {
-                        log::warn!(target: "sync", "saga {}: AniList not reached: {}", root, e);
+                        log::warn!(target: "sync", "saga {}: tracker not reached: {}", root, e);
                         error = Some(e.to_string());
                     }
                 }
@@ -655,7 +655,7 @@ impl TrackerSyncService {
         }
 
         if !rows.contains_key(&root) {
-            return Err(error.unwrap_or_else(|| "AniList has no data for this anime".into()));
+            return Err(error.unwrap_or_else(|| "The tracker has no data for this anime".into()));
         }
         let mut graph = build_saga(root, &rows);
         graph.unwalked = unwalked.len();

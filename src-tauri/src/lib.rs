@@ -853,11 +853,17 @@ async fn presence_anime_for(
         Some(anime) => anime,
         None => {
             let db = state.db.clone();
+            let trackers = state.trackers.clone();
             let lang = title_language.to_string();
             let anime = tokio::task::spawn_blocking(move || {
+                let tracker = db
+                    .active_tracker_id()
+                    .ok()
+                    .and_then(|id| trackers.get(&id))
+                    .map(|t| t.descriptor());
                 db.get_anime_entry_by_id(anime_id)
                     .ok()
-                    .map(|entry| PresenceAnime::from_entry(&entry, &lang))
+                    .map(|entry| PresenceAnime::from_entry(&entry, &lang, tracker.as_ref()))
             })
             .await
             .ok()??;
@@ -2080,6 +2086,8 @@ async fn finish_code_sign_in(
 /// Tell the app, bring its window forward and sync the newly linked account in the background (the service
 /// emits `tracker-sync-started` and `tracker-list-synced` / `tracker-sync-failed`).
 fn after_sign_in(app_handle: &tauri::AppHandle, sync: Arc<TrackerSyncService>, account: &AccountInfo) {
+    // The cached now-playing anime may be the previous account's (ids are per tracker)
+    app_handle.state::<AppState>().discord.clear_cache();
     let _ = app_handle.emit("tracker-auth-updated", account);
     if let Some(win) = app_handle.get_webview_window("main") {
         let _ = win.unminimize();

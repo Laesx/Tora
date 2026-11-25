@@ -3005,7 +3005,7 @@ impl Database {
         if delete_missing {
             if remote_media_ids.is_empty() && !local_by_media.is_empty() {
                 stats.deletion_skipped_reason = Some(format!(
-                    "AniList returned an empty list; skipped deleting {} local entries",
+                    "The tracker returned an empty list; skipped deleting {} local entries",
                     local_by_media.len()
                 ));
             } else {
@@ -3302,19 +3302,21 @@ impl Database {
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         let mut tombstones = Vec::new();
         for &aid in anime_ids {
-            let row: Option<(Option<i64>, Option<i64>, String)> = tx
+            let row: Option<(Option<i64>, String)> = tx
                 .query_row(
-                    "SELECT anilist_id, anilist_list_entry_id, title_romaji FROM anime_entries WHERE id = ?1",
+                    "SELECT anilist_list_entry_id, title_romaji FROM anime_entries WHERE id = ?1",
                     params![aid],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?)),
                 )
                 .optional()
                 .map_err(|e| e.to_string())?;
-            let Some((anilist_id, list_entry_id, title)) = row else {
+            let Some((list_entry_id, title)) = row else {
                 continue;
             };
             delete_entry_rows_tx(&tx, aid)?;
-            if let Some(media_id) = anilist_id {
+            // The local id is the tracker's own media id
+            {
+                let media_id = aid;
                 tx.execute(
                     "INSERT OR REPLACE INTO tracker_pending_deletions (media_id, list_entry_id, title, created_at)
                      VALUES (?1, ?2, ?3, ?4)",

@@ -1,4 +1,4 @@
-//! Trackers: the list services Tora syncs with (AniList and MyAnimeList; Kitsu later).
+//! Trackers: the list services Tora syncs with (AniList and MyAnimeList).
 //!
 //! A tracker is one [`Tracker`] object made of parts, so callers ask only for what they use:
 //! - [`TrackerAuth`]: who a token belongs to;
@@ -844,7 +844,7 @@ mod tests {
         assert!(registry.get(DEFAULT_TRACKER).is_some());
         assert!(registry.get("mal").is_some());
         // An unknown id is never answered by another tracker
-        assert!(registry.get("kitsu").is_none());
+        assert!(registry.get("unknown").is_none());
         let ids: Vec<String> = registry.descriptors().into_iter().map(|d| d.id).collect();
         assert_eq!(ids, vec!["anilist", "mal"]);
     }

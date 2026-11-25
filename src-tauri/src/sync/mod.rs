@@ -410,7 +410,7 @@ pub fn today_string() -> String {
     chrono::Local::now().format("%Y-%m-%d").to_string()
 }
 
-/// Refresh a token this long before it expires (MAL / Kitsu tokens last 30 days).
+/// Refresh a token this long before it expires (MyAnimeList tokens last 30 days).
 const TOKEN_REFRESH_MARGIN: i64 = 3 * 24 * 3600;
 
 /// The account's token expires within [`TOKEN_REFRESH_MARGIN`] and can be refreshed.
@@ -902,7 +902,7 @@ impl TrackerSyncService {
 
         self.sync_active_session(std::slice::from_ref(&entry));
 
-        if signed_in && entry.sync_pending && entry.anilist_id.is_some() {
+        if signed_in && entry.sync_pending {
             let this = Arc::clone(self);
             let id = entry.id;
             tokio::spawn(async move {
@@ -931,7 +931,7 @@ impl TrackerSyncService {
         if signed_in {
             let ids: Vec<i64> = entries
                 .iter()
-                .filter(|e| e.sync_pending && e.anilist_id.is_some())
+                .filter(|e| e.sync_pending)
                 .map(|e| e.id)
                 .collect();
             if !ids.is_empty() {
@@ -1085,13 +1085,14 @@ impl TrackerSyncService {
         .await
     }
 
-    /// Add an anime (e.g. from Discover). Requires an AniList id. If it is already in the list, its user
-    /// state is kept and only metadata is refreshed (no push). Otherwise it is inserted with normalized
-    /// status/dates and pushed. Returns the stored entry.
+    /// Add an anime (e.g. from Seasons). Its `id` is the active tracker's own id (AniList's, MyAnimeList's).
+    /// If it is already in the list, its user state is kept and only metadata is refreshed (no push).
+    /// Otherwise it is inserted with normalized status/dates and pushed. Returns the stored entry.
     pub async fn add_entry(self: &Arc<Self>, entry: AnimeEntry) -> Result<AnimeEntry, String> {
-        let media_id = entry
-            .anilist_id
-            .ok_or_else(|| "Cannot add an anime without an AniList id".to_string())?;
+        let media_id = entry.id;
+        if media_id <= 0 {
+            return Err("Cannot add an anime without a tracker id".to_string());
+        }
         let today = today_string();
         let (stored, push_id) = self
             .blocking(move |db| {
@@ -1225,12 +1226,8 @@ impl TrackerSyncService {
             }
             return Ok(false);
         }
-        let Some(media_id) = entry.anilist_id else {
-            let _ = self
-                .blocking(move |db| db.set_sync_result(anime_id, false, None, None))
-                .await;
-            return Ok(false);
-        };
+        // The local id is the tracker's own id (AniList's has an `anilist_id` too, MyAnimeList's doesn't)
+        let media_id = entry.id;
 
         let update = TrackerEntryUpdate {
             media_id,
@@ -3771,14 +3768,24 @@ mod tests {
         assert_eq!(f.user_completed_at.as_deref(), Some(today_string().as_str()));
         wait_until(|| !db.get_anime_entry_by_id(11).unwrap().sync_pending).await;
 
-        let mut no_id = test_entry(12, "No id");
-        no_id.anilist_id = None;
-        assert!(svc.add_entry(no_id).await.is_err());
+        // A MyAnimeList anime has no AniList id: added and pushed by its own id
+        let mut mal_anime = test_entry(12, "MAL anime");
+        mal_anime.anilist_id = None;
+        mal_anime.mal_id = Some(12);
+        svc.add_entry(mal_anime).await.unwrap();
+        wait_until(|| !db.get_anime_entry_by_id(12).unwrap().sync_pending).await;
+        let mut edit = UserStateChange::new(12, ChangeSource::Manual);
+        edit.progress = Some(3);
+        svc.apply_local_update(edit).await.unwrap();
+        wait_until(|| !db.get_anime_entry_by_id(12).unwrap().sync_pending).await;
 
-        svc.delete_entries(vec![10]).await.unwrap();
+        svc.delete_entries(vec![10, 12]).await.unwrap();
         assert!(db.get_anime_entry_by_id(10).is_err());
         wait_until(|| db.count_pending_deletions().unwrap() == 0).await;
-        assert_eq!(*mock.deletes.lock().unwrap(), vec![(10, None)]);
+        let mut deletes = mock.deletes.lock().unwrap().clone();
+        deletes.sort();
+        // 12 was pushed, so its delete carries the list-entry id the push returned
+        assert_eq!(deletes, vec![(10, None), (12, Some(5012))]);
     }
 
     fn profile(user_id: i64, username: &str) -> TrackerUserProfile {
